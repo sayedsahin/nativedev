@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=NativeDev
+Comment=Native Debian development environment manager
+Exec=nativedev
+Icon=applications-development
+Terminal=false
+Categories=Development;System;
+StartupNotify=true

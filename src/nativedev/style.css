@@ -1,0 +1,85 @@
+window {
+  font-size: 14px;
+}
+
+.app-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.page-title {
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.section-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.row-title {
+  font-weight: 600;
+}
+
+.muted {
+  opacity: 0.68;
+}
+
+.sidebar {
+  background: alpha(@theme_fg_color, 0.035);
+  border-right: 1px solid alpha(@theme_fg_color, 0.10);
+  padding: 10px 8px;
+}
+
+.sidebar row {
+  border-radius: 8px;
+  margin: 2px 0;
+}
+
+.sidebar row:selected {
+  background: alpha(@theme_selected_bg_color, 0.18);
+}
+
+.card {
+  padding: 16px;
+  border: 1px solid alpha(@theme_fg_color, 0.12);
+  border-radius: 12px;
+  background: alpha(@theme_fg_color, 0.025);
+}
+
+.service-row {
+  padding: 9px 0;
+  border-top: 1px solid alpha(@theme_fg_color, 0.08);
+}
+
+.pill {
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: alpha(@theme_fg_color, 0.08);
+}
+
+.status-ok {
+  color: #2e7d32;
+  background: alpha(#2e7d32, 0.12);
+}
+
+.status-warn {
+  color: #a35d00;
+  background: alpha(#a35d00, 0.12);
+}
+
+.error-text {
+  color: #b3261e;
+}
+
+.statusbar {
+  opacity: 0.80;
+}
+
+entry {
+  min-height: 34px;
+}
+
+button {
+  min-height: 34px;
+}

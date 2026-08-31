@@ -1,0 +1,13 @@
+Source: nativedev
+Section: devel
+Priority: optional
+Maintainer: NativeDev contributors
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: nativedev
+Architecture: all
+Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-4.0, pkexec
+Description: minimal native Debian development environment manager
+ NativeDev provides a GTK4 interface for native PHP, Nginx, Node/NVM,
+ databases, cache services, local .test DNS and HTTPS development tooling.

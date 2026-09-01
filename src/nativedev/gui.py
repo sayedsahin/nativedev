@@ -114,7 +114,7 @@ class Page(Gtk.ScrolledWindow):
     def busy(self, widget: Gtk.Widget, active: bool):
         widget.set_sensitive(not active)
 
-    def action(self, button: Gtk.Widget, fn: Callable, *, success_message: str, after: Callable | None = None):
+    def action(self, button: Gtk.Button, fn: Callable, *, success_message: str, after: Callable | None = None):
         self.busy(button, True)
         self.window.set_activity(True, "Working…")
 
@@ -224,6 +224,7 @@ class PhpPage(Page):
                     "installed": fpm_installed,
                     "running": self.context.php.fpm_running(version) if fpm_installed else False,
                     "enabled_state": self.context.php.fpm_enabled_state(version) if fpm_installed else "n/a",
+                    "developer_pool": self.context.php.developer_pool_configured(version) if fpm_installed else False,
                 }
             return {
                 "sury": self.context.php.sury_configured(),
@@ -233,6 +234,7 @@ class PhpPage(Page):
                 "available": available,
                 "versions": versions,
                 "cli": self.context.php.cli_version(),
+                "developer_user": self.context.php.developer_user,
                 "fpm": fpm,
             }
 
@@ -295,6 +297,10 @@ class PhpPage(Page):
                     top.append(status_pill("FPM running" if fpm.get("running") else "FPM stopped", fpm.get("running")))
                     state = fpm.get("enabled_state", "unknown")
                     top.append(status_pill("Enabled" if state.startswith("enabled") else state.capitalize(), state.startswith("enabled") if state in {"enabled", "disabled"} else None))
+                    if fpm.get("developer_pool"):
+                        top.append(status_pill(f"*.test as {data['developer_user']}", True))
+                    else:
+                        top.append(status_pill("*.test pool not configured", None))
                 else:
                     top.append(status_pill("CLI installed", True))
             else:
@@ -321,6 +327,18 @@ class PhpPage(Page):
 
                 fpm = data["fpm"].get(version, {})
                 if fpm.get("installed"):
+                    if not fpm.get("developer_pool"):
+                        pool = Gtk.Button(label="Configure *.test pool")
+                        pool.connect(
+                            "clicked",
+                            lambda _b, v=version, btn=pool: confirm(
+                                self.window,
+                                f"Configure PHP {v} for *.test?",
+                                f"NativeDev will create its own PHP-FPM pool running as {data['developer_user']}. Debian/Sury's www pool is not modified.",
+                                lambda: self.action(btn, lambda: self.context.php.ensure_developer_pool(v), success_message=f"PHP {v} NativeDev pool configured", after=self.refresh),
+                            ),
+                        )
+                        actions.append(pool)
                     if fpm.get("running"):
                         stop = Gtk.Button(label="Stop")
                         stop.connect("clicked", lambda _b, v=version, btn=stop: self.action(btn, lambda: self.context.php.stop_fpm(v), success_message=f"PHP {v} FPM stopped", after=self.refresh))
@@ -645,18 +663,15 @@ class ServicesPage(Page):
             self.list_box.remove(child)
 
 
-
 class ProjectsPage(Page):
     PHP_DEFAULT = "default"
-    PERMISSION_OPTIONS = ("Safe write", "Full write")
-    PERMISSION_VALUES = ("safe", "full")
 
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
         self.body.append(
             page_header(
                 "Projects",
-                "Per-project PHP-FPM routing and filesystem write permissions.",
+                "Per-project PHP-FPM version for *.test sites.",
                 self.refresh,
             )
         )
@@ -672,15 +687,15 @@ class ProjectsPage(Page):
 
         def collect():
             projects = self.context.localdev.projects()
-            # A newly discovered project defaults to Safe write. Apply that
-            # policy once here so users do not have to troubleshoot www-data
-            # permissions before the site can run.
-            permission_errors: dict[str, str] = {}
+            # A newly discovered project needs Nginx to be able to reach its
+            # document root. Apply that read-only grant here so users do not
+            # have to troubleshoot www-data permissions before the site runs.
+            readable_errors: dict[str, str] = {}
             for project in projects:
                 try:
-                    self.context.localdev.ensure_project_permissions(project)
+                    self.context.localdev.ensure_project_readable(project)
                 except Exception as exc:  # permission/filesystem boundary
-                    permission_errors[str(project)] = str(exc)
+                    readable_errors[str(project)] = str(exc)
             default_php = self.context.localdev.default_php_version()
             fpm_versions = self.context.php.installed_fpm_versions()
             rows = []
@@ -690,7 +705,7 @@ class ProjectsPage(Page):
                         "path": project,
                         "root": self.context.localdev.document_root(project),
                         "prefs": self.context.localdev.project_preferences(project),
-                        "permission_error": permission_errors.get(str(project), ""),
+                        "readable_error": readable_errors.get(str(project), ""),
                     }
                 )
             return {
@@ -725,7 +740,7 @@ class ProjectsPage(Page):
                         item["prefs"],
                         data["default_php"],
                         data["fpm_versions"],
-                        item["permission_error"],
+                        item["readable_error"],
                     )
                 )
             return False
@@ -739,7 +754,7 @@ class ProjectsPage(Page):
         prefs: dict[str, str],
         default_php: str,
         fpm_versions: list[str],
-        permission_error: str,
+        readable_error: str,
     ) -> Gtk.Widget:
         box = card()
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
@@ -766,33 +781,18 @@ class ProjectsPage(Page):
         php_dropdown.set_selected(php_index)
         php_dropdown.set_sensitive(bool(default_php or fpm_versions))
 
-        permission_dropdown = Gtk.DropDown.new_from_strings(list(self.PERMISSION_OPTIONS))
-        permission_value = prefs.get("permission", "safe")
-        permission_dropdown.set_selected(1 if permission_value == "full" else 0)
-
         controls.attach(label("PHP"), 0, 0, 1, 1)
         controls.attach(php_dropdown, 1, 0, 1, 1)
-        controls.attach(label("Permission"), 0, 1, 1, 1)
-        controls.attach(permission_dropdown, 1, 1, 1, 1)
         top.append(controls)
         box.append(top)
 
-        if permission_error:
-            box.append(label(f"Permission setup: {permission_error}", "error-text", wrap=True))
-        elif permission_value == "full":
-            box.append(
-                label(
-                    "Full write lets the PHP-FPM user modify any file in this project. Use only for local development.",
-                    "muted",
-                    wrap=True,
-                )
-            )
+        if readable_error:
+            box.append(label(f"Nginx read access: {readable_error}", "error-text", wrap=True))
         else:
-            writable = self.context.localdev.safe_writable_paths(project)
-            detail = ", ".join(str(path.relative_to(project)) for path in writable)
             box.append(
                 label(
-                    f"Safe write: source is readable; runtime paths are writable{': ' + detail if detail else '.'}",
+                    f"PHP runs as {self.context.php.developer_user} (same as your terminal). "
+                    "Nginx only has read access to the document root shown above.",
                     "muted",
                     wrap=True,
                 )
@@ -812,22 +812,7 @@ class ProjectsPage(Page):
                 after=self.refresh,
             )
 
-        def permission_changed(dropdown, _param):
-            selected = dropdown.get_selected()
-            if selected < 0 or selected >= len(self.PERMISSION_VALUES):
-                return
-            value = self.PERMISSION_VALUES[selected]
-            if value == prefs.get("permission", "safe"):
-                return
-            self.action(
-                dropdown,
-                lambda: self.context.localdev.set_project_permission(project, value),
-                success_message=f"{project.name} permission mode changed to {'Safe write' if value == 'safe' else 'Full write'}",
-                after=self.refresh,
-            )
-
         php_dropdown.connect("notify::selected", php_changed)
-        permission_dropdown.connect("notify::selected", permission_changed)
         return box
 
     def _clear_projects(self):
@@ -845,7 +830,7 @@ class ProjectsPage(Page):
 class LocalDevPage(Page):
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
-        self.body.append(page_header("DNS & HTTPS", "Configure parked directories, *.test, Nginx and trusted local HTTPS.", self.refresh))
+        self.body.append(page_header("Local development", "Park projects, configure *.test, Nginx and trusted local HTTPS.", self.refresh))
         self.settings_card = card()
         self.dns_card = card()
         self.nginx_card = card()
@@ -892,6 +877,14 @@ class LocalDevPage(Page):
 
             sites = [label("Nginx sites", "section-title")]
             sites.append(status_pill(f"{len(data['projects'])} projects detected", data["nginx"]))
+            sites.append(
+                label(
+                    f"*.{self.context.config.domain} PHP-FPM runs as {self.context.php.developer_user} "
+                    "via NativeDev's per-user pool. Set the PHP version per project on the Projects page.",
+                    "muted",
+                    wrap=True,
+                )
+            )
             if data["projects"]:
                 names = ", ".join(f"{p.name}.{self.context.config.domain}" for p in data["projects"][:8])
                 if len(data["projects"]) > 8:
@@ -940,7 +933,7 @@ class LocalDevPage(Page):
 
     def _build_settings(self):
         self._replace(self.settings_card, [])
-        self.settings_card.append(label("Local development settings", "section-title"))
+        self.settings_card.append(label("Project settings", "section-title"))
         grid = Gtk.Grid(column_spacing=10, row_spacing=10)
         park = Gtk.Entry()
         park.set_text(self.context.config.park_dir)
@@ -1015,7 +1008,7 @@ class MainWindow(Gtk.ApplicationWindow):
         ("node", "Node.js", NodePage),
         ("services", "Services & tools", ServicesPage),
         ("projects", "Projects", ProjectsPage),
-        ("local", "DNS & HTTPS", LocalDevPage),
+        ("local", "Local development", LocalDevPage),
         ("doctor", "Doctor", DoctorPage),
     )
 

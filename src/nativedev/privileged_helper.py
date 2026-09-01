@@ -31,6 +31,8 @@ SERVICE_RE = re.compile(
 )
 PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+:~_-]*$")
 PHP_BINARY_RE = re.compile(r"^/usr/bin/php\d+\.\d+$")
+PHP_FPM_BINARY_RE = re.compile(r"^php-fpm\d+\.\d+$")
+FPM_POOL_RE = re.compile(r"^/etc/php/(?P<version>\d+\.\d+)/fpm/pool\.d/nativedev-(?P<uid>\d+)\.conf$")
 TEMP_SOURCE_RE = re.compile(r"^/tmp/nativedev-[^/]+/.+$")
 
 
@@ -42,7 +44,16 @@ def _safe_temp_source(value: str) -> bool:
     return bool(TEMP_SOURCE_RE.match(resolved))
 
 
-def validate_command(argv: Sequence[str]) -> tuple[bool, str]:
+def _managed_file(value: str, uid: int | None = None) -> bool:
+    if value in MANAGED_FILES:
+        return True
+    match = FPM_POOL_RE.fullmatch(value)
+    if not match:
+        return False
+    return uid is None or int(match.group("uid")) == uid
+
+
+def validate_command(argv: Sequence[str], uid: int | None = None) -> tuple[bool, str]:
     if not argv:
         return False, "Empty command"
     cmd = Path(argv[0]).name
@@ -91,7 +102,7 @@ def validate_command(argv: Sequence[str]) -> tuple[bool, str]:
         if len(args) != 4 or args[0] != "-m" or args[1] not in {"0644", "0600"}:
             return False, "install arguments not allowed"
         source, dest = args[2], args[3]
-        if not _safe_temp_source(source) or dest not in MANAGED_FILES:
+        if not _safe_temp_source(source) or not _managed_file(dest, uid):
             return False, "install path is outside NativeDev-managed files"
         return True, ""
 
@@ -113,12 +124,15 @@ def validate_command(argv: Sequence[str]) -> tuple[bool, str]:
     if cmd == "rm":
         if args[:1] != ["-f"] or not args[1:]:
             return False, "rm arguments not allowed"
-        if all(item in MANAGED_FILES for item in args[1:]):
+        if all(_managed_file(item, uid) for item in args[1:]):
             return True, ""
         return False, "rm path is outside NativeDev-managed files"
 
     if cmd == "nginx":
         return (args == ["-t"], "" if args == ["-t"] else "Only nginx -t is allowed")
+
+    if PHP_FPM_BINARY_RE.fullmatch(cmd):
+        return (args in [["-t"], ["-tt"]], "" if args in [["-t"], ["-tt"]] else "Only PHP-FPM config validation is allowed")
 
     if cmd == "update-alternatives":
         if len(args) == 3 and args[:2] == ["--set", "php"] and PHP_BINARY_RE.fullmatch(args[2]):
@@ -217,7 +231,7 @@ def serve(socket_path: Path, uid: int, gid: int, parent_pid: int) -> int:
                     if not isinstance(argv, list) or not all(isinstance(x, str) for x in argv):
                         _send(conn, {"ok": False, "error": "Invalid command payload"})
                         continue
-                    allowed, reason = validate_command(argv)
+                    allowed, reason = validate_command(argv, uid=uid)
                     if not allowed:
                         _send(conn, {"ok": False, "error": reason})
                         continue

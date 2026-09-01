@@ -48,6 +48,20 @@ class Doctor:
             Check(self.localdev.dns_ready(), f"*.{self.localdev.config.domain} DNS", self.localdev.dns_strategy()),
             Check(self.localdev.nginx_ready(), "NativeDev Nginx sites configured", f"{len(self.localdev.projects())} projects"),
         ]
+        versions_in_use: set[str] = set()
+        for project in self.localdev.projects():
+            try:
+                versions_in_use.add(self.localdev.project_php_version(project))
+            except RuntimeError:
+                continue
+        for version in sorted(versions_in_use):
+            checks.append(
+                Check(
+                    self.php.developer_pool_configured(version),
+                    f"PHP {version} NativeDev developer pool",
+                    f"*.test PHP runs as {self.php.developer_user}",
+                )
+            )
         for spec in COMPONENTS:
             state = self.services.state(spec)
             detail = "running" if state.running else ("installed" if state.installed else "not installed")

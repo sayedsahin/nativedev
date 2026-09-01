@@ -4,7 +4,7 @@ A minimal **Python + PyGObject + GTK4** desktop manager for native Debian-family
 
 NativeDev deliberately manages the services already provided by your Linux system. It does **not** bundle PHP, Nginx, databases, Redis, Node.js, containers, VMs, Electron, or a private server stack.
 
-> Status: **0.1.3 alpha / runnable MVP**. Review every privileged change before using this on an important workstation.
+> Status: **0.1.4 alpha / runnable MVP**. Review every privileged change before using this on an important workstation.
 
 ## Current target
 
@@ -27,6 +27,7 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 - Start/stop/restart and enable/disable each installed PHP-FPM version
 - Uninstall a specific PHP version without touching other versions
 - Select the default `/usr/bin/php` with `update-alternatives`; the current Default button is disabled
+- Create a NativeDev-owned per-user PHP-FPM pool for each version used by `*.test`; PHP workers run as the logged-in developer while Debian/Sury's `www` pool stays untouched
 
 ### Node.js
 - Detect NVM as a per-user installation
@@ -55,10 +56,9 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 - Use `public/` automatically when present, otherwise project root
 - Use the system default PHP-FPM automatically; no global PHP-FPM field is required
 - Per-project PHP dropdown: `Default (X.Y)` plus installed PHP-FPM versions
-- Per-project permission dropdown: **Safe write** (default) or **Full write**
-- Safe write grants project read/traverse access to `www-data` and write access to detected runtime paths such as `storage/`, `var/`, `bootstrap/cache/`, and common upload/media directories
-- Full write grants `www-data` write access across the project; ACLs are used instead of `chmod 777`
-- Install Debian's `acl` package automatically when project permission management first needs it
+- Route `*.test` PHP requests to each project's own `/run/php/phpX.Y-fpm-nativedev-UID.sock`, not the distro `www-data` FPM pool
+- Grant Nginx a minimal, automatic **read-only** ACL on each project's document root (plus ancestor traverse) so it can serve static files directly; nothing outside the document root is touched, and PHP itself never needs an ACL since it already runs as the developer
+- Install Debian's `acl` package automatically the first time that read grant is needed
 - Generate only `/etc/nginx/sites-available/nativedev-sites.conf`
 - Validate with `nginx -t` before reload and rollback on failure
 - Configure `*.test -> 127.0.0.1` using **NetworkManager-managed dnsmasq**
@@ -84,7 +84,7 @@ The GTK4 UI has seven deliberately small pages:
 3. Node.js
 4. Services & tools
 5. Projects
-6. DNS & HTTPS
+6. Local development
 7. Doctor
 
 It uses GTK CSS only; no libadwaita, WebView, Node/Electron, Qt, database, or extra Python UI framework.
@@ -154,6 +154,7 @@ NativeDev currently owns only files with explicit NativeDev names:
 /etc/nginx/sites-enabled/nativedev-sites.conf
 /etc/nginx/nativedev/nativedev.pem
 /etc/nginx/nativedev/nativedev-key.pem
+/etc/php/X.Y/fpm/pool.d/nativedev-UID.conf
 ```
 
 User state:
@@ -176,6 +177,7 @@ NVM shell integration is enclosed by:
 - Automatic wildcard DNS is intentionally limited to NetworkManager. Other resolver layouts are detected as unsupported instead of rewriting resolver configuration.
 - Generic Redis/MariaDB/PostgreSQL configuration editors are not implemented yet; v0.1 installs, detects and controls their native services. Nginx/local DNS/HTTPS configuration is implemented.
 - Site scanning is refresh-based, not a persistent filesystem daemon.
+- PHP requests for `*.test` run as the logged-in developer, which avoids CLI-vs-FPM ownership conflicts for cache/uploads/rate-limit directories. Nginx still needs read/traverse permission to serve static files directly under the project's document root; NativeDev grants that automatically via a read-only ACL scoped to the document root only, and never broadens permissions on the rest of the project or the home directory.
 - Project ACL management assumes normal development projects are owned by the desktop user; files owned by another account may require ownership repair outside NativeDev.
 - Oracle MySQL packaging differs between Debian-family distributions. The MVP only offers the button when APT exposes an actual `mysql-server` candidate.
 

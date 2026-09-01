@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.4 - 2026-09-01
+
+- Add a NativeDev-owned per-user PHP-FPM pool for every PHP version used by local sites; PHP-FPM workers run as the logged-in developer so CLI- and browser-created application files share one Unix owner. Debian/Sury's default `www` pool is never modified.
+- Restore the per-project **Projects** page and per-project PHP-FPM version dropdown (`Default (X.Y)` plus installed FPM versions), now routed to the developer-owned socket instead of the distro's `www-data` pool.
+- Remove the per-project **Safe write / Full write** file-permission choice and its ACL machinery. It is no longer needed: PHP now runs as the developer, so it can already read and write anywhere it normally could from a terminal. Nginx keeps a minimal, automatic **read-only** ACL scoped to each project's document root (plus ancestor traverse), only so it can serve static files and resolve `try_files` directly.
+- Fix: the mkcert HTTPS private key was installed `root:root` mode `0600`, which Nginx's `www-data` worker cannot read; `nginx -t` failed for every HTTPS-enabled site. Installed as mode `0644` now (a local-only, self-signed leaf key; mkcert's actual root CA key is untouched).
+- Fix: `*.test` sites are generated per-project again, so a project can pin an older PHP-FPM version instead of every site sharing one globally-typed version.
+- Regression tests restored/extended: guard against the Projects page, per-project PHP dropdown, and file-permission ACLs from silently disappearing again; guard against the HTTPS key mode regressing to `0600`.
+
 ## 0.1.3 - 2026-09-01
 
 - Add a dedicated Projects sidebar/page with one row per parked `*.test` project.
@@ -8,6 +17,8 @@
 - Add per-project permission dropdowns with `Safe write` as the default and `Full write` as an explicit local-development option.
 - Add ACL-based project permissions for `www-data`; Safe mode keeps source read-only while allowing common runtime/cache/upload directories to be written.
 - Automatically install the Debian `acl` package when permission management first needs `setfacl`.
+
+> Superseded by 0.1.4: this release still ran `*.test` PHP through Debian/Sury's `www-data` FPM pool, which is a different Unix user than the terminal/Composer/framework CLI. That identity split caused framework cache/rate-limit directories written by the CLI to be unreadable by the browser-facing PHP process. 0.1.4 fixes this at the architecture level instead of patching around it with wider ACLs.
 
 ## 0.1.2 - 2026-09-01
 

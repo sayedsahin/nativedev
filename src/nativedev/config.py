@@ -14,8 +14,10 @@ CONFIG_FILE = APP_DIR / "config.json"
 class AppConfig:
     park_dir: str = str(Path.home() / "Code")
     domain: str = "test"
-    # Kept for backward compatibility with 0.1.x config files. Project routing
-    # no longer depends on a global PHP-FPM version.
+    # Kept only for backward compatibility with 0.1.4 config files that were
+    # briefly written with a single global PHP-FPM version. Routing no longer
+    # depends on this; each project resolves its own version (see
+    # LocalDevManager.project_php_version).
     php_version: str = ""
     https_enabled: bool = False
     projects: dict[str, dict[str, str]] = field(default_factory=dict)

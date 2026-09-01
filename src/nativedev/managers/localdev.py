@@ -7,13 +7,10 @@ import shutil
 import socket
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from ..config import AppConfig, STATE_DIR
 from ..system import AptManager, CommandRunner, SystemdManager
-
-if TYPE_CHECKING:
-    from .php import PhpManager
+from .php import PhpManager
 
 
 NGINX_SITE = Path("/etc/nginx/sites-available/nativedev-sites.conf")
@@ -22,23 +19,7 @@ NM_CONF = Path("/etc/NetworkManager/conf.d/nativedev-dns.conf")
 NM_DNSMASQ = Path("/etc/NetworkManager/dnsmasq.d/nativedev-test.conf")
 NGINX_CERT_DIR = Path("/etc/nginx/nativedev")
 WEB_USER = "www-data"
-PERMISSION_SAFE = "safe"
-PERMISSION_FULL = "full"
-
-SAFE_WRITABLE_RELATIVE_PATHS = (
-    "storage",
-    "cache",
-    "logs",
-    "tmp",
-    "var",
-    "bootstrap/cache",
-    "public/uploads",
-    "public/upload",
-    "public/media",
-    "public/storage",
-    "public/images",
-    "wp-content/uploads",
-)
+PHP_DEFAULT = "default"
 
 
 class LocalDevManager:
@@ -48,7 +29,7 @@ class LocalDevManager:
         apt: AptManager,
         systemd: SystemdManager,
         config: AppConfig,
-        php: "PhpManager",
+        php: PhpManager,
     ):
         self.runner = runner
         self.apt = apt
@@ -74,6 +55,11 @@ class LocalDevManager:
         public = project / "public"
         return public if public.is_dir() else project
 
+    # ---- Per-project PHP-FPM version -------------------------------------
+    # PHP itself now always runs as the logged-in developer (see PhpManager's
+    # developer pool). This section only decides *which installed version*
+    # handles a given project; it has nothing to do with file ownership.
+
     def default_php_version(self) -> str:
         return self.php.default_fpm_version()
 
@@ -81,30 +67,23 @@ class LocalDevManager:
         project = self._validate_project(project)
         key = str(project)
         raw = self.config.projects.get(key, {})
-        php = str(raw.get("php", "default"))
-        permission = str(raw.get("permission", PERMISSION_SAFE))
+        php = str(raw.get("php", PHP_DEFAULT))
         installed = set(self.php.installed_fpm_versions())
-        if php != "default" and php not in installed:
-            php = "default"
-        if permission not in {PERMISSION_SAFE, PERMISSION_FULL}:
-            permission = PERMISSION_SAFE
-        return {
-            "php": php,
-            "permission": permission,
-            "permission_applied": str(raw.get("permission_applied", "")),
-        }
+        if php != PHP_DEFAULT and php not in installed:
+            php = PHP_DEFAULT
+        return {"php": php}
 
     def set_project_php(self, project: Path, version: str) -> None:
         project = self._validate_project(project)
-        if version != "default" and version not in self.php.installed_fpm_versions():
+        if version != PHP_DEFAULT and version not in self.php.installed_fpm_versions():
             raise RuntimeError(f"PHP {version} FPM is not installed")
         prefs = self._project_record(project)
-        previous = prefs.get("php", "default")
+        previous = prefs.get("php", PHP_DEFAULT)
         prefs["php"] = version
         self.config.save()
         if shutil.which("nginx"):
             try:
-                self.configure_nginx_sites(apply_permissions=False)
+                self.configure_nginx_sites()
             except Exception:
                 prefs["php"] = previous
                 self.config.save()
@@ -112,83 +91,54 @@ class LocalDevManager:
 
     def project_php_version(self, project: Path) -> str:
         prefs = self.project_preferences(project)
-        if prefs["php"] != "default":
+        if prefs["php"] != PHP_DEFAULT:
             return prefs["php"]
         version = self.default_php_version()
         if not version:
             raise RuntimeError("No installed PHP-FPM version is available for Default")
         return version
 
-    def set_project_permission(self, project: Path, mode: str) -> None:
+    def _project_record(self, project: Path) -> dict[str, str]:
         project = self._validate_project(project)
-        if mode not in {PERMISSION_SAFE, PERMISSION_FULL}:
-            raise RuntimeError(f"Unknown permission mode: {mode}")
-        prefs = self._project_record(project)
-        prefs["permission"] = mode
-        self.config.save()
-        self.apply_project_permissions(project, mode)
+        key = str(project)
+        record = self.config.projects.setdefault(key, {})
+        if not isinstance(record, dict):
+            record = {}
+            self.config.projects[key] = record
+        record.setdefault("php", PHP_DEFAULT)
+        return record
 
-    def ensure_project_permissions(self, project: Path) -> None:
-        """Apply the selected policy, defaulting every new project to Safe write."""
-        project = self._validate_project(project)
-        prefs = self.project_preferences(project)
-        mode = prefs["permission"]
-        if prefs["permission_applied"] != mode:
-            self.apply_project_permissions(project, mode)
-            return
-        # In Safe mode, refresh known runtime paths so a newly created uploads/
-        # directory becomes writable without broadening source-code access.
-        if mode == PERMISSION_SAFE:
-            self._ensure_acl_tool()
-            self._apply_safe_writable_paths(project)
+    def _validate_project(self, project: Path) -> Path:
+        candidate = Path(project).expanduser().resolve()
+        if not candidate.is_dir() or candidate.parent != self.park_dir:
+            raise RuntimeError("Project must be a direct directory inside the configured park directory")
+        return candidate
 
-    def apply_project_permissions(self, project: Path, mode: str | None = None) -> None:
+    # ---- Nginx read access -------------------------------------------------
+    # PHP-FPM workers run as the developer, so they need no special grant to
+    # read or write project files. Nginx (www-data) still serves static files
+    # under the document root directly and must stat its way there, so it
+    # needs traverse (x) on ancestor directories and read (rX) on the
+    # document root only. Nothing outside the document root is touched.
+
+    def ensure_project_readable(self, project: Path) -> None:
         project = self._validate_project(project)
-        prefs = self.project_preferences(project)
-        selected = mode or prefs["permission"]
-        if selected not in {PERMISSION_SAFE, PERMISSION_FULL}:
-            raise RuntimeError(f"Unknown permission mode: {selected}")
         self._ensure_acl_tool()
         self._ensure_web_user()
-        self._grant_parent_traverse(project)
+        docroot = self.document_root(project)
+        self._grant_parent_traverse(docroot)
+        self._setfacl(["-R", "-P", "-m", f"u:{WEB_USER}:rX", "--", str(docroot)])
+        # Default ACL so files created later (e.g. an uploaded avatar written
+        # by the app itself, as the developer user) stay servable by Nginx
+        # without a manual re-scan.
+        self._set_default_acl_on_dirs(docroot, f"u:{WEB_USER}:r-x")
 
-        if selected == PERMISSION_FULL:
-            self._setfacl(["-R", "-P", "-m", f"u:{WEB_USER}:rwX", "--", str(project)])
-            self._set_default_acl_on_dirs(project, f"u:{WEB_USER}:rwx")
-        else:
-            self._setfacl(["-R", "-P", "-m", f"u:{WEB_USER}:rX", "--", str(project)])
-            # Remove a previous Full-write default ACL before applying the Safe
-            # policy. setfacl documents removal of a missing ACL entry as OK.
-            self._remove_default_web_acl(project)
-            self._set_default_acl_on_dirs(project, f"u:{WEB_USER}:r-x")
-            self._apply_safe_writable_paths(project)
-
-        record = self._project_record(project)
-        record["permission"] = selected
-        record["permission_applied"] = selected
-        self.config.save()
-
-    def safe_writable_paths(self, project: Path) -> list[Path]:
-        project = self._validate_project(project)
-        found: list[Path] = []
-        for relative in SAFE_WRITABLE_RELATIVE_PATHS:
-            candidate = project / relative
-            # Do not follow a symlink out of the project when changing ACLs.
-            if candidate.is_dir() and not candidate.is_symlink():
-                found.append(candidate)
-        return found
-
-    def _apply_safe_writable_paths(self, project: Path) -> None:
-        for writable in self.safe_writable_paths(project):
-            self._setfacl(["-R", "-P", "-m", f"u:{WEB_USER}:rwX", "--", str(writable)])
-            self._set_default_acl_on_dirs(writable, f"u:{WEB_USER}:rwx")
-
-    def _grant_parent_traverse(self, project: Path) -> None:
+    def _grant_parent_traverse(self, target: Path) -> None:
         uid = os.getuid()
-        # Only modify ancestors owned by the desktop user. System-owned parents
-        # such as / and /home are left untouched; they are normally traversable.
-        ancestors = list(project.parents)
-        for ancestor in reversed(ancestors):
+        # Only modify ancestors owned by the desktop user. System-owned
+        # ancestors such as / and /home are left untouched; they are normally
+        # traversable already.
+        for ancestor in reversed(list(target.parents)):
             if ancestor == Path("/"):
                 continue
             try:
@@ -206,14 +156,6 @@ class LocalDevManager:
         if not result.ok:
             raise RuntimeError(result.output or f"Could not set default ACLs in {root}")
 
-    def _remove_default_web_acl(self, root: Path) -> None:
-        result = self.runner.run(
-            ["find", str(root), "-type", "d", "-exec", "setfacl", "-x", f"d:u:{WEB_USER}", "--", "{}", "+"],
-            timeout=900,
-        )
-        if not result.ok:
-            raise RuntimeError(result.output or f"Could not reset default ACLs in {root}")
-
     def _setfacl(self, args: list[str]) -> None:
         result = self.runner.run(["setfacl", *args], timeout=900)
         if not result.ok:
@@ -223,7 +165,7 @@ class LocalDevManager:
         if shutil.which("setfacl"):
             return
         if not self.apt.candidate("acl"):
-            raise RuntimeError("The Debian 'acl' package is required for project permissions")
+            raise RuntimeError("The Debian 'acl' package is required to let Nginx read project document roots")
         self.apt.install(["acl"])
         if not shutil.which("setfacl"):
             raise RuntimeError("setfacl is still unavailable after installing the acl package")
@@ -235,22 +177,7 @@ class LocalDevManager:
         except KeyError as exc:
             raise RuntimeError(f"Web-server user '{WEB_USER}' does not exist") from exc
 
-    def _project_record(self, project: Path) -> dict[str, str]:
-        project = self._validate_project(project)
-        key = str(project)
-        record = self.config.projects.setdefault(key, {})
-        if not isinstance(record, dict):
-            record = {}
-            self.config.projects[key] = record
-        record.setdefault("php", "default")
-        record.setdefault("permission", PERMISSION_SAFE)
-        return record
-
-    def _validate_project(self, project: Path) -> Path:
-        candidate = Path(project).expanduser().resolve()
-        if not candidate.is_dir() or candidate.parent != self.park_dir:
-            raise RuntimeError("Project must be a direct directory inside the configured park directory")
-        return candidate
+    # ---- DNS ----------------------------------------------------------------
 
     def dns_strategy(self) -> str:
         if self.systemd.is_active("NetworkManager") or self.systemd.is_active("NetworkManager.service"):
@@ -285,17 +212,27 @@ class LocalDevManager:
             self.runner.run(["install", "-m", "0644", str(nm_dnsmasq), str(NM_DNSMASQ)], privileged=True, check=True)
         self.systemd.restart("NetworkManager")
 
+    # ---- Nginx ---------------------------------------------------------------
+
     def nginx_ready(self) -> bool:
         return NGINX_SITE.exists() and NGINX_ENABLED.exists()
 
     def render_nginx(self) -> str:
         domain = self.config.domain
-        blocks: list[str] = ["# Managed by NativeDev. Manual edits may be replaced.\n"]
+        blocks: list[str] = [
+            "# Managed by NativeDev. Manual edits may be replaced.\n",
+            f"# PHP-FPM workers run as local developer: {self.php.developer_user}\n",
+        ]
         for project in self.projects():
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project.name):
                 continue
-            php_version = self.project_php_version(project)
-            socket_path = f"/run/php/php{php_version}-fpm.sock"
+            try:
+                php_version = self.project_php_version(project)
+            except RuntimeError:
+                # No PHP-FPM installed yet for this project's selection; skip
+                # it rather than failing the whole site file.
+                continue
+            socket_path = self.php.developer_socket_path(php_version)
             docroot = self.document_root(project)
             escaped_root = str(docroot).replace("$", "\\$")
             ssl = ""
@@ -334,12 +271,27 @@ class LocalDevManager:
             )
         return "\n".join(blocks)
 
-    def configure_nginx_sites(self, *, apply_permissions: bool = True) -> None:
+    def configure_nginx_sites(self) -> None:
         if not shutil.which("nginx"):
             raise RuntimeError("Nginx is not installed")
-        if apply_permissions:
-            for project in self.projects():
-                self.ensure_project_permissions(project)
+
+        projects = self.projects()
+        versions_needed: set[str] = set()
+        for project in projects:
+            try:
+                versions_needed.add(self.project_php_version(project))
+            except RuntimeError:
+                continue
+
+        # Critical ownership rule: *.test never targets Debian/Sury's default
+        # www-data pool. Ensure NativeDev's developer-user pool exists for
+        # every PHP version actually selected by a project.
+        for version in versions_needed:
+            self.php.ensure_developer_pool(version)
+
+        for project in projects:
+            self.ensure_project_readable(project)
+
         content = self.render_nginx()
         previous = NGINX_SITE.read_text(encoding="utf-8") if NGINX_SITE.exists() else None
 
@@ -396,7 +348,15 @@ class LocalDevManager:
                 raise RuntimeError(result.output or "Certificate generation failed")
             self.runner.run(["mkdir", "-p", str(NGINX_CERT_DIR)], privileged=True, check=True)
             self.runner.run(["install", "-m", "0644", str(cert), str(NGINX_CERT_DIR / "nativedev.pem")], privileged=True, check=True)
-            self.runner.run(["install", "-m", "0600", str(key), str(NGINX_CERT_DIR / "nativedev-key.pem")], privileged=True, check=True)
+            # Mode 0644, not 0600: the file is written by the privileged
+            # helper as root:root, and Nginx's worker process (www-data) must
+            # be able to read the key to terminate TLS. This is a locally
+            # generated mkcert leaf key for *.test only (mkcert's private root
+            # CA key, which is what actually matters for trust, stays under
+            # the developer's own mkcert state directory and is never touched
+            # here) -- world-readable is an accepted, standard trade-off for
+            # local-only development certificates.
+            self.runner.run(["install", "-m", "0644", str(key), str(NGINX_CERT_DIR / "nativedev-key.pem")], privileged=True, check=True)
         self.config.https_enabled = True
         self.config.save()
         self.configure_nginx_sites()

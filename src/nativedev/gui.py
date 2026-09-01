@@ -686,16 +686,9 @@ class ProjectsPage(Page):
         self._clear_projects()
 
         def collect():
+            # Refresh is intentionally read-only. ACL/package changes belong to
+            # the explicit Nginx site configuration action, never page loading.
             projects = self.context.localdev.projects()
-            # A newly discovered project needs Nginx to be able to reach its
-            # document root. Apply that read-only grant here so users do not
-            # have to troubleshoot www-data permissions before the site runs.
-            readable_errors: dict[str, str] = {}
-            for project in projects:
-                try:
-                    self.context.localdev.ensure_project_readable(project)
-                except Exception as exc:  # permission/filesystem boundary
-                    readable_errors[str(project)] = str(exc)
             default_php = self.context.localdev.default_php_version()
             fpm_versions = self.context.php.installed_fpm_versions()
             rows = []
@@ -705,7 +698,7 @@ class ProjectsPage(Page):
                         "path": project,
                         "root": self.context.localdev.document_root(project),
                         "prefs": self.context.localdev.project_preferences(project),
-                        "readable_error": readable_errors.get(str(project), ""),
+                        "readable_error": "",
                     }
                 )
             return {
@@ -868,7 +861,7 @@ class LocalDevPage(Page):
                 lambda *_: confirm(
                     self.window,
                     "Configure wildcard DNS?",
-                    "NativeDev will add its own NetworkManager dnsmasq snippets and restart NetworkManager. Your connection may briefly reconnect. It will not overwrite /etc/resolv.conf.",
+                    "NativeDev will add its own NetworkManager dnsmasq snippets and reload only NetworkManager DNS configuration. It will not restart NetworkManager or overwrite /etc/resolv.conf.",
                     lambda: self.action(dns_btn, self.context.localdev.configure_dns, success_message="Wildcard DNS configured", after=self.refresh),
                 ),
             )

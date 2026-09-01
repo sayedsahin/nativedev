@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -36,4 +38,15 @@ class AppConfig:
 
     def save(self) -> None:
         APP_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
+        payload = json.dumps(asdict(self), indent=2) + "\n"
+        fd, temp_name = tempfile.mkstemp(prefix="config-", suffix=".json.tmp", dir=APP_DIR)
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temp_path, 0o600)
+            os.replace(temp_path, CONFIG_FILE)
+        finally:
+            temp_path.unlink(missing_ok=True)

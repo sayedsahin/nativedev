@@ -1,10 +1,12 @@
 # NativeDev
 
-A minimal **Python + PyGObject + GTK4** desktop manager for native Debian-family development environments.
+**NativeDev provides a graphical control plane for a native PHP development stack on Debian-based Linux.**
+
+It is a minimal **Python + PyGObject + GTK4** desktop manager that orchestrates native host services instead of replacing them with a private container/runtime stack.
 
 NativeDev deliberately manages the services already provided by your Linux system. It does **not** bundle PHP, Nginx, databases, Redis, Node.js, containers, VMs, Electron, or a private server stack.
 
-> Status: **0.1.4 alpha / runnable MVP**. Review every privileged change before using this on an important workstation.
+> Status: **0.1.5 alpha / runnable MVP**. Review every privileged change before using this on an important workstation.
 
 ## Current target
 
@@ -60,14 +62,18 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 - Grant Nginx a minimal, automatic **read-only** ACL on each project's document root (plus ancestor traverse) so it can serve static files directly; nothing outside the document root is touched, and PHP itself never needs an ACL since it already runs as the developer
 - Install Debian's `acl` package automatically the first time that read grant is needed
 - Generate only `/etc/nginx/sites-available/nativedev-sites.conf`
-- Validate with `nginx -t` before reload and rollback on failure
+- Quote generated Nginx document-root paths safely, including project directories containing spaces
+- Validate with `nginx -t` before reload and restore both the previous site file and enablement state on failure
 - Configure `*.test -> 127.0.0.1` using **NetworkManager-managed dnsmasq**
+- Apply DNS changes with targeted `nmcli general reload` operations instead of restarting NetworkManager
+- Verify wildcard resolution after applying DNS changes and restore NativeDev-owned DNS files if setup fails
 - Never overwrite `/etc/resolv.conf`
 - Generate a wildcard mkcert certificate and configure HTTPS in NativeDev sites
 
 ### Safety / ownership
 - GUI runs as the normal user
-- The first privileged action launches a restricted helper through `pkexec`; authorization is reused for the rest of the app session
+- A normal `./install.sh` installation places the privileged helper at `/usr/lib/nativedev/privileged_helper.py` as a root-owned, non-user-writable file
+- The first privileged action launches that restricted helper through `pkexec`; authorization is reused for the rest of the app session (`./run.sh` development mode falls back to the source-tree helper)
 - The privileged helper validates an allowlist of APT/systemd and NativeDev-owned file operations; it is not an arbitrary root shell
 - `subprocess` calls use argv lists; no generic `shell=True`
 - NVM is the only shell-sourced integration, with shell-quoted arguments
@@ -110,7 +116,7 @@ Then:
 ./install.sh
 ```
 
-This installs the GTK/Python runtime packages through APT, then copies NativeDev itself into your user directories:
+This installs the GTK/Python runtime packages through APT, installs the restricted privileged helper as a root-owned file under `/usr/lib/nativedev`, then copies the GUI/application source into your user directories:
 
 - `~/.local/share/nativedev`
 - `~/.local/bin/nativedev`
@@ -162,6 +168,7 @@ User state:
 ```text
 ~/.config/nativedev/config.json
 ~/.local/share/nativedev/
+/usr/lib/nativedev/privileged_helper.py
 ```
 
 NVM shell integration is enclosed by:
@@ -174,7 +181,7 @@ NVM shell integration is enclosed by:
 
 ## Important alpha limitations
 
-- Automatic wildcard DNS is intentionally limited to NetworkManager. Other resolver layouts are detected as unsupported instead of rewriting resolver configuration.
+- Automatic wildcard DNS is intentionally limited to NetworkManager. Other resolver layouts are detected as unsupported instead of rewriting resolver configuration. NativeDev reloads only NetworkManager configuration/DNS state; it does not intentionally restart the whole NetworkManager service.
 - Generic Redis/MariaDB/PostgreSQL configuration editors are not implemented yet; v0.1 installs, detects and controls their native services. Nginx/local DNS/HTTPS configuration is implemented.
 - Site scanning is refresh-based, not a persistent filesystem daemon.
 - PHP requests for `*.test` run as the logged-in developer, which avoids CLI-vs-FPM ownership conflicts for cache/uploads/rate-limit directories. Nginx still needs read/traverse permission to serve static files directly under the project's document root; NativeDev grants that automatically via a read-only ACL scoped to the document root only, and never broadens permissions on the rest of the project or the home directory.

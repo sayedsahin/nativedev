@@ -128,6 +128,13 @@ def validate_command(argv: Sequence[str], uid: int | None = None) -> tuple[bool,
             return True, ""
         return False, "rm path is outside NativeDev-managed files"
 
+    if cmd == "nmcli":
+        allowed = [
+            ["general", "reload", "conf"],
+            ["general", "reload", "dns-full"],
+        ]
+        return (args in allowed, "" if args in allowed else "Only NativeDev DNS reload operations are allowed")
+
     if cmd == "nginx":
         return (args == ["-t"], "" if args == ["-t"] else "Only nginx -t is allowed")
 

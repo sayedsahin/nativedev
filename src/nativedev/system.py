@@ -56,6 +56,9 @@ class PrivilegeSession:
         self.lock = threading.RLock()
 
     def _helper_path(self) -> Path:
+        installed = Path("/usr/lib/nativedev/privileged_helper.py")
+        if installed.is_file() and installed.stat().st_uid == 0 and not (installed.stat().st_mode & 0o022):
+            return installed
         return Path(__file__).with_name("privileged_helper.py").resolve()
 
     def ensure(self) -> None:

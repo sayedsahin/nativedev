@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nativedev"
-version = "0.1.4"
-description = "Minimal native Debian-family development environment manager"
+version = "0.1.5"
+description = "Graphical control plane for a native PHP development stack on Debian-based Linux"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}

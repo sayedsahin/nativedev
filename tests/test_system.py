@@ -66,6 +66,17 @@ class NginxRenderTests(unittest.TestCase):
             self.assertIn("php8.4-fpm-nativedev-1000.sock", rendered)
             self.assertNotIn("fastcgi_pass unix:/run/php/php8.4-fpm.sock", rendered)
 
+    def test_document_root_with_spaces_is_quoted(self):
+        from nativedev.config import AppConfig
+        from nativedev.managers.localdev import LocalDevManager
+
+        with tempfile.TemporaryDirectory(prefix="Native Dev ") as td:
+            root = Path(td)
+            (root / "app" / "public").mkdir(parents=True)
+            manager = LocalDevManager(None, None, None, AppConfig(park_dir=str(root)), StubPhp())
+            rendered = manager.render_nginx()
+            self.assertIn(f'root "{root / "app" / "public"}";', rendered)
+
     def test_project_can_pin_an_installed_php_fpm_version(self):
         from nativedev.config import AppConfig
         from nativedev.managers.localdev import LocalDevManager
@@ -111,21 +122,29 @@ class NginxRenderTests(unittest.TestCase):
             self.assertNotIn("server_name app.test;", rendered)
 
 
+class DnsRegressionTests(unittest.TestCase):
+    def test_dns_config_does_not_restart_networkmanager(self):
+        localdev = (
+            Path(__file__).resolve().parents[1] / "src" / "nativedev" / "managers" / "localdev.py"
+        ).read_text()
+        self.assertIn('["nmcli", "general", "reload", "conf"]', localdev)
+        self.assertIn('["nmcli", "general", "reload", "dns-full"]', localdev)
+        self.assertNotIn('self.systemd.restart("NetworkManager")', localdev)
+
+
 class HttpsKeyPermissionTests(unittest.TestCase):
-    def test_https_key_is_installed_readable_by_nginx(self):
-        # nativedev-key.pem is written by the privileged helper as root:root.
-        # Nginx's worker process runs as www-data, not root, so the key must
-        # be installed with a mode that lets a non-root process read it, or
-        # every HTTPS-enabled site breaks with "nginx -t" failing to load the
-        # certificate key.
+    def test_https_key_is_root_only(self):
+        # The privileged Nginx master process loads certificate keys before
+        # workers handle traffic, so the NativeDev leaf key need not be
+        # readable by www-data or other local users.
         localdev = (
             Path(__file__).resolve().parents[1] / "src" / "nativedev" / "managers" / "localdev.py"
         ).read_text()
         key_install_line = next(
             line for line in localdev.splitlines() if "nativedev-key.pem" in line and "install" in line
         )
-        self.assertIn('"-m", "0644"', key_install_line)
-        self.assertNotIn('"-m", "0600"', key_install_line)
+        self.assertIn('"-m", "0600"', key_install_line)
+        self.assertNotIn('"-m", "0644"', key_install_line)
 
 
 class PhpDeveloperPoolTests(unittest.TestCase):
@@ -177,6 +196,9 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertTrue(validate_command(["apt-get", "install", "-y", "redis-tools"])[0])
         self.assertTrue(validate_command(["update-alternatives", "--set", "php", "/usr/bin/php8.4"])[0])
         self.assertTrue(validate_command(["php-fpm8.4", "-tt"])[0])
+        self.assertTrue(validate_command(["nmcli", "general", "reload", "conf"])[0])
+        self.assertTrue(validate_command(["nmcli", "general", "reload", "dns-full"])[0])
+        self.assertFalse(validate_command(["nmcli", "networking", "off"])[0])
         self.assertTrue(validate_command(["install", "-m", "0644", "/tmp/nativedev-fpm-test/pool.conf", "/etc/php/8.4/fpm/pool.d/nativedev-1000.conf"], uid=1000)[0])
         self.assertTrue(validate_command(["rm", "-f", "/etc/php/8.4/fpm/pool.d/nativedev-1000.conf"], uid=1000)[0])
         self.assertFalse(validate_command(["rm", "-f", "/etc/php/8.4/fpm/pool.d/nativedev-1001.conf"], uid=1000)[0])
@@ -209,6 +231,10 @@ class GuiFeatureRegressionTests(unittest.TestCase):
         # purpose once PHP-FPM started running as the developer user; do not
         # let that complexity come back silently either.
         self.assertNotIn('PERMISSION_OPTIONS', gui)
+        # Page refreshes must remain observational; configuring Nginx is the
+        # explicit action that grants www-data read/traverse ACLs.
+        projects_refresh = gui[gui.index("class ProjectsPage"):gui.index("class LocalDevPage")]
+        self.assertNotIn("ensure_project_readable(project)", projects_refresh)
 
 if __name__ == "__main__":
     unittest.main()

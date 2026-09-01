@@ -14,6 +14,8 @@ fi
 
 sudo apt-get update
 sudo apt-get install -y python3 python3-gi gir1.2-gtk-4.0 pkexec
+sudo install -d -m 0755 /usr/lib/nativedev
+sudo install -m 0755 "$ROOT/src/nativedev/privileged_helper.py" /usr/lib/nativedev/privileged_helper.py
 
 mkdir -p "$TARGET" "$BIN_DIR" "$DESKTOP_DIR"
 rm -rf "$TARGET/src"

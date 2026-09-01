@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.5 - 2026-09-01
+
+- DNS reliability: stop restarting the entire NetworkManager service when configuring `*.test`; use targeted `nmcli general reload conf` + `dns-full` operations instead. Verify wildcard resolution after apply and rollback NativeDev-owned DNS files if configuration fails.
+- Make the **Projects** page refresh strictly read-only. ACL/package mutations now happen only during the explicit Nginx site configuration flow, so opening/refreshing the page cannot trigger `pkexec` or install `acl`.
+- Harden generated Nginx site configuration: quote document-root paths safely (including paths with spaces), refuse unexpected objects at the NativeDev enablement path, and restore both site content and prior symlink state when `nginx -t` rejects a new configuration.
+- Correct local HTTPS key permissions to root-only mode `0600`; the privileged Nginx master process loads the key, so `www-data` workers do not need world-readable access.
+- Normal `install.sh` installs the restricted privileged helper as root-owned `/usr/lib/nativedev/privileged_helper.py`; installed NativeDev prefers that immutable helper while source-tree `./run.sh` remains usable for development.
+- Persist `~/.config/nativedev/config.json` atomically with `fsync` + `os.replace` and mode `0600`.
+- Update regression tests for targeted DNS reloads, read-only refresh, Nginx path quoting, TLS key mode, and the privileged-helper allowlist.
+
 ## 0.1.4 - 2026-09-01
 
 - Add a NativeDev-owned per-user PHP-FPM pool for every PHP version used by local sites; PHP-FPM workers run as the logged-in developer so CLI- and browser-created application files share one Unix owner. Debian/Sury's default `www` pool is never modified.

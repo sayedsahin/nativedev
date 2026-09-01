@@ -190,6 +190,13 @@ class LocalDevManager:
         except OSError:
             return False
 
+    def _reload_networkmanager_dns(self) -> None:
+        # Do not restart NetworkManager: that can bounce active connections,
+        # delay connectivity after boot, and interfere with VPN/Wi-Fi state.
+        # Reload only NetworkManager.conf and its DNS plugin.
+        self.runner.run(["nmcli", "general", "reload", "conf"], privileged=True, check=True, timeout=30)
+        self.runner.run(["nmcli", "general", "reload", "dns-full"], privileged=True, check=True, timeout=30)
+
     def configure_dns(self) -> None:
         if self.dns_strategy() != "networkmanager":
             raise RuntimeError(
@@ -198,6 +205,9 @@ class LocalDevManager:
             )
         if not self.apt.is_installed("dnsmasq-base"):
             self.apt.install(["dnsmasq-base"])
+
+        previous_conf = NM_CONF.read_text(encoding="utf-8") if NM_CONF.exists() else None
+        previous_dnsmasq = NM_DNSMASQ.read_text(encoding="utf-8") if NM_DNSMASQ.exists() else None
 
         with tempfile.TemporaryDirectory(prefix="nativedev-dns-", dir="/tmp") as temp_dir:
             temp = Path(temp_dir)
@@ -208,14 +218,43 @@ class LocalDevManager:
                 f"address=/.{self.config.domain}/127.0.0.1\n", encoding="utf-8"
             )
             self.runner.run(["mkdir", "-p", str(NM_CONF.parent), str(NM_DNSMASQ.parent)], privileged=True, check=True)
-            self.runner.run(["install", "-m", "0644", str(nm_conf), str(NM_CONF)], privileged=True, check=True)
-            self.runner.run(["install", "-m", "0644", str(nm_dnsmasq), str(NM_DNSMASQ)], privileged=True, check=True)
-        self.systemd.restart("NetworkManager")
+
+            try:
+                self.runner.run(["install", "-m", "0644", str(nm_conf), str(NM_CONF)], privileged=True, check=True)
+                self.runner.run(["install", "-m", "0644", str(nm_dnsmasq), str(NM_DNSMASQ)], privileged=True, check=True)
+                self._reload_networkmanager_dns()
+                if not self.dns_ready():
+                    raise RuntimeError(f"*.{self.config.domain} did not resolve to 127.0.0.1 after DNS reload")
+            except Exception as exc:
+                # Restore only NativeDev-owned files. Never rewrite resolv.conf
+                # or connection profiles while recovering from a failed setup.
+                for old, dest, name in (
+                    (previous_conf, NM_CONF, "rollback-nm.conf"),
+                    (previous_dnsmasq, NM_DNSMASQ, "rollback-dnsmasq.conf"),
+                ):
+                    if old is None:
+                        self.runner.run(["rm", "-f", str(dest)], privileged=True, check=True)
+                    else:
+                        rollback = temp / name
+                        rollback.write_text(old, encoding="utf-8")
+                        self.runner.run(["install", "-m", "0644", str(rollback), str(dest)], privileged=True, check=True)
+                try:
+                    self._reload_networkmanager_dns()
+                except Exception as rollback_exc:
+                    raise RuntimeError(f"DNS setup failed and DNS reload rollback also failed: {rollback_exc}") from exc
+                raise
 
     # ---- Nginx ---------------------------------------------------------------
 
     def nginx_ready(self) -> bool:
         return NGINX_SITE.exists() and NGINX_ENABLED.exists()
+
+    @staticmethod
+    def _nginx_quote(value: str) -> str:
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            raise RuntimeError("Nginx paths may not contain control characters")
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+        return f'"{escaped}"'
 
     def render_nginx(self) -> str:
         domain = self.config.domain
@@ -234,7 +273,7 @@ class LocalDevManager:
                 continue
             socket_path = self.php.developer_socket_path(php_version)
             docroot = self.document_root(project)
-            escaped_root = str(docroot).replace("$", "\\$")
+            escaped_root = self._nginx_quote(str(docroot))
             ssl = ""
             if self.config.https_enabled:
                 ssl = (
@@ -294,6 +333,11 @@ class LocalDevManager:
 
         content = self.render_nginx()
         previous = NGINX_SITE.read_text(encoding="utf-8") if NGINX_SITE.exists() else None
+        enabled_before = NGINX_ENABLED.is_symlink()
+        if NGINX_ENABLED.exists() and not enabled_before:
+            raise RuntimeError(f"Refusing to replace non-symlink path: {NGINX_ENABLED}")
+        if enabled_before and NGINX_ENABLED.resolve() != NGINX_SITE.resolve():
+            raise RuntimeError(f"Refusing to replace unexpected symlink target: {NGINX_ENABLED}")
 
         with tempfile.TemporaryDirectory(prefix="nativedev-nginx-", dir="/tmp") as temp_dir:
             source = Path(temp_dir) / "nativedev-sites.conf"
@@ -304,11 +348,20 @@ class LocalDevManager:
             check = self.runner.run(["nginx", "-t"], privileged=True, timeout=30)
             if not check.ok:
                 if previous is None:
-                    self.runner.run(["rm", "-f", str(NGINX_SITE), str(NGINX_ENABLED)], privileged=True)
+                    self.runner.run(["rm", "-f", str(NGINX_SITE)], privileged=True, check=True)
                 else:
                     rollback = Path(temp_dir) / "rollback.conf"
                     rollback.write_text(previous, encoding="utf-8")
-                    self.runner.run(["install", "-m", "0644", str(rollback), str(NGINX_SITE)], privileged=True)
+                    self.runner.run(["install", "-m", "0644", str(rollback), str(NGINX_SITE)], privileged=True, check=True)
+                if not enabled_before:
+                    self.runner.run(["rm", "-f", str(NGINX_ENABLED)], privileged=True, check=True)
+                rollback_check = self.runner.run(["nginx", "-t"], privileged=True, timeout=30)
+                if not rollback_check.ok:
+                    raise RuntimeError(
+                        (check.output or "nginx -t failed")
+                        + "; rollback was attempted but the restored Nginx configuration is also invalid: "
+                        + (rollback_check.output or "nginx -t failed after rollback")
+                    )
                 raise RuntimeError(check.output or "nginx -t failed; configuration rolled back")
         self.systemd.reload("nginx")
 
@@ -348,15 +401,10 @@ class LocalDevManager:
                 raise RuntimeError(result.output or "Certificate generation failed")
             self.runner.run(["mkdir", "-p", str(NGINX_CERT_DIR)], privileged=True, check=True)
             self.runner.run(["install", "-m", "0644", str(cert), str(NGINX_CERT_DIR / "nativedev.pem")], privileged=True, check=True)
-            # Mode 0644, not 0600: the file is written by the privileged
-            # helper as root:root, and Nginx's worker process (www-data) must
-            # be able to read the key to terminate TLS. This is a locally
-            # generated mkcert leaf key for *.test only (mkcert's private root
-            # CA key, which is what actually matters for trust, stays under
-            # the developer's own mkcert state directory and is never touched
-            # here) -- world-readable is an accepted, standard trade-off for
-            # local-only development certificates.
-            self.runner.run(["install", "-m", "0644", str(key), str(NGINX_CERT_DIR / "nativedev-key.pem")], privileged=True, check=True)
+            # Nginx's privileged master process loads the private key before
+            # workers handle requests, so the leaf key does not need to be
+            # world-readable. Keep the NativeDev-owned key root-only.
+            self.runner.run(["install", "-m", "0600", str(key), str(NGINX_CERT_DIR / "nativedev-key.pem")], privileged=True, check=True)
         self.config.https_enabled = True
         self.config.save()
         self.configure_nginx_sites()

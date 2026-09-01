@@ -236,5 +236,62 @@ class GuiFeatureRegressionTests(unittest.TestCase):
         projects_refresh = gui[gui.index("class ProjectsPage"):gui.index("class LocalDevPage")]
         self.assertNotIn("ensure_project_readable(project)", projects_refresh)
 
+
+class MissingExecutableRegressionTests(unittest.TestCase):
+    def test_command_runner_missing_executable_returns_127(self):
+        from nativedev.system import CommandRunner
+
+        runner = CommandRunner()
+        try:
+            result = runner.run(["nativedev-command-that-does-not-exist"], timeout=1)
+            self.assertEqual(result.returncode, 127)
+            self.assertFalse(result.ok)
+        finally:
+            runner.close()
+
+    def test_php_cli_version_is_empty_when_php_binary_is_missing(self):
+        from nativedev.system import CommandResult, DistroInfo
+
+        class Runner:
+            def run(self, argv, **kwargs):
+                self.argv = list(argv)
+                return CommandResult(list(argv), 127, "", "No such file or directory")
+
+        distro = DistroInfo("debian", "Debian", "13", "trixie", (), "Debian 13")
+        manager = PhpManager(Runner(), None, None, distro)
+        self.assertEqual(manager.cli_version(), "")
+
+
+    def test_php_cli_version_does_not_invoke_runner_when_php_is_absent(self):
+        from unittest.mock import patch
+        from nativedev.system import DistroInfo
+
+        class Runner:
+            def run(self, argv, **kwargs):
+                raise AssertionError("runner must not be called when php is absent from PATH")
+
+        distro = DistroInfo("debian", "Debian", "13", "trixie", (), "Debian 13")
+        manager = PhpManager(Runner(), None, None, distro)
+        with patch("nativedev.managers.php.shutil.which", return_value=None):
+            self.assertEqual(manager.cli_version(), "")
+
+    def test_php_refresh_source_detects_sury_before_parallel_catalog(self):
+        gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
+        php_page = gui[gui.index("class PhpPage"):gui.index("class NodePage")]
+        self.assertIn("sury = self.context.php.sury_configured()", php_page)
+        self.assertIn("available = self.context.php.available_versions() if sury else []", php_page)
+
+    def test_php_available_versions_require_sury(self):
+        from nativedev.system import DistroInfo
+
+        class Runner:
+            def run(self, argv, **kwargs):
+                raise AssertionError("APT metadata should not be queried before Sury is configured")
+
+        distro = DistroInfo("debian", "Debian", "13", "trixie", (), "Debian 13")
+        manager = PhpManager(Runner(), None, None, distro)
+        manager.sury_configured = lambda: False
+        self.assertEqual(manager.available_versions(), [])
+
 if __name__ == "__main__":
     unittest.main()

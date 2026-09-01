@@ -11,6 +11,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, Gtk
 
+from . import __version__
 from .context import AppContext
 from .services import COMPONENTS, ComponentSpec
 
@@ -202,7 +203,7 @@ class DashboardPage(Page):
 class PhpPage(Page):
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
-        self.body.append(page_header("PHP", "Sury PHP discovery, parallel versions and PHP-FPM.", self.refresh))
+        self.body.append(page_header("PHP", "Native PHP management with optional Sury parallel-version support.", self.refresh))
         self.repo_card = card()
         self.versions_card = card()
         self.body.append(self.repo_card)
@@ -214,20 +215,23 @@ class PhpPage(Page):
         self._clear(self.versions_card, "Loading PHP versions…")
 
         def collect():
+            sury = self.context.php.sury_configured()
             installed = self.context.php.installed_versions()
-            available = self.context.php.available_versions()
+            available = self.context.php.available_versions() if sury else []
             versions = sorted(set(installed) | set(available), key=self.context.php._version_key, reverse=True)
             fpm = {}
             for version in versions:
                 fpm_installed = self.context.apt.is_installed(f"php{version}-fpm")
+                config_ready = self.context.php.fpm_config_ready(version) if fpm_installed else False
                 fpm[version] = {
                     "installed": fpm_installed,
-                    "running": self.context.php.fpm_running(version) if fpm_installed else False,
+                    "config_ready": config_ready,
+                    "running": self.context.php.fpm_running(version) if config_ready else False,
                     "enabled_state": self.context.php.fpm_enabled_state(version) if fpm_installed else "n/a",
-                    "developer_pool": self.context.php.developer_pool_configured(version) if fpm_installed else False,
+                    "developer_pool": self.context.php.developer_pool_configured(version) if config_ready else False,
                 }
             return {
-                "sury": self.context.php.sury_configured(),
+                "sury": sury,
                 "sury_supported": self.context.php.sury_supported,
                 "codename": self.context.distro.codename,
                 "installed": installed,
@@ -247,23 +251,24 @@ class PhpPage(Page):
 
     def _build_repo(self, data):
         self._remove_all(self.repo_card)
-        self.repo_card.append(label("Sury repository", "section-title"))
+        self.repo_card.append(label("Sury repository (optional)", "section-title"))
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         row.append(status_pill("Configured" if data["sury"] else "Not configured", data["sury"]))
         row.append(label(f"Base suite: {data['codename'] or 'unknown'}", "muted"))
         row.set_hexpand(True)
         self.repo_card.append(row)
         if not data["sury"]:
-            button = Gtk.Button(label="Configure Sury")
+            self.repo_card.append(label("Existing Debian PHP works without Sury. Install Sury only if you want its parallel PHP packages.", "muted", wrap=True))
+            button = Gtk.Button(label="Install Sury repository")
             button.set_sensitive(data["sury_supported"] and self.context.distro.is_debian_family)
             button.add_css_class("suggested-action")
             button.connect(
                 "clicked",
                 lambda *_: confirm(
                     self.window,
-                    "Configure Sury PHP?",
-                    "This installs the Sury archive keyring, creates NativeDev's own APT source file, and refreshes APT metadata.",
-                    lambda: self.action(button, self.context.php.configure_sury, success_message="Sury configured", after=self.refresh),
+                    "Install Sury PHP repository?",
+                    "Sury is optional. This explicit action installs its archive keyring, creates NativeDev's own APT source file, and refreshes APT metadata. Debian PHP can be used without it.",
+                    lambda: self.action(button, lambda: self.context.php.configure_sury(explicit=True), success_message="Sury configured", after=self.refresh),
                 ),
             )
             self.repo_card.append(button)
@@ -278,7 +283,12 @@ class PhpPage(Page):
             title_row.append(status_pill(f"Default {data['cli']}", True))
         self.versions_card.append(title_row)
         if not data["versions"]:
-            self.versions_card.append(label("No versioned PHP packages found in APT metadata.", "muted"))
+            message = (
+                "No versioned PHP packages are currently installed. Debian PHP can be installed with APT, or install the optional Sury repository here for parallel versions."
+                if not data["sury"]
+                else "No versioned PHP packages found in APT metadata."
+            )
+            self.versions_card.append(label(message, "muted"))
             return
 
         installed = set(data["installed"])
@@ -294,13 +304,16 @@ class PhpPage(Page):
             if version in installed:
                 fpm = data["fpm"].get(version, {})
                 if fpm.get("installed"):
-                    top.append(status_pill("FPM running" if fpm.get("running") else "FPM stopped", fpm.get("running")))
-                    state = fpm.get("enabled_state", "unknown")
-                    top.append(status_pill("Enabled" if state.startswith("enabled") else state.capitalize(), state.startswith("enabled") if state in {"enabled", "disabled"} else None))
-                    if fpm.get("developer_pool"):
-                        top.append(status_pill(f"*.test as {data['developer_user']}", True))
+                    if not fpm.get("config_ready"):
+                        top.append(status_pill("FPM config missing", False))
                     else:
-                        top.append(status_pill("*.test pool not configured", None))
+                        top.append(status_pill("FPM running" if fpm.get("running") else "FPM stopped", fpm.get("running")))
+                        state = fpm.get("enabled_state", "unknown")
+                        top.append(status_pill("Enabled" if state.startswith("enabled") else state.capitalize(), state.startswith("enabled") if state in {"enabled", "disabled"} else None))
+                        if fpm.get("developer_pool"):
+                            top.append(status_pill(f"*.test as {data['developer_user']}", True))
+                        else:
+                            top.append(status_pill("*.test pool not configured", None))
                 else:
                     top.append(status_pill("CLI installed", True))
             else:
@@ -327,39 +340,53 @@ class PhpPage(Page):
 
                 fpm = data["fpm"].get(version, {})
                 if fpm.get("installed"):
-                    if not fpm.get("developer_pool"):
-                        pool = Gtk.Button(label="Configure *.test pool")
-                        pool.connect(
+                    if not fpm.get("config_ready"):
+                        repair = Gtk.Button(label="Repair FPM")
+                        repair.add_css_class("suggested-action")
+                        repair.connect(
                             "clicked",
-                            lambda _b, v=version, btn=pool: confirm(
+                            lambda _b, v=version, btn=repair: confirm(
                                 self.window,
-                                f"Configure PHP {v} for *.test?",
-                                f"NativeDev will create its own PHP-FPM pool running as {data['developer_user']}. Debian/Sury's www pool is not modified.",
-                                lambda: self.action(btn, lambda: self.context.php.ensure_developer_pool(v), success_message=f"PHP {v} NativeDev pool configured", after=self.refresh),
+                                f"Repair PHP {v} FPM?",
+                                f"The php{v}-fpm package is installed, but its master configuration is missing. NativeDev will purge and reinstall only php{v}-fpm to restore package-owned defaults. Other PHP versions and packages are not touched.",
+                                lambda: self.action(btn, lambda: self.context.php.repair_fpm(v), success_message=f"PHP {v} FPM repaired", after=self.refresh),
                             ),
                         )
-                        actions.append(pool)
-                    if fpm.get("running"):
-                        stop = Gtk.Button(label="Stop")
-                        stop.connect("clicked", lambda _b, v=version, btn=stop: self.action(btn, lambda: self.context.php.stop_fpm(v), success_message=f"PHP {v} FPM stopped", after=self.refresh))
-                        actions.append(stop)
-                        restart = Gtk.Button(label="Restart")
-                        restart.connect("clicked", lambda _b, v=version, btn=restart: self.action(btn, lambda: self.context.php.restart_fpm(v), success_message=f"PHP {v} FPM restarted", after=self.refresh))
-                        actions.append(restart)
+                        actions.append(repair)
                     else:
-                        start_btn = Gtk.Button(label="Start")
-                        start_btn.connect("clicked", lambda _b, v=version, btn=start_btn: self.action(btn, lambda: self.context.php.start_fpm(v), success_message=f"PHP {v} FPM started", after=self.refresh))
-                        actions.append(start_btn)
+                        if not fpm.get("developer_pool"):
+                            pool = Gtk.Button(label="Configure *.test pool")
+                            pool.connect(
+                                "clicked",
+                                lambda _b, v=version, btn=pool: confirm(
+                                    self.window,
+                                    f"Configure PHP {v} for *.test?",
+                                    f"NativeDev will create its own PHP-FPM pool running as {data['developer_user']}. Debian/Sury's www pool is not modified.",
+                                    lambda: self.action(btn, lambda: self.context.php.ensure_developer_pool(v), success_message=f"PHP {v} NativeDev pool configured", after=self.refresh),
+                                ),
+                            )
+                            actions.append(pool)
+                        if fpm.get("running"):
+                            stop = Gtk.Button(label="Stop")
+                            stop.connect("clicked", lambda _b, v=version, btn=stop: self.action(btn, lambda: self.context.php.stop_fpm(v), success_message=f"PHP {v} FPM stopped", after=self.refresh))
+                            actions.append(stop)
+                            restart = Gtk.Button(label="Restart")
+                            restart.connect("clicked", lambda _b, v=version, btn=restart: self.action(btn, lambda: self.context.php.restart_fpm(v), success_message=f"PHP {v} FPM restarted", after=self.refresh))
+                            actions.append(restart)
+                        else:
+                            start_btn = Gtk.Button(label="Start")
+                            start_btn.connect("clicked", lambda _b, v=version, btn=start_btn: self.action(btn, lambda: self.context.php.start_fpm(v), success_message=f"PHP {v} FPM started", after=self.refresh))
+                            actions.append(start_btn)
 
-                    enabled_state = fpm.get("enabled_state")
-                    if enabled_state == "enabled":
-                        disable = Gtk.Button(label="Disable")
-                        disable.connect("clicked", lambda _b, v=version, btn=disable: self.action(btn, lambda: self.context.php.disable_fpm(v), success_message=f"PHP {v} FPM disabled", after=self.refresh))
-                        actions.append(disable)
-                    elif enabled_state == "disabled":
-                        enable = Gtk.Button(label="Enable")
-                        enable.connect("clicked", lambda _b, v=version, btn=enable: self.action(btn, lambda: self.context.php.enable_fpm(v), success_message=f"PHP {v} FPM enabled", after=self.refresh))
-                        actions.append(enable)
+                        enabled_state = fpm.get("enabled_state")
+                        if enabled_state == "enabled":
+                            disable = Gtk.Button(label="Disable")
+                            disable.connect("clicked", lambda _b, v=version, btn=disable: self.action(btn, lambda: self.context.php.disable_fpm(v), success_message=f"PHP {v} FPM disabled", after=self.refresh))
+                            actions.append(disable)
+                        elif enabled_state == "disabled":
+                            enable = Gtk.Button(label="Enable")
+                            enable.connect("clicked", lambda _b, v=version, btn=enable: self.action(btn, lambda: self.context.php.enable_fpm(v), success_message=f"PHP {v} FPM enabled", after=self.refresh))
+                            actions.append(enable)
 
                 uninstall = Gtk.Button(label="Uninstall")
                 uninstall.add_css_class("destructive-action")
@@ -1009,14 +1036,14 @@ class MainWindow(Gtk.ApplicationWindow):
         super().__init__(application=application)
         self.context = context
         self.worker = Worker()
-        self.set_title("NativeDev")
+        self.set_title(f"NativeDev {__version__}")
         self.set_default_size(1040, 700)
         self.set_size_request(760, 520)
 
         header = Gtk.HeaderBar()
         title = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         title.append(label("NativeDev", "app-title"))
-        title.append(label("Native Debian development manager", "muted"))
+        title.append(label(f"Native Debian development manager · {__version__}", "muted"))
         header.set_title_widget(title)
         self.set_titlebar(header)
 

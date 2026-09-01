@@ -6,7 +6,7 @@ It is a minimal **Python + PyGObject + GTK4** desktop manager that orchestrates 
 
 NativeDev deliberately manages the services already provided by your Linux system. It does **not** bundle PHP, Nginx, databases, Redis, Node.js, containers, VMs, Electron, or a private server stack.
 
-> Status: **0.1.5 alpha / runnable MVP**. Review every privileged change before using this on an important workstation.
+> Status: **0.1.7 alpha / runnable MVP**. Review every privileged change before using this on an important workstation.
 
 ## Current target
 

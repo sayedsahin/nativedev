@@ -6,6 +6,7 @@ import re
 import shutil
 import socket
 import tempfile
+import time
 from pathlib import Path
 
 from ..config import AppConfig, STATE_DIR
@@ -18,6 +19,8 @@ NGINX_ENABLED = Path("/etc/nginx/sites-enabled/nativedev-sites.conf")
 NM_CONF = Path("/etc/NetworkManager/conf.d/nativedev-dns.conf")
 NM_DNSMASQ = Path("/etc/NetworkManager/dnsmasq.d/nativedev-test.conf")
 NGINX_CERT_DIR = Path("/etc/nginx/nativedev")
+NGINX_CERT = NGINX_CERT_DIR / "nativedev.pem"
+NGINX_KEY = NGINX_CERT_DIR / "nativedev-key.pem"
 WEB_USER = "www-data"
 PHP_DEFAULT = "default"
 
@@ -127,11 +130,19 @@ class LocalDevManager:
         self._ensure_web_user()
         docroot = self.document_root(project)
         self._grant_parent_traverse(docroot)
-        self._setfacl(["-R", "-P", "-m", f"u:{WEB_USER}:rX", "--", str(docroot)])
-        # Default ACL so files created later (e.g. an uploaded avatar written
-        # by the app itself, as the developer user) stay servable by Nginx
-        # without a manual re-scan.
-        self._set_default_acl_on_dirs(docroot, f"u:{WEB_USER}:r-x")
+
+        # A parked project may contain Docker/container-created files owned by
+        # root or another UID. NativeDev does not own those files and must not
+        # try to rewrite their ACLs: setfacl would emit EPERM for every such
+        # entry and abort the whole Nginx generation. Apply Nginx read ACLs
+        # only to the developer-owned part of the tree and prune foreign-owned
+        # directories entirely. Existing Unix mode bits on skipped paths are
+        # left untouched.
+        self._set_owned_tree_acl(docroot, f"u:{WEB_USER}:rX")
+
+        # Default ACL so files created later by the developer remain servable.
+        # Again, only developer-owned directories are NativeDev's concern.
+        self._set_default_acl_on_owned_dirs(docroot, f"u:{WEB_USER}:r-x")
 
     def _grant_parent_traverse(self, target: Path) -> None:
         uid = os.getuid()
@@ -148,9 +159,44 @@ class LocalDevManager:
                 continue
             self._setfacl(["-m", f"u:{WEB_USER}:x", "--", str(ancestor)])
 
-    def _set_default_acl_on_dirs(self, root: Path, acl: str) -> None:
+    def _owned_find_prefix(self, root: Path) -> list[str]:
+        uid = str(os.getuid())
+        # -xdev keeps an embedded mount (for example a container mount) from
+        # turning a local-site refresh into an ACL walk of another filesystem.
+        #
+        # Never pass symlink pathnames to setfacl. setfacl follows a symlink to
+        # its target; a common Laravel-in-Docker layout has public/storage ->
+        # /var/www/html/storage/app/public, which is meaningful inside the
+        # container but is a broken absolute link on the host. Passing that
+        # pathname to setfacl makes the entire Nginx generation fail with ENOENT.
+        # Symlinks need no ACL of their own, so prune them unconditionally.
+        # Also prune directories owned by another UID (Docker/root-owned trees).
+        return [
+            "find", str(root), "-xdev",
+            "(",
+            "-type", "l",
+            "-o",
+            "(", "-type", "d", "!", "-uid", uid, ")",
+            ")",
+            "-prune", "-o",
+            "-uid", uid,
+        ]
+
+    def _set_owned_tree_acl(self, root: Path, acl: str) -> None:
         result = self.runner.run(
-            ["find", str(root), "-type", "d", "-exec", "setfacl", "-m", f"d:{acl}", "--", "{}", "+"],
+            [*self._owned_find_prefix(root), "-exec", "setfacl", "-m", acl, "--", "{}", "+"],
+            timeout=900,
+        )
+        if not result.ok:
+            raise RuntimeError(result.output or f"Could not grant Nginx read ACLs in {root}")
+
+    def _set_default_acl_on_owned_dirs(self, root: Path, acl: str) -> None:
+        result = self.runner.run(
+            [
+                *self._owned_find_prefix(root),
+                "-type", "d",
+                "-exec", "setfacl", "-m", f"d:{acl}", "--", "{}", "+",
+            ],
             timeout=900,
         )
         if not result.ok:
@@ -190,6 +236,20 @@ class LocalDevManager:
         except OSError:
             return False
 
+    def _wait_for_dns_ready(self, timeout: float = 8.0, interval: float = 0.25) -> bool:
+        # `nmcli general reload dns-full` restarts NetworkManager's DNS plugin.
+        # NetworkManager documents that this shortly interrupts name
+        # resolution, so an immediate one-shot lookup is racy even when the
+        # resulting configuration is correct. Retry for a small bounded window
+        # instead of rolling back a healthy configuration on the first lookup.
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            if self.dns_ready():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(max(0.01, interval))
+
     def _reload_networkmanager_dns(self) -> None:
         # Do not restart NetworkManager: that can bounce active connections,
         # delay connectivity after boot, and interfere with VPN/Wi-Fi state.
@@ -223,8 +283,10 @@ class LocalDevManager:
                 self.runner.run(["install", "-m", "0644", str(nm_conf), str(NM_CONF)], privileged=True, check=True)
                 self.runner.run(["install", "-m", "0644", str(nm_dnsmasq), str(NM_DNSMASQ)], privileged=True, check=True)
                 self._reload_networkmanager_dns()
-                if not self.dns_ready():
-                    raise RuntimeError(f"*.{self.config.domain} did not resolve to 127.0.0.1 after DNS reload")
+                if not self._wait_for_dns_ready():
+                    raise RuntimeError(
+                        f"*.{self.config.domain} did not resolve to 127.0.0.1 within 8 seconds after DNS reload"
+                    )
             except Exception as exc:
                 # Restore only NativeDev-owned files. Never rewrite resolv.conf
                 # or connection profiles while recovering from a failed setup.
@@ -256,6 +318,21 @@ class LocalDevManager:
         escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
         return f'"{escaped}"'
 
+    def https_ready(self) -> bool:
+        """Return True only when HTTPS is enabled *and* both TLS files exist.
+
+        The config flag can become stale when a user manually cleans /etc/nginx
+        or restores a system snapshot.  Missing NativeDev-owned certificate files
+        must never make ordinary HTTP site generation fail.
+        """
+        return bool(self.config.https_enabled and NGINX_CERT.is_file() and NGINX_KEY.is_file())
+
+    def _reconcile_https_state(self) -> None:
+        """Disable stale HTTPS state when its NativeDev-owned TLS files vanished."""
+        if self.config.https_enabled and not (NGINX_CERT.is_file() and NGINX_KEY.is_file()):
+            self.config.https_enabled = False
+            self.config.save()
+
     def render_nginx(self) -> str:
         domain = self.config.domain
         blocks: list[str] = [
@@ -275,12 +352,12 @@ class LocalDevManager:
             docroot = self.document_root(project)
             escaped_root = self._nginx_quote(str(docroot))
             ssl = ""
-            if self.config.https_enabled:
+            if self.https_ready():
                 ssl = (
                     "    listen 443 ssl;\n"
                     "    listen [::]:443 ssl;\n"
-                    f"    ssl_certificate {NGINX_CERT_DIR}/nativedev.pem;\n"
-                    f"    ssl_certificate_key {NGINX_CERT_DIR}/nativedev-key.pem;\n"
+                    f"    ssl_certificate {NGINX_CERT};\n"
+                    f"    ssl_certificate_key {NGINX_KEY};\n"
                 )
             blocks.append(
                 f"""server {{
@@ -313,6 +390,12 @@ class LocalDevManager:
     def configure_nginx_sites(self) -> None:
         if not shutil.which("nginx"):
             raise RuntimeError("Nginx is not installed")
+
+        # A user may manually remove /etc/nginx/nativedev while NativeDev's
+        # persisted config still says HTTPS is enabled. Heal that stale state
+        # before rendering so HTTP sites remain recoverable instead of emitting
+        # ssl_certificate directives that make `nginx -t` fail.
+        self._reconcile_https_state()
 
         projects = self.projects()
         versions_needed: set[str] = set()

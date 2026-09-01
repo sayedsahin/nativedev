@@ -20,6 +20,10 @@ sudo install -m 0755 "$ROOT/src/nativedev/privileged_helper.py" /usr/lib/natived
 mkdir -p "$TARGET" "$BIN_DIR" "$DESKTOP_DIR"
 rm -rf "$TARGET/src"
 cp -a "$ROOT/src" "$TARGET/src"
+# Never install cached Python bytecode from a source archive.  This guarantees
+# the interpreter compiles exactly the source shipped by the current release.
+find "$TARGET/src" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+find "$TARGET/src" -type f -name '*.pyc' -delete 2>/dev/null || true
 cp "$ROOT/data/io.github.nativedev.Manager.desktop" "$DESKTOP_DIR/io.github.nativedev.Manager.desktop"
 
 cat > "$BIN_DIR/nativedev" <<EOF

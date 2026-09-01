@@ -179,14 +179,20 @@ class CommandRunner:
                 raise CommandError(result)
             return result
 
-        proc = subprocess.run(
-            command,
-            text=True,
-            capture_output=True,
-            env=dict(os.environ, **(env or {})),
-            timeout=timeout,
-        )
-        result = CommandResult(command, proc.returncode, proc.stdout, proc.stderr)
+        try:
+            proc = subprocess.run(
+                command,
+                text=True,
+                capture_output=True,
+                env=dict(os.environ, **(env or {})),
+                timeout=timeout,
+            )
+            result = CommandResult(command, proc.returncode, proc.stdout, proc.stderr)
+        except FileNotFoundError as exc:
+            # A managed component being absent is normal state for NativeDev.
+            # Surface the conventional shell-style 127 result so status probes
+            # can render Install/Configure actions instead of crashing the GUI.
+            result = CommandResult(command, 127, "", str(exc))
         if check and not result.ok:
             raise CommandError(result)
         return result

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.7 - 2026-09-01
+
+- Fixed the clean-machine PHP page when `/usr/bin/php` is absent by checking CLI PHP availability before invoking it.
+- Made the PHP refresh flow explicitly detect Sury first; parallel-version metadata is queried only when Sury is configured.
+- Added a package-removal race fallback so PHP disappearing during refresh is treated as "not installed" instead of a GUI error.
+- Source installs now remove cached Python bytecode, and release ZIPs no longer ship `__pycache__` or `.pyc` files.
+- The window/header now shows the running NativeDev version, making stale desktop installs immediately visible during debugging.
+
+## 0.1.6 - 2026-09-01
+
+- Fixed PHP page crash when the `php` executable is completely absent after uninstall.
+- Missing executables now return a normal command result with exit code 127 instead of leaking `FileNotFoundError` into the GUI.
+- PHP parallel-version discovery is shown only when Sury is configured; installed PHP versions remain manageable without Sury.
+- Added a clear Sury setup prompt when no PHP versions are available.
+
 ## 0.1.5 - 2026-09-01
 
 - DNS reliability: stop restarting the entire NetworkManager service when configuring `*.test`; use targeted `nmcli general reload conf` + `dns-full` operations instead. Verify wildcard resolution after apply and rollback NativeDev-owned DNS files if configuration fails.

@@ -114,7 +114,7 @@ class Page(Gtk.ScrolledWindow):
     def busy(self, widget: Gtk.Widget, active: bool):
         widget.set_sensitive(not active)
 
-    def action(self, button: Gtk.Button, fn: Callable, *, success_message: str, after: Callable | None = None):
+    def action(self, button: Gtk.Widget, fn: Callable, *, success_message: str, after: Callable | None = None):
         self.busy(button, True)
         self.window.set_activity(True, "Working…")
 
@@ -645,10 +645,207 @@ class ServicesPage(Page):
             self.list_box.remove(child)
 
 
+
+class ProjectsPage(Page):
+    PHP_DEFAULT = "default"
+    PERMISSION_OPTIONS = ("Safe write", "Full write")
+    PERMISSION_VALUES = ("safe", "full")
+
+    def __init__(self, window: "MainWindow"):
+        super().__init__(window)
+        self.body.append(
+            page_header(
+                "Projects",
+                "Per-project PHP-FPM routing and filesystem write permissions.",
+                self.refresh,
+            )
+        )
+        self.summary_card = card()
+        self.projects_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self.body.append(self.summary_card)
+        self.body.append(self.projects_box)
+        self.refresh()
+
+    def refresh(self):
+        self._replace(self.summary_card, [label("Loading projects…", "muted")])
+        self._clear_projects()
+
+        def collect():
+            projects = self.context.localdev.projects()
+            # A newly discovered project defaults to Safe write. Apply that
+            # policy once here so users do not have to troubleshoot www-data
+            # permissions before the site can run.
+            permission_errors: dict[str, str] = {}
+            for project in projects:
+                try:
+                    self.context.localdev.ensure_project_permissions(project)
+                except Exception as exc:  # permission/filesystem boundary
+                    permission_errors[str(project)] = str(exc)
+            default_php = self.context.localdev.default_php_version()
+            fpm_versions = self.context.php.installed_fpm_versions()
+            rows = []
+            for project in projects:
+                rows.append(
+                    {
+                        "path": project,
+                        "root": self.context.localdev.document_root(project),
+                        "prefs": self.context.localdev.project_preferences(project),
+                        "permission_error": permission_errors.get(str(project), ""),
+                    }
+                )
+            return {
+                "projects": rows,
+                "default_php": default_php,
+                "fpm_versions": fpm_versions,
+            }
+
+        def done(data):
+            summary = [label("Parked projects", "section-title")]
+            summary.append(label(str(self.context.localdev.park_dir), "muted", wrap=True))
+            summary.append(
+                status_pill(
+                    f"Default PHP-FPM: {data['default_php']}" if data["default_php"] else "No PHP-FPM installed",
+                    bool(data["default_php"]),
+                )
+            )
+            self._replace(self.summary_card, summary)
+
+            self._clear_projects()
+            if not data["projects"]:
+                empty = card()
+                empty.append(label("No project directories found.", "muted"))
+                self.projects_box.append(empty)
+                return False
+
+            for item in data["projects"]:
+                self.projects_box.append(
+                    self._project_card(
+                        item["path"],
+                        item["root"],
+                        item["prefs"],
+                        data["default_php"],
+                        data["fpm_versions"],
+                        item["permission_error"],
+                    )
+                )
+            return False
+
+        self.worker.submit(collect, done, lambda exc: self.window.set_activity(False, str(exc), error=True))
+
+    def _project_card(
+        self,
+        project: Path,
+        docroot: Path,
+        prefs: dict[str, str],
+        default_php: str,
+        fpm_versions: list[str],
+        permission_error: str,
+    ) -> Gtk.Widget:
+        box = card()
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
+        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        copy.set_hexpand(True)
+        copy.append(label(f"{project.name}.{self.context.config.domain}", "section-title"))
+        copy.append(label(str(project), "muted", wrap=True))
+        if docroot != project:
+            copy.append(label(f"Document root: {docroot}", "muted", wrap=True))
+        top.append(copy)
+
+        controls = Gtk.Grid(column_spacing=10, row_spacing=8)
+        controls.set_valign(Gtk.Align.CENTER)
+
+        php_labels = [f"Default ({default_php})" if default_php else "Default"] + [
+            f"PHP {version}" for version in fpm_versions
+        ]
+        php_values = [self.PHP_DEFAULT, *fpm_versions]
+        php_dropdown = Gtk.DropDown.new_from_strings(php_labels)
+        try:
+            php_index = php_values.index(prefs.get("php", self.PHP_DEFAULT))
+        except ValueError:
+            php_index = 0
+        php_dropdown.set_selected(php_index)
+        php_dropdown.set_sensitive(bool(default_php or fpm_versions))
+
+        permission_dropdown = Gtk.DropDown.new_from_strings(list(self.PERMISSION_OPTIONS))
+        permission_value = prefs.get("permission", "safe")
+        permission_dropdown.set_selected(1 if permission_value == "full" else 0)
+
+        controls.attach(label("PHP"), 0, 0, 1, 1)
+        controls.attach(php_dropdown, 1, 0, 1, 1)
+        controls.attach(label("Permission"), 0, 1, 1, 1)
+        controls.attach(permission_dropdown, 1, 1, 1, 1)
+        top.append(controls)
+        box.append(top)
+
+        if permission_error:
+            box.append(label(f"Permission setup: {permission_error}", "error-text", wrap=True))
+        elif permission_value == "full":
+            box.append(
+                label(
+                    "Full write lets the PHP-FPM user modify any file in this project. Use only for local development.",
+                    "muted",
+                    wrap=True,
+                )
+            )
+        else:
+            writable = self.context.localdev.safe_writable_paths(project)
+            detail = ", ".join(str(path.relative_to(project)) for path in writable)
+            box.append(
+                label(
+                    f"Safe write: source is readable; runtime paths are writable{': ' + detail if detail else '.'}",
+                    "muted",
+                    wrap=True,
+                )
+            )
+
+        def php_changed(dropdown, _param):
+            selected = dropdown.get_selected()
+            if selected < 0 or selected >= len(php_values):
+                return
+            value = php_values[selected]
+            if value == prefs.get("php", self.PHP_DEFAULT):
+                return
+            self.action(
+                dropdown,
+                lambda: self.context.localdev.set_project_php(project, value),
+                success_message=f"{project.name} now uses {'Default PHP' if value == 'default' else 'PHP ' + value}",
+                after=self.refresh,
+            )
+
+        def permission_changed(dropdown, _param):
+            selected = dropdown.get_selected()
+            if selected < 0 or selected >= len(self.PERMISSION_VALUES):
+                return
+            value = self.PERMISSION_VALUES[selected]
+            if value == prefs.get("permission", "safe"):
+                return
+            self.action(
+                dropdown,
+                lambda: self.context.localdev.set_project_permission(project, value),
+                success_message=f"{project.name} permission mode changed to {'Safe write' if value == 'safe' else 'Full write'}",
+                after=self.refresh,
+            )
+
+        php_dropdown.connect("notify::selected", php_changed)
+        permission_dropdown.connect("notify::selected", permission_changed)
+        return box
+
+    def _clear_projects(self):
+        while child := self.projects_box.get_first_child():
+            self.projects_box.remove(child)
+
+    @staticmethod
+    def _replace(container: Gtk.Box, children: list[Gtk.Widget]):
+        while child := container.get_first_child():
+            container.remove(child)
+        for child in children:
+            container.append(child)
+
+
 class LocalDevPage(Page):
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
-        self.body.append(page_header("Local development", "Park projects, configure *.test, Nginx and trusted local HTTPS.", self.refresh))
+        self.body.append(page_header("DNS & HTTPS", "Configure parked directories, *.test, Nginx and trusted local HTTPS.", self.refresh))
         self.settings_card = card()
         self.dns_card = card()
         self.nginx_card = card()
@@ -743,23 +940,25 @@ class LocalDevPage(Page):
 
     def _build_settings(self):
         self._replace(self.settings_card, [])
-        self.settings_card.append(label("Project settings", "section-title"))
+        self.settings_card.append(label("Local development settings", "section-title"))
         grid = Gtk.Grid(column_spacing=10, row_spacing=10)
         park = Gtk.Entry()
         park.set_text(self.context.config.park_dir)
         domain = Gtk.Entry()
         domain.set_text(self.context.config.domain)
         domain.set_max_length(30)
-        php = Gtk.Entry()
-        php.set_text(self.context.config.php_version)
-        php.set_placeholder_text("e.g. 8.4")
         grid.attach(label("Park directory"), 0, 0, 1, 1)
         grid.attach(park, 1, 0, 1, 1)
         grid.attach(label("Local TLD"), 0, 1, 1, 1)
         grid.attach(domain, 1, 1, 1, 1)
-        grid.attach(label("PHP-FPM version"), 0, 2, 1, 1)
-        grid.attach(php, 1, 2, 1, 1)
         self.settings_card.append(grid)
+        self.settings_card.append(
+            label(
+                "Projects use the system Default PHP-FPM automatically. Override PHP per site from Projects.",
+                "muted",
+                wrap=True,
+            )
+        )
         save = Gtk.Button(label="Save settings")
         save.add_css_class("suggested-action")
 
@@ -770,7 +969,6 @@ class LocalDevPage(Page):
                 return
             self.context.config.park_dir = str(Path(park.get_text()).expanduser())
             self.context.config.domain = value
-            self.context.config.php_version = php.get_text().strip()
             self.context.config.save()
             self.window.set_activity(False, "Settings saved")
             self.refresh()
@@ -816,7 +1014,8 @@ class MainWindow(Gtk.ApplicationWindow):
         ("php", "PHP", PhpPage),
         ("node", "Node.js", NodePage),
         ("services", "Services & tools", ServicesPage),
-        ("local", "Local development", LocalDevPage),
+        ("projects", "Projects", ProjectsPage),
+        ("local", "DNS & HTTPS", LocalDevPage),
         ("doctor", "Doctor", DoctorPage),
     )
 

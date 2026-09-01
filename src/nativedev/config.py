@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
@@ -14,8 +14,11 @@ CONFIG_FILE = APP_DIR / "config.json"
 class AppConfig:
     park_dir: str = str(Path.home() / "Code")
     domain: str = "test"
+    # Kept for backward compatibility with 0.1.x config files. Project routing
+    # no longer depends on a global PHP-FPM version.
     php_version: str = ""
     https_enabled: bool = False
+    projects: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -23,8 +26,11 @@ class AppConfig:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return cls()
-        allowed = {field for field in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in data.items() if k in allowed})
+        allowed = {name for name in cls.__dataclass_fields__}
+        values = {key: value for key, value in data.items() if key in allowed}
+        if not isinstance(values.get("projects", {}), dict):
+            values["projects"] = {}
+        return cls(**values)
 
     def save(self) -> None:
         APP_DIR.mkdir(parents=True, exist_ok=True)

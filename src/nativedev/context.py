@@ -31,6 +31,6 @@ class AppContext:
         php = PhpManager(runner, apt, systemd, distro)
         node = NodeManager(runner)
         services = ServiceManager(runner, apt, systemd)
-        localdev = LocalDevManager(runner, apt, systemd, config)
+        localdev = LocalDevManager(runner, apt, systemd, config, php)
         doctor = Doctor(distro, apt, systemd, php, node, services, localdev)
         return cls(distro, config, runner, apt, systemd, php, node, services, localdev, doctor)

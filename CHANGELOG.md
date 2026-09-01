@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.3 - 2026-09-01
+
+- Add a dedicated Projects sidebar/page with one row per parked `*.test` project.
+- Remove the global PHP-FPM version field; projects set to `Default` follow the system default PHP version when matching FPM is installed.
+- Add per-project PHP-FPM dropdowns with `Default (X.Y)` plus installed FPM versions and live Nginx regeneration/rollback.
+- Add per-project permission dropdowns with `Safe write` as the default and `Full write` as an explicit local-development option.
+- Add ACL-based project permissions for `www-data`; Safe mode keeps source read-only while allowing common runtime/cache/upload directories to be written.
+- Automatically install the Debian `acl` package when permission management first needs `setfacl`.
+
 ## 0.1.2 - 2026-09-01
 
 - Cache system authorization for the lifetime of the NativeDev app using a persistent, restricted root helper started once through `pkexec`.

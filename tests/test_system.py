@@ -32,20 +32,63 @@ class VersionTests(unittest.TestCase):
     def test_node_sort_key(self):
         self.assertGreater(NodeManager._version_key("v22.1.0"), NodeManager._version_key("v20.9.0"))
 
+class FakePhpManager:
+    def __init__(self, default="8.4", installed=None):
+        self.default = default
+        self.installed = installed or ["8.4", "8.3"]
+
+    def default_fpm_version(self):
+        return self.default
+
+    def installed_fpm_versions(self):
+        return list(self.installed)
+
+
 class NginxRenderTests(unittest.TestCase):
-    def test_project_public_directory_is_preferred(self):
+    def test_project_public_directory_and_default_php_are_used(self):
         from nativedev.config import AppConfig
         from nativedev.managers.localdev import LocalDevManager
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "shop" / "public").mkdir(parents=True)
-            config = AppConfig(park_dir=str(root), domain="test", php_version="8.4")
-            manager = LocalDevManager(None, None, None, config)  # render path is pure
+            config = AppConfig(park_dir=str(root), domain="test")
+            manager = LocalDevManager(None, None, None, config, FakePhpManager())
             rendered = manager.render_nginx()
             self.assertIn("server_name shop.test;", rendered)
             self.assertIn(str(root / "shop" / "public"), rendered)
             self.assertIn("php8.4-fpm.sock", rendered)
+
+    def test_project_can_pin_an_installed_php_fpm_version(self):
+        from nativedev.config import AppConfig
+        from nativedev.managers.localdev import LocalDevManager
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "legacy"
+            project.mkdir()
+            config = AppConfig(
+                park_dir=str(root),
+                domain="test",
+                projects={str(project.resolve()): {"php": "8.3", "permission": "safe"}},
+            )
+            manager = LocalDevManager(None, None, None, config, FakePhpManager())
+            rendered = manager.render_nginx()
+            self.assertIn("php8.3-fpm.sock", rendered)
+
+    def test_new_project_defaults_to_safe_permissions(self):
+        from nativedev.config import AppConfig
+        from nativedev.managers.localdev import LocalDevManager
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "app"
+            project.mkdir()
+            config = AppConfig(park_dir=str(root), domain="test")
+            manager = LocalDevManager(None, None, None, config, FakePhpManager())
+            prefs = manager.project_preferences(project)
+            self.assertEqual(prefs["php"], "default")
+            self.assertEqual(prefs["permission"], "safe")
 
 
 class GtkSourceRegressionTests(unittest.TestCase):
@@ -98,6 +141,10 @@ class GuiFeatureRegressionTests(unittest.TestCase):
         self.assertIn('Gtk.Button(label="Enable")', gui)
         self.assertIn('Gtk.Button(label="Disable")', gui)
         self.assertNotIn('Gtk.Button(label="Use CLI")', gui)
+        self.assertIn('("projects", "Projects", ProjectsPage)', gui)
+        self.assertIn('Gtk.DropDown.new_from_strings(php_labels)', gui)
+        self.assertIn('PERMISSION_OPTIONS = ("Safe write", "Full write")', gui)
+        self.assertNotIn('grid.attach(label("PHP-FPM version")', gui)
 
 if __name__ == "__main__":
     unittest.main()

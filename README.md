@@ -4,7 +4,7 @@ A minimal **Python + PyGObject + GTK4** desktop manager for native Debian-family
 
 NativeDev deliberately manages the services already provided by your Linux system. It does **not** bundle PHP, Nginx, databases, Redis, Node.js, containers, VMs, Electron, or a private server stack.
 
-> Status: **0.1.2 alpha / runnable MVP**. Review every privileged change before using this on an important workstation.
+> Status: **0.1.3 alpha / runnable MVP**. Review every privileged change before using this on an important workstation.
 
 ## Current target
 
@@ -49,10 +49,16 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 - systemd start/stop/restart and enable/disable controls when the unit supports them
 - MariaDB/MySQL conflict guard
 
-### Local development
+### Projects / local development
 - Park one projects directory (default `~/Code`)
-- Scan first-level project directories
+- Scan first-level project directories and expose a dedicated **Projects** page
 - Use `public/` automatically when present, otherwise project root
+- Use the system default PHP-FPM automatically; no global PHP-FPM field is required
+- Per-project PHP dropdown: `Default (X.Y)` plus installed PHP-FPM versions
+- Per-project permission dropdown: **Safe write** (default) or **Full write**
+- Safe write grants project read/traverse access to `www-data` and write access to detected runtime paths such as `storage/`, `var/`, `bootstrap/cache/`, and common upload/media directories
+- Full write grants `www-data` write access across the project; ACLs are used instead of `chmod 777`
+- Install Debian's `acl` package automatically when project permission management first needs it
 - Generate only `/etc/nginx/sites-available/nativedev-sites.conf`
 - Validate with `nginx -t` before reload and rollback on failure
 - Configure `*.test -> 127.0.0.1` using **NetworkManager-managed dnsmasq**
@@ -71,14 +77,15 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 
 ## Screens
 
-The GTK4 UI has six deliberately small pages:
+The GTK4 UI has seven deliberately small pages:
 
 1. Dashboard
 2. PHP
 3. Node.js
 4. Services & tools
-5. Local development
-6. Doctor
+5. Projects
+6. DNS & HTTPS
+7. Doctor
 
 It uses GTK CSS only; no libadwaita, WebView, Node/Electron, Qt, database, or extra Python UI framework.
 
@@ -169,7 +176,7 @@ NVM shell integration is enclosed by:
 - Automatic wildcard DNS is intentionally limited to NetworkManager. Other resolver layouts are detected as unsupported instead of rewriting resolver configuration.
 - Generic Redis/MariaDB/PostgreSQL configuration editors are not implemented yet; v0.1 installs, detects and controls their native services. Nginx/local DNS/HTTPS configuration is implemented.
 - Site scanning is refresh-based, not a persistent filesystem daemon.
-- Nginx needs read/traverse permission to projects under your home directory. NativeDev does not silently broaden home-directory permissions.
+- Project ACL management assumes normal development projects are owned by the desktop user; files owned by another account may require ownership repair outside NativeDev.
 - Oracle MySQL packaging differs between Debian-family distributions. The MVP only offers the button when APT exposes an actual `mysql-server` candidate.
 
 ## Architecture
@@ -195,9 +202,7 @@ The core managers do not depend on GTK. A future GTK redesign, CLI, or other fro
 
 - Package the restricted privileged helper behind a dedicated installed Polkit action/policy
 - Managed configuration forms for Redis, Memcached, MariaDB and PostgreSQL
-- Per-project PHP version metadata
 - `.nvmrc` project detection
-- Site-specific PHP-FPM sockets
 - Uninstall/reset screen for NativeDev-owned system integration
 - `.deb` packaging and GitHub Actions CI
 - Automated integration tests in Debian/Ubuntu VMs

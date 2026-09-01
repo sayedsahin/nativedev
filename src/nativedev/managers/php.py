@@ -100,9 +100,25 @@ class PhpManager:
                     versions.add(match.group(1))
         return sorted(versions, key=self._version_key, reverse=True)
 
+    def installed_fpm_versions(self) -> list[str]:
+        return [version for version in self.installed_versions() if self.apt.is_installed(f"php{version}-fpm")]
+
     def cli_version(self) -> str:
         result = self.runner.run(["php", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;"], timeout=10)
         return result.stdout.strip() if result.ok else ""
+
+    def default_fpm_version(self) -> str:
+        """Resolve the PHP-FPM version used by projects set to Default.
+
+        Prefer the system CLI default when its matching FPM package exists; if
+        the CLI points at a version without FPM, fall back to the newest
+        installed FPM version rather than requiring a separate global setting.
+        """
+        cli = self.cli_version()
+        versions = self.installed_fpm_versions()
+        if cli in versions:
+            return cli
+        return versions[0] if versions else ""
 
     def fpm_running(self, version: str) -> bool:
         return self.systemd.is_active(f"php{version}-fpm")

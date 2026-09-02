@@ -77,20 +77,17 @@ class LocalDevManager:
         return {"php": php}
 
     def set_project_php(self, project: Path, version: str) -> None:
+        """Persist only the project's desired PHP selection.
+
+        Cross-manager side effects (Nginx regeneration/rollback) belong to the
+        application controller so this manager remains independently reusable.
+        """
         project = self._validate_project(project)
         if version != PHP_DEFAULT and version not in self.php.installed_fpm_versions():
             raise RuntimeError(f"PHP {version} FPM is not installed")
         prefs = self._project_record(project)
-        previous = prefs.get("php", PHP_DEFAULT)
         prefs["php"] = version
         self.config.save()
-        if shutil.which("nginx"):
-            try:
-                self.configure_nginx_sites()
-            except Exception:
-                prefs["php"] = previous
-                self.config.save()
-                raise
 
     def project_php_version(self, project: Path) -> str:
         prefs = self.project_preferences(project)
@@ -311,6 +308,10 @@ class LocalDevManager:
     def nginx_ready(self) -> bool:
         return NGINX_SITE.exists() and NGINX_ENABLED.exists()
 
+    def nginx_managed(self) -> bool:
+        """Return whether NativeDev has already created any Nginx site state."""
+        return NGINX_SITE.exists() or NGINX_ENABLED.exists()
+
     @staticmethod
     def _nginx_quote(value: str) -> str:
         if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
@@ -446,7 +447,10 @@ class LocalDevManager:
                         + (rollback_check.output or "nginx -t failed after rollback")
                     )
                 raise RuntimeError(check.output or "nginx -t failed; configuration rolled back")
-        self.systemd.reload("nginx")
+        # A stopped Nginx service still benefits from a validated generated
+        # config; there is simply nothing to reload until the user starts it.
+        if self.systemd.is_active("nginx"):
+            self.systemd.reload("nginx")
 
     def mkcert_installed(self) -> bool:
         return bool(shutil.which("mkcert"))

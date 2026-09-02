@@ -8,7 +8,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..system import CommandRunner
+from ..system import AptManager, CommandRunner
 
 
 NVM_INSTALL_URL = "https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.6/install.sh"
@@ -24,8 +24,17 @@ class LtsRelease:
 
 
 class NodeManager:
-    def __init__(self, runner: CommandRunner):
+    """Manage one active Node provider: Debian APT or per-user NVM.
+
+    NativeDev can discover/manage an existing Debian Node installation without
+    touching it automatically. Multi-version Node is an explicit provider
+    migration to NVM; after a successful migration the Debian node/npm packages
+    are no longer retained as a second selectable runtime.
+    """
+
+    def __init__(self, runner: CommandRunner, apt: AptManager | None = None):
         self.runner = runner
+        self.apt = apt or AptManager(runner)
 
     @property
     def nvm_dir(self) -> Path:
@@ -35,10 +44,39 @@ class NodeManager:
         return (Path(xdg) / "nvm") if xdg else (Path.home() / ".nvm")
 
     def installed(self) -> bool:
+        """Return whether the NVM framework itself is present."""
         return (self.nvm_dir / "nvm.sh").is_file()
+
+    def system_node_installed(self) -> bool:
+        return self.apt.is_installed("nodejs")
+
+    def system_npm_installed(self) -> bool:
+        return self.apt.is_installed("npm")
+
+    def system_node_version(self) -> str:
+        binary = Path("/usr/bin/node")
+        if not binary.is_file():
+            return ""
+        result = self.runner.run([str(binary), "--version"], timeout=10)
+        value = result.stdout.strip()
+        return value if result.ok and re.fullmatch(r"v\d+\.\d+\.\d+", value) else ""
+
+    def provider(self) -> str:
+        """Return the NativeDev Node mode: ``nvm``, ``debian`` or ``none``.
+
+        Presence of the NVM framework wins deliberately. NativeDev never offers
+        Debian as a second provider once NVM is active; a leftover system Node is
+        treated only as an incomplete NVM migration that can be cleaned up.
+        """
+        if self.installed():
+            return "nvm"
+        if self.system_node_installed():
+            return "debian"
+        return "none"
 
     def install_nvm(self) -> None:
         if self.installed():
+            self.configure_shell()
             return
         with tempfile.TemporaryDirectory(prefix="nativedev-nvm-") as temp_dir:
             installer = Path(temp_dir) / "install.sh"
@@ -60,6 +98,16 @@ class NodeManager:
             return Path.home() / ".bashrc"
         return Path.home() / ".profile"
 
+    def shell_configured(self) -> bool:
+        rc = self.shell_rc()
+        if not rc.exists():
+            return False
+        try:
+            text = rc.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return BEGIN_MARKER in text and END_MARKER in text
+
     def configure_shell(self) -> Path:
         rc = self.shell_rc()
         old = rc.read_text(encoding="utf-8") if rc.exists() else ""
@@ -75,6 +123,21 @@ class NodeManager:
         rc.write_text(old.rstrip() + block, encoding="utf-8")
         return rc
 
+    def remove_shell_integration(self) -> Path:
+        """Remove only NativeDev's marked NVM block; never delete user NVM data."""
+        rc = self.shell_rc()
+        if not rc.exists():
+            return rc
+        old = rc.read_text(encoding="utf-8")
+        pattern = re.compile(
+            rf"\n?{re.escape(BEGIN_MARKER)}.*?{re.escape(END_MARKER)}\n?",
+            re.DOTALL,
+        )
+        new = pattern.sub("\n", old).rstrip() + ("\n" if old else "")
+        if new != old:
+            rc.write_text(new, encoding="utf-8")
+        return rc
+
     def nvm_version(self) -> str:
         if not self.installed():
             return ""
@@ -82,16 +145,20 @@ class NodeManager:
         return result.stdout.strip() if result.ok else ""
 
     def current_node(self) -> str:
+        provider = self.provider()
+        if provider == "debian":
+            return self.system_node_version()
         if not self.installed():
             return ""
         result = self.runner.bash_nvm(self.nvm_dir, ["current"])
         value = result.stdout.strip()
-        return "" if value in {"none", "system", "N/A"} else value
+        if value == "system":
+            return self.system_node_version()
+        return "" if value in {"none", "N/A"} else value
 
     def default_node(self) -> str:
-        if not self.installed():
+        if not self.installed() or not self.installed_versions():
             return ""
-        # `nvm version default` resolves aliases to the installed concrete version.
         result = self.runner.bash_nvm(self.nvm_dir, ["version", "default"])
         value = result.stdout.strip()
         return "" if value in {"none", "system", "N/A"} else value
@@ -117,8 +184,6 @@ class NodeManager:
 
     @classmethod
     def parse_lts_output(cls, output: str) -> list[LtsRelease]:
-        # nvm emits every patch release in every LTS line. The GUI needs one row
-        # per LTS generation, so retain the newest patch for each codename.
         latest: dict[str, str] = {}
         cleaned = ANSI_RE.sub("", output)
         for raw in cleaned.splitlines():
@@ -135,12 +200,14 @@ class NodeManager:
         return sorted(releases, key=lambda item: cls._version_key(item.version), reverse=True)
 
     def install_version(self, version: str) -> None:
+        self._require_nvm_provider()
         self._validate_version(version)
         result = self.runner.bash_nvm(self.nvm_dir, ["install", version], check=False)
         if not result.ok:
             raise RuntimeError(result.output or f"Node {version} installation failed")
 
     def uninstall_version(self, version: str) -> None:
+        self._require_nvm_provider()
         self._validate_version(version)
         if version not in self.installed_versions():
             raise RuntimeError(f"Node {version} is not installed")
@@ -151,6 +218,7 @@ class NodeManager:
             raise RuntimeError(result.output or f"Node {version} uninstall failed")
 
     def set_default(self, version: str) -> None:
+        self._require_nvm_provider()
         self._validate_version(version)
         if version not in self.installed_versions():
             raise RuntimeError(f"Install Node {version} before setting it as default")
@@ -159,16 +227,109 @@ class NodeManager:
             raise RuntimeError(result.output or f"Could not set Node {version} as default")
 
     def install_lts(self) -> None:
+        if not self.installed():
+            raise RuntimeError("NVM is not installed")
         result = self.runner.bash_nvm(self.nvm_dir, ["install", "--lts"], check=False)
         if not result.ok:
             raise RuntimeError(result.output or "Node LTS installation failed")
         self.runner.bash_nvm(self.nvm_dir, ["alias", "default", "lts/*"], check=True)
 
     def install_current(self) -> None:
+        self._require_nvm_provider()
         result = self.runner.bash_nvm(self.nvm_dir, ["install", "node"], check=False)
         if not result.ok:
             raise RuntimeError(result.output or "Current Node installation failed")
         self.runner.bash_nvm(self.nvm_dir, ["alias", "default", "node"], check=True)
+
+    def system_removal_impact(self) -> list[str]:
+        """Return unrelated packages APT would remove with Debian node/npm."""
+        requested = [pkg for pkg in ("nodejs", "npm") if self.apt.is_installed(pkg)]
+        if not requested:
+            return []
+        result = self.runner.run(["apt-get", "-s", "remove", *requested], timeout=60)
+        if not result.ok:
+            raise RuntimeError(result.output or "Could not calculate Node.js removal impact")
+        removed: set[str] = set()
+        for raw in result.stdout.splitlines():
+            match = re.match(r"^Remv\s+(\S+)", raw.strip())
+            if match:
+                removed.add(match.group(1).split(":", 1)[0])
+        return sorted(removed.difference(requested))
+
+    def install_system_node(self) -> str:
+        packages = ["nodejs"]
+        if self.apt.candidate("npm"):
+            packages.append("npm")
+        self.apt.install(packages)
+        version = self.system_node_version()
+        if not version:
+            raise RuntimeError("Debian Node.js was installed but /usr/bin/node is not usable")
+        return version
+
+    def uninstall_system_node(self) -> None:
+        extras = self.system_removal_impact()
+        if extras:
+            raise RuntimeError(
+                "NativeDev will not remove Debian Node because APT would also remove: "
+                + ", ".join(extras)
+            )
+        packages = [pkg for pkg in ("nodejs", "npm") if self.apt.is_installed(pkg)]
+        if not packages:
+            raise RuntimeError("Debian Node.js is not installed")
+        self.apt.remove(packages)
+
+    def enable_nvm_multi_node(self) -> str:
+        """Migrate Debian Node to exclusive NVM management and install LTS."""
+        extras = self.system_removal_impact()
+        if extras:
+            raise RuntimeError(
+                "NativeDev will not remove Debian Node because APT would also remove: "
+                + ", ".join(extras)
+            )
+
+        # NativeDev's provider migration is explicit: retire Debian Node first,
+        # then activate NVM. If NVM bootstrap or LTS installation fails, restore
+        # the Debian packages as rollback so the user is not left without Node.
+        had_shell = self.shell_configured()
+        system_packages = [pkg for pkg in ("nodejs", "npm") if self.apt.is_installed(pkg)]
+
+        try:
+            if system_packages:
+                self.apt.remove(system_packages)
+            self.install_nvm()
+            versions = self.installed_versions()
+            if not versions:
+                self.install_lts()
+            elif not self.default_node():
+                self.set_default(versions[0])
+            self.configure_shell()
+        except Exception as exc:
+            rollback_errors: list[str] = []
+            if system_packages and not self.system_node_installed():
+                try:
+                    self.install_system_node()
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"Debian Node restore failed: {rollback_exc}")
+            if not had_shell:
+                try:
+                    self.remove_shell_integration()
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"shell rollback failed: {rollback_exc}")
+            if rollback_errors:
+                raise RuntimeError(
+                    f"NVM migration failed ({exc}); " + "; ".join(rollback_errors)
+                ) from exc
+            restored = "Debian Node was restored" if system_packages else "provider state was rolled back"
+            raise RuntimeError(f"NVM migration failed; {restored}: {exc}") from exc
+
+        return self.default_node() or (self.installed_versions()[0] if self.installed_versions() else "")
+
+    def _require_nvm_provider(self) -> None:
+        provider = self.provider()
+        if provider == "debian":
+            raise RuntimeError("Switch Node.js provider to NVM before managing multiple Node versions")
+        if not self.installed():
+            raise RuntimeError("NVM is not installed")
 
     @staticmethod
     def _validate_version(version: str) -> None:

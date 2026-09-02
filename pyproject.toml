@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nativedev"
-version = "0.1.7"
+version = "0.1.9"
 description = "Graphical control plane for a native PHP development stack on Debian-based Linux"
 readme = "README.md"
 requires-python = ">=3.10"

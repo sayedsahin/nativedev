@@ -6,7 +6,7 @@ It is a minimal **Python + PyGObject + GTK4** desktop manager that orchestrates 
 
 NativeDev deliberately manages the services already provided by your Linux system. It does **not** bundle PHP, Nginx, databases, Redis, Node.js, containers, VMs, Electron, or a private server stack.
 
-> Status: **0.1.7 alpha / runnable MVP**. Review every privileged change before using this on an important workstation.
+> Status: **0.1.9 alpha / runnable MVP**. Review every privileged change before using this on an important workstation.
 
 ## Current target
 
@@ -20,24 +20,30 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 ## Included in this MVP
 
 ### PHP
-- Detect Sury PHP repository
-- Resolve Ubuntu-derived base codenames via `UBUNTU_CODENAME`
-- Configure the Sury keyring + a NativeDev-owned DEB822 source file
-- Discover versioned `phpX.Y-fpm` packages from APT
-- Detect installed PHP versions
-- Install CLI, FPM and common extensions
+- Detect and manage an existing Debian system PHP without changing its repository merely because NativeDev starts
+- Use an existing Debian PHP-FPM installation for NativeDev `*.test` sites through a separate per-user pool
+- Offer an explicit, one-way **Enable Sury Multi-PHP** migration when multi-version PHP is wanted; once Sury is active NativeDev no longer offers Debian as a second PHP provider
+- Resolve Ubuntu-derived base codenames via `UBUNTU_CODENAME` and configure the Sury keyring + a NativeDev-owned DEB822 source file
+- Migrate existing Debian PHP package names to Sury candidates in place rather than uninstalling first, avoiding unnecessary removal of reverse dependants such as Composer
+- Discover versioned `phpX.Y-fpm` packages from Sury and render installed PHP versions before available versions
+- Install CLI/FPM plus a Laravel/Symfony-friendly baseline (`bcmath`, `curl`, `gd`, `intl`, `mbstring`, MySQL/PostgreSQL/SQLite drivers, `xml`, `zip`, etc.)
+- Restore missing Debian/Sury UCF-managed module definitions during the explicit Install operation, then enable the baseline for CLI and FPM; later manual module disables are not overridden during refresh/start/stop
+- Install/enable the separate OPcache package for PHP versions before 8.5; PHP 8.5+ does not request a separate OPcache package
 - Start/stop/restart and enable/disable each installed PHP-FPM version
-- Uninstall a specific PHP version without touching other versions
+- Uninstall a PHP version together with all currently installed `phpX.Y` / `phpX.Y-*` packages for that version
 - Select the default `/usr/bin/php` with `update-alternatives`; the current Default button is disabled
 - Create a NativeDev-owned per-user PHP-FPM pool for each version used by `*.test`; PHP workers run as the logged-in developer while Debian/Sury's `www` pool stays untouched
 
 ### Node.js
-- Detect NVM as a per-user installation
+- Detect and manage an existing Debian `nodejs`/`npm` installation without replacing it merely because NativeDev starts
+- Offer an explicit, one-way **Enable NVM Multi-Node** migration; NativeDev first simulates Debian Node removal and blocks the migration when unrelated APT packages would also be removed
+- Remove Debian `nodejs`/`npm` during an approved migration, then install/configure NVM and an LTS Node runtime; failed migrations attempt to restore Debian Node
+- Once NVM is present, NativeDev treats NVM as the Node provider and does not offer Debian Node as a second selectable runtime; a leftover Debian Node is shown only as an incomplete migration to clean up
 - Install pinned NVM installer version `v0.40.6`
 - Add a clearly marked NativeDev block to Bash/Zsh/profile startup config
 - Load all NVM LTS generations and show the latest patch for each LTS codename
-- Install/uninstall individual NVM-managed Node versions
-- Select a default Node version; the current Default button is disabled
+- Render installed NVM Node versions before available LTS versions
+- Install/uninstall individual NVM-managed Node versions and select a default version
 
 ### Native services and tools
 - Nginx
@@ -73,13 +79,14 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 ### Safety / ownership
 - GUI runs as the normal user
 - A normal `./install.sh` installation places the privileged helper at `/usr/lib/nativedev/privileged_helper.py` as a root-owned, non-user-writable file
-- The first privileged action launches that restricted helper through `pkexec`; authorization is reused for the rest of the app session (`./run.sh` development mode falls back to the source-tree helper)
-- The privileged helper validates an allowlist of APT/systemd and NativeDev-owned file operations; it is not an arbitrary root shell
+- The first privileged action launches that restricted helper through a dedicated installed Polkit action; authorization is reused for the rest of the app session. `./run.sh` explicitly opts into the source-tree helper for development only.
+- The privileged helper accepts **structured NativeDev operations**, not client-supplied command argv. Package/service/file targets are validated again on the root side; it is not an arbitrary root shell.
+- GUI and helper use privileged RPC protocol **5** in this release; `install.sh` installs the matching root-owned helper so stale protocol versions fail closed instead of executing an incompatible privileged request.
 - `subprocess` calls use argv lists; no generic `shell=True`
 - NVM is the only shell-sourced integration, with shell-quoted arguments
 - NativeDev writes distinct, named configuration files instead of editing unrelated user configs
 - The GUI confirms system-changing operations
-- Long-running operations run off the GTK main thread
+- Long-running operations run off the GTK main thread; read-only probes may run concurrently, while all mutations are serialized through one global queue/lock.
 
 ## Screens
 
@@ -133,8 +140,10 @@ nativedev
 No PyPI dependency is required for the application runtime. Use distro-provided PyGObject/GTK4.
 
 ```bash
-PYTHONPATH=src python3 -m nativedev
+./run.sh
 ```
+
+`run.sh` sets the explicit development-only source-helper opt-in. Installed builds do not fall back to a user-writable helper.
 
 Core-only tests do not import GTK:
 
@@ -191,25 +200,29 @@ NVM shell integration is enclosed by:
 ## Architecture
 
 ```text
-GTK4 GUI
+GTK4 GUI / future CLI
    |
    +-- AppContext
           |
-          +-- PhpManager ------ APT / systemd / Sury
-          +-- NodeManager ----- NVM (per user)
-          +-- ServiceManager -- APT / systemd
-          +-- LocalDevManager - NetworkManager / Nginx / mkcert
-          +-- Doctor ---------- read-only checks
-                 |
-             System layer
+          +-- NativeDevController -- serialized mutations + cross-manager reconciliation
+          |        |
+          |        +-- PhpManager ------ APT / systemd / Sury
+          |        +-- LocalDevManager - NetworkManager / Nginx / mkcert
+          |
+          +-- NodeManager -------- NVM (per user)
+          +-- ServiceManager ----- APT / systemd
+          +-- Doctor ------------- read-only checks
+                   |
+               System layer
           CommandRunner / AptManager / SystemdManager
+                   |
+          structured Polkit helper RPC
 ```
 
-The core managers do not depend on GTK. A future GTK redesign, CLI, or other frontend can reuse them.
+The core managers do not depend on GTK. Cross-manager invariants (for example, PHP default/pin changes requiring Nginx regeneration) live in `NativeDevController`, so a future CLI can reuse the same mutation semantics.
 
 ## Recommended next milestones
 
-- Package the restricted privileged helper behind a dedicated installed Polkit action/policy
 - Managed configuration forms for Redis, Memcached, MariaDB and PostgreSQL
 - `.nvmrc` project detection
 - Uninstall/reset screen for NativeDev-owned system integration

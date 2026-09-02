@@ -3,6 +3,9 @@ set -euo pipefail
 rm -rf "$HOME/.local/share/nativedev"
 rm -f "$HOME/.local/bin/nativedev"
 rm -f "$HOME/.local/share/applications/io.github.nativedev.Manager.desktop"
+if [ -f /usr/share/polkit-1/actions/io.github.nativedev.policy ]; then
+  sudo rm -f /usr/share/polkit-1/actions/io.github.nativedev.policy
+fi
 if [ -f /usr/lib/nativedev/privileged_helper.py ]; then
   sudo rm -f /usr/lib/nativedev/privileged_helper.py
   sudo rmdir /usr/lib/nativedev 2>/dev/null || true

@@ -18,10 +18,13 @@ from .services import COMPONENTS, ComponentSpec
 
 class Worker:
     def __init__(self):
-        self.pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="nativedev")
+        # Read-only probes may run concurrently. Every mutating action goes
+        # through one queue so multi-command transactions cannot interleave.
+        self.read_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="nativedev-read")
+        self.mutation_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nativedev-mutate")
 
-    def submit(self, fn: Callable, success: Callable | None = None, error: Callable | None = None):
-        future = self.pool.submit(fn)
+    def _submit_to(self, pool: ThreadPoolExecutor, fn: Callable, success: Callable | None = None, error: Callable | None = None):
+        future = pool.submit(fn)
 
         def done(f):
             try:
@@ -35,8 +38,15 @@ class Worker:
 
         future.add_done_callback(done)
 
+    def submit(self, fn: Callable, success: Callable | None = None, error: Callable | None = None):
+        self._submit_to(self.read_pool, fn, success, error)
+
+    def submit_mutation(self, fn: Callable, success: Callable | None = None, error: Callable | None = None):
+        self._submit_to(self.mutation_pool, fn, success, error)
+
     def shutdown(self):
-        self.pool.shutdown(wait=False, cancel_futures=True)
+        self.read_pool.shutdown(wait=False, cancel_futures=True)
+        self.mutation_pool.shutdown(wait=False, cancel_futures=True)
 
 
 def label(text: str = "", css: str | None = None, *, wrap: bool = False) -> Gtk.Label:
@@ -131,7 +141,9 @@ class Page(Gtk.ScrolledWindow):
             self.window.set_activity(False, str(exc), error=True)
             return False
 
-        self.worker.submit(fn, success, error)
+        self.worker.submit_mutation(
+            lambda: self.context.controller.run_mutation(fn), success, error
+        )
 
 
 class DashboardPage(Page):
@@ -155,7 +167,7 @@ class DashboardPage(Page):
                 "supported": self.context.distro.is_debian_family,
                 "php": php,
                 "node": self.context.node.current_node(),
-                "nvm": self.context.node.installed(),
+                "node_provider": self.context.node.provider(),
                 "projects": len(self.context.localdev.projects()),
                 "dns": self.context.localdev.dns_ready(),
                 "nginx": self.context.systemd.is_active("nginx"),
@@ -172,7 +184,7 @@ class DashboardPage(Page):
             env = [label("Environment", "section-title")]
             env.extend([
                 self._metric("PHP", ", ".join(data["php"]) if data["php"] else "Not installed", bool(data["php"])),
-                self._metric("Node / NVM", data["node"] or ("NVM installed" if data["nvm"] else "Not installed"), data["nvm"]),
+                self._metric("Node", (f"{data['node']} · {data['node_provider'].upper()}" if data["node"] else "Not installed"), bool(data["node"])),
                 self._metric("Nginx", "Running" if data["nginx"] else "Stopped / missing", data["nginx"]),
                 self._metric(f"*.{self.context.config.domain}", "Ready" if data["dns"] else "Not configured", data["dns"]),
                 self._metric("Projects", str(data["projects"]), None),
@@ -203,7 +215,7 @@ class DashboardPage(Page):
 class PhpPage(Page):
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
-        self.body.append(page_header("PHP", "Native PHP management with optional Sury parallel-version support.", self.refresh))
+        self.body.append(page_header("PHP", "One active PHP provider: Debian system PHP or Sury multi-version PHP.", self.refresh))
         self.repo_card = card()
         self.versions_card = card()
         self.body.append(self.repo_card)
@@ -216,9 +228,16 @@ class PhpPage(Page):
 
         def collect():
             sury = self.context.php.sury_configured()
+            provider = self.context.php.provider()
             installed = self.context.php.installed_versions()
-            available = self.context.php.available_versions() if sury else []
-            versions = sorted(set(installed) | set(available), key=self.context.php._version_key, reverse=True)
+            available = self.context.php.available_versions() if provider == "sury" else []
+            installed_sorted = sorted(installed, key=self.context.php._version_key, reverse=True)
+            available_sorted = sorted(
+                set(available).difference(installed),
+                key=self.context.php._version_key,
+                reverse=True,
+            )
+            versions = installed_sorted + available_sorted
             fpm = {}
             for version in versions:
                 fpm_installed = self.context.apt.is_installed(f"php{version}-fpm")
@@ -232,6 +251,8 @@ class PhpPage(Page):
                 }
             return {
                 "sury": sury,
+                "provider": provider,
+                "sury_migration_needed": self.context.php.sury_migration_needed() if provider == "sury" else False,
                 "sury_supported": self.context.php.sury_supported,
                 "codename": self.context.distro.codename,
                 "installed": installed,
@@ -251,29 +272,85 @@ class PhpPage(Page):
 
     def _build_repo(self, data):
         self._remove_all(self.repo_card)
-        self.repo_card.append(label("Sury repository (optional)", "section-title"))
+        self.repo_card.append(label("PHP provider", "section-title"))
+        provider = data["provider"]
+        names = {"debian": "Debian", "sury": "Sury", "none": "Not configured"}
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        row.append(status_pill("Configured" if data["sury"] else "Not configured", data["sury"]))
-        row.append(label(f"Base suite: {data['codename'] or 'unknown'}", "muted"))
+        row.append(status_pill(names.get(provider, provider.title()), provider in {"debian", "sury"}))
+        if data["cli"]:
+            row.append(label(f"Default PHP {data['cli']}", "muted"))
         row.set_hexpand(True)
         self.repo_card.append(row)
-        if not data["sury"]:
-            self.repo_card.append(label("Existing Debian PHP works without Sury. Install Sury only if you want its parallel PHP packages.", "muted", wrap=True))
-            button = Gtk.Button(label="Install Sury repository")
+
+        if provider == "debian":
+            self.repo_card.append(label(
+                "NativeDev is using Debian's system PHP. Existing PHP can serve *.test through NativeDev's per-user FPM pool.",
+                "muted", wrap=True,
+            ))
+            button = Gtk.Button(label="Enable Sury Multi-PHP")
             button.set_sensitive(data["sury_supported"] and self.context.distro.is_debian_family)
             button.add_css_class("suggested-action")
+            installed_text = ", ".join(f"PHP {v}" for v in data["installed"]) or "the current Debian PHP runtime"
             button.connect(
                 "clicked",
                 lambda *_: confirm(
                     self.window,
-                    "Install Sury PHP repository?",
-                    "Sury is optional. This explicit action installs its archive keyring, creates NativeDev's own APT source file, and refreshes APT metadata. Debian PHP can be used without it.",
-                    lambda: self.action(button, lambda: self.context.php.configure_sury(explicit=True), success_message="Sury configured", after=self.refresh),
+                    "Enable Sury multi-PHP?",
+                    f"NativeDev will migrate {installed_text} from Debian's PHP provider to Sury, enable multi-version PHP, keep the current default where possible, and reconcile *.test. Once Sury is active NativeDev will no longer offer Debian PHP as another provider.",
+                    lambda: self.action(button, self.context.controller.enable_sury_multi_php, success_message="Sury multi-PHP enabled", after=self.refresh),
                 ),
             )
             self.repo_card.append(button)
-            if not data["sury_supported"]:
-                self.repo_card.append(label("Sury does not currently publish this detected base suite.", "muted", wrap=True))
+        elif provider == "sury":
+            self.repo_card.append(label(
+                "Sury multi-version PHP is active. NativeDev manages PHP versions only through Sury while this repository is configured.",
+                "muted", wrap=True,
+            ))
+            if data["sury_migration_needed"]:
+                self.repo_card.append(label(
+                    "Some installed PHP packages still appear to come from the previous system provider. Complete the one-way migration to normalize them to Sury.",
+                    "error-text", wrap=True,
+                ))
+                migrate = Gtk.Button(label="Complete Sury migration")
+                migrate.add_css_class("suggested-action")
+                migrate.connect(
+                    "clicked",
+                    lambda *_: confirm(
+                        self.window,
+                        "Complete Sury PHP migration?",
+                        "NativeDev will reinstall the currently installed PHP runtimes from Sury candidates, preserve the current default where possible, and reconcile *.test. Debian PHP will not be offered as a second provider.",
+                        lambda: self.action(migrate, self.context.controller.enable_sury_multi_php, success_message="Sury PHP migration completed", after=self.refresh),
+                    ),
+                )
+                self.repo_card.append(migrate)
+        else:
+            self.repo_card.append(label("No PHP runtime is installed. You can install Debian system PHP or enable Sury multi-version PHP.", "muted", wrap=True))
+            actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            debian = Gtk.Button(label="Install Debian PHP")
+            debian.connect(
+                "clicked",
+                lambda *_: confirm(
+                    self.window,
+                    "Install Debian PHP?",
+                    "NativeDev will install Debian's default PHP CLI/FPM and the standard local-development extension baseline, then configure its *.test FPM pool.",
+                    lambda: self.action(debian, self.context.controller.install_debian_php, success_message="Debian PHP installed", after=self.refresh),
+                ),
+            )
+            actions.append(debian)
+            sury = Gtk.Button(label="Enable Sury Multi-PHP")
+            sury.set_sensitive(data["sury_supported"] and self.context.distro.is_debian_family)
+            sury.add_css_class("suggested-action")
+            sury.connect(
+                "clicked",
+                lambda *_: confirm(
+                    self.window,
+                    "Enable Sury and install PHP?",
+                    "NativeDev will configure Sury and install its newest available PHP runtime with the standard local-development extension baseline. While Sury is active, Debian PHP will not be offered as another provider.",
+                    lambda: self.action(sury, self.context.controller.enable_sury_multi_php, success_message="Sury multi-PHP enabled", after=self.refresh),
+                ),
+            )
+            actions.append(sury)
+            self.repo_card.append(actions)
 
     def _build_versions(self, data):
         self._remove_all(self.versions_card)
@@ -283,11 +360,7 @@ class PhpPage(Page):
             title_row.append(status_pill(f"Default {data['cli']}", True))
         self.versions_card.append(title_row)
         if not data["versions"]:
-            message = (
-                "No versioned PHP packages are currently installed. Debian PHP can be installed with APT, or install the optional Sury repository here for parallel versions."
-                if not data["sury"]
-                else "No versioned PHP packages found in APT metadata."
-            )
+            message = "No PHP versions are currently installed for the selected provider."
             self.versions_card.append(label(message, "muted"))
             return
 
@@ -333,7 +406,7 @@ class PhpPage(Page):
                             self.window,
                             f"Set PHP {v} as default?",
                             "NativeDev will use update-alternatives to change the default /usr/bin/php command.",
-                            lambda: self.action(btn, lambda: self.context.php.set_cli_default(v), success_message=f"PHP {v} is now default", after=self.refresh),
+                            lambda: self.action(btn, lambda: self.context.controller.set_default_php(v), success_message=f"PHP {v} is now default", after=self.refresh),
                         ),
                     )
                 actions.append(default)
@@ -348,8 +421,8 @@ class PhpPage(Page):
                             lambda _b, v=version, btn=repair: confirm(
                                 self.window,
                                 f"Repair PHP {v} FPM?",
-                                f"The php{v}-fpm package is installed, but its master configuration is missing. NativeDev will purge and reinstall only php{v}-fpm to restore package-owned defaults. Other PHP versions and packages are not touched.",
-                                lambda: self.action(btn, lambda: self.context.php.repair_fpm(v), success_message=f"PHP {v} FPM repaired", after=self.refresh),
+                                f"The php{v}-fpm package is installed, but its master configuration is missing. NativeDev will reinstall that package with dpkg's missing-conffile restore mode. Existing custom configuration is not purged or overwritten.",
+                                lambda: self.action(btn, lambda: self.context.controller.repair_php_fpm(v), success_message=f"PHP {v} FPM repaired", after=self.refresh),
                             ),
                         )
                         actions.append(repair)
@@ -380,7 +453,7 @@ class PhpPage(Page):
 
                         enabled_state = fpm.get("enabled_state")
                         if enabled_state == "enabled":
-                            disable = Gtk.Button(label="Disable")
+                            disable = Gtk.Button(label="Disable & Stop")
                             disable.connect("clicked", lambda _b, v=version, btn=disable: self.action(btn, lambda: self.context.php.disable_fpm(v), success_message=f"PHP {v} FPM disabled", after=self.refresh))
                             actions.append(disable)
                         elif enabled_state == "disabled":
@@ -396,7 +469,7 @@ class PhpPage(Page):
                         self.window,
                         f"Uninstall PHP {v}?",
                         f"All installed php{v}-* packages managed by APT will be removed. Other PHP versions are not touched.",
-                        lambda: self.action(btn, lambda: self.context.php.uninstall_version(v), success_message=f"PHP {v} uninstalled", after=self.refresh),
+                        lambda: self.action(btn, lambda: self.context.controller.uninstall_php(v), success_message=f"PHP {v} uninstalled", after=self.refresh),
                     ),
                 )
                 actions.append(uninstall)
@@ -409,7 +482,7 @@ class PhpPage(Page):
                         self.window,
                         f"Install PHP {v}?",
                         "This installs CLI, FPM and common development extensions from your configured APT repositories.",
-                        lambda: self.action(btn, lambda: self.context.php.install_version(v), success_message=f"PHP {v} installed", after=self.refresh),
+                        lambda: self.action(btn, lambda: self.context.controller.install_php(v), success_message=f"PHP {v} installed", after=self.refresh),
                     ),
                 )
                 actions.append(install)
@@ -429,7 +502,7 @@ class PhpPage(Page):
 class NodePage(Page):
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
-        self.body.append(page_header("Node.js", "Per-user NVM with complete LTS generation management.", self.refresh))
+        self.body.append(page_header("Node.js", "One active Node provider: Debian system Node or NVM multi-version Node.", self.refresh))
         self.nvm_card = card()
         self.node_card = card()
         self.body.append(self.nvm_card)
@@ -437,86 +510,211 @@ class NodePage(Page):
         self.refresh()
 
     def refresh(self):
-        self._replace(self.nvm_card, [label("Checking NVM…", "muted")])
-        self._replace(self.node_card, [label("Loading Node.js LTS releases…", "muted")])
+        self._replace(self.nvm_card, [label("Checking Node provider…", "muted")])
+        self._replace(self.node_card, [label("Loading Node.js state…", "muted")])
 
         def collect():
-            installed = self.context.node.installed()
+            provider = self.context.node.provider()
+            nvm_installed = self.context.node.installed()
             releases = []
             lts_error = ""
-            if installed:
+            if provider == "nvm" and nvm_installed:
                 try:
                     releases = self.context.node.available_lts()
-                except Exception as exc:  # network/NVM boundary
+                except Exception as exc:
                     lts_error = str(exc)
+            removal_impact = []
+            if self.context.node.system_node_installed():
+                try:
+                    removal_impact = self.context.node.system_removal_impact()
+                except Exception as exc:
+                    removal_impact = [f"Could not calculate APT impact: {exc}"]
             return {
-                "installed": installed,
-                "nvm": self.context.node.nvm_version() if installed else "",
-                "current": self.context.node.current_node() if installed else "",
-                "default": self.context.node.default_node() if installed else "",
-                "versions": self.context.node.installed_versions() if installed else [],
+                "provider": provider,
+                "system_installed": self.context.node.system_node_installed(),
+                "system_version": self.context.node.system_node_version(),
+                "system_npm": self.context.node.system_npm_installed(),
+                "removal_impact": removal_impact,
+                "nvm_installed": nvm_installed,
+                "nvm": self.context.node.nvm_version() if nvm_installed else "",
+                "current": self.context.node.current_node(),
+                "default": self.context.node.default_node() if nvm_installed else "",
+                "versions": self.context.node.installed_versions() if nvm_installed else [],
                 "lts": releases,
                 "lts_error": lts_error,
                 "rc": str(self.context.node.shell_rc()),
             }
 
         def done(data):
-            nvm = [label("NVM", "section-title")]
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-            row.append(status_pill(f"Installed {data['nvm']}" if data["installed"] else "Not installed", data["installed"]))
-            row.append(label(f"Shell: {data['rc']}", "muted"))
-            nvm.append(row)
-            if data["installed"]:
-                shell_btn = Gtk.Button(label="Configure shell")
-                shell_btn.connect("clicked", lambda *_: self.action(shell_btn, self.context.node.configure_shell, success_message="Shell integration configured"))
-                nvm.append(shell_btn)
-            else:
-                install = Gtk.Button(label="Install NVM")
-                install.add_css_class("suggested-action")
-                install.connect(
-                    "clicked",
-                    lambda *_: confirm(
-                        self.window,
-                        "Install NVM?",
-                        "NVM will be installed for your user only. NativeDev adds a clearly marked block to your shell startup file.",
-                        lambda: self.action(install, self.context.node.install_nvm, success_message="NVM installed", after=self.refresh),
-                    ),
-                )
-                nvm.append(install)
-            self._replace(self.nvm_card, nvm)
-
-            node = [label("Node.js LTS releases", "section-title")]
-            if not data["installed"]:
-                node.append(label("Install NVM first to manage Node.js versions.", "muted"))
-                self._replace(self.node_card, node)
-                return False
-
-            summary = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            summary.append(status_pill(f"Default: {data['default'] or 'none'}", bool(data["default"])))
-            if data["current"]:
-                summary.append(status_pill(f"Current shell: {data['current']}", True))
-            node.append(summary)
-            if data["lts_error"]:
-                node.append(label(f"Could not refresh remote LTS list: {data['lts_error']}", "error-text", wrap=True))
-
-            installed = set(data["versions"])
-            shown: set[str] = set()
-            for release in data["lts"]:
-                shown.add(release.version)
-                node.append(self._node_version_row(release.version, release.codename, installed, data["default"]))
-
-            extras = [version for version in data["versions"] if version not in shown]
-            if extras:
-                node.append(label("Other installed versions", "section-title"))
-                for version in extras:
-                    node.append(self._node_version_row(version, "Installed", installed, data["default"]))
-            elif not data["lts"] and not data["versions"]:
-                node.append(label("No Node.js versions found.", "muted"))
-
-            self._replace(self.node_card, node)
+            self._build_provider(data)
+            self._build_node_versions(data)
             return False
 
         self.worker.submit(collect, done, lambda exc: self.window.set_activity(False, str(exc), error=True))
+
+    def _build_provider(self, data):
+        provider = data["provider"]
+        names = {"debian": "Debian", "nvm": "NVM", "none": "Not configured"}
+        children = [label("Node provider", "section-title")]
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        row.append(status_pill(names.get(provider, provider.title()), provider in {"debian", "nvm"}))
+        if provider == "debian" and data["system_version"]:
+            row.append(label(f"System {data['system_version']}", "muted"))
+        elif data["nvm_installed"]:
+            row.append(label(f"NVM {data['nvm'] or 'installed'} · Shell: {data['rc']}", "muted"))
+        children.append(row)
+
+        if provider == "debian":
+            children.append(label(
+                "NativeDev is using Debian's system Node.js. Multi-version Node is available by explicitly migrating to NVM.",
+                "muted", wrap=True,
+            ))
+            if data["removal_impact"]:
+                children.append(label(
+                    "NVM migration is blocked because removing Debian Node would also affect: " + ", ".join(data["removal_impact"]),
+                    "error-text", wrap=True,
+                ))
+            actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            migrate = Gtk.Button(label="Enable NVM Multi-Node")
+            migrate.add_css_class("suggested-action")
+            migrate.set_sensitive(not data["removal_impact"])
+            migrate.connect(
+                "clicked",
+                lambda *_: confirm(
+                    self.window,
+                    "Enable NVM multi-Node?",
+                    f"NativeDev will remove Debian Node.js{('/npm' if data['system_npm'] else '')}, install/configure NVM, install an NVM-managed LTS runtime and set it as default. Once NVM is active NativeDev will no longer offer Debian Node as another provider.",
+                    lambda: self.action(migrate, self.context.controller.enable_nvm_multi_node, success_message="NVM multi-Node enabled", after=self.refresh),
+                ),
+            )
+            actions.append(migrate)
+            remove = Gtk.Button(label="Uninstall System Node")
+            remove.add_css_class("destructive-action")
+            remove.set_sensitive(not data["removal_impact"])
+            remove.connect(
+                "clicked",
+                lambda *_: confirm(
+                    self.window,
+                    "Uninstall Debian Node.js?",
+                    "NativeDev will remove the Debian nodejs/npm packages only when APT reports no unrelated package removals.",
+                    lambda: self.action(remove, self.context.node.uninstall_system_node, success_message="Debian Node.js removed", after=self.refresh),
+                ),
+            )
+            actions.append(remove)
+            children.append(actions)
+
+        elif provider == "nvm":
+            children.append(label(
+                "NVM multi-version Node is active. NativeDev manages Node versions through NVM and does not offer Debian Node as a second provider.",
+                "muted", wrap=True,
+            ))
+            if data["system_installed"]:
+                if data["removal_impact"]:
+                    children.append(label(
+                        "A Debian Node installation is still present, but cleanup is blocked because removing it would also affect: " + ", ".join(data["removal_impact"]),
+                        "error-text", wrap=True,
+                    ))
+                else:
+                    children.append(label(
+                        "A Debian Node installation is still present from before NVM. Complete the migration to remove that system runtime.",
+                        "error-text", wrap=True,
+                    ))
+            actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            shell_btn = Gtk.Button(label="Configure shell")
+            shell_btn.connect("clicked", lambda *_: self.action(shell_btn, self.context.node.configure_shell, success_message="Shell integration configured"))
+            actions.append(shell_btn)
+            if data["system_installed"]:
+                cleanup = Gtk.Button(label="Complete NVM migration")
+                cleanup.add_css_class("suggested-action")
+                cleanup.set_sensitive(not data["removal_impact"])
+                cleanup.connect(
+                    "clicked",
+                    lambda *_: confirm(
+                        self.window,
+                        "Complete NVM migration?",
+                        "NativeDev will remove the remaining Debian nodejs/npm packages, keep the NVM runtimes, ensure an NVM default, and retain NativeDev's NVM shell integration.",
+                        lambda: self.action(cleanup, self.context.controller.enable_nvm_multi_node, success_message="NVM migration completed", after=self.refresh),
+                    ),
+                )
+                actions.append(cleanup)
+            children.append(actions)
+
+        else:
+            children.append(label("No Node.js runtime is installed. You can install Debian system Node or enable NVM multi-version Node.", "muted", wrap=True))
+            actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            debian = Gtk.Button(label="Install Debian Node")
+            debian.connect(
+                "clicked",
+                lambda *_: confirm(
+                    self.window,
+                    "Install Debian Node.js?",
+                    "NativeDev will install Debian's nodejs package and npm when available.",
+                    lambda: self.action(debian, self.context.node.install_system_node, success_message="Debian Node.js installed", after=self.refresh),
+                ),
+            )
+            actions.append(debian)
+            nvm = Gtk.Button(label="Enable NVM Multi-Node")
+            nvm.add_css_class("suggested-action")
+            nvm.connect(
+                "clicked",
+                lambda *_: confirm(
+                    self.window,
+                    "Enable NVM and install Node LTS?",
+                    "NativeDev will install NVM for your user, install the latest LTS runtime and configure the NativeDev shell block. While NVM is active Debian Node will not be offered as another provider.",
+                    lambda: self.action(nvm, self.context.controller.enable_nvm_multi_node, success_message="NVM multi-Node enabled", after=self.refresh),
+                ),
+            )
+            actions.append(nvm)
+            children.append(actions)
+
+        self._replace(self.nvm_card, children)
+
+    def _build_node_versions(self, data):
+        provider = data["provider"]
+        node = [label("Node.js versions", "section-title")]
+        if provider == "debian":
+            if data["system_version"]:
+                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+                title = label(data["system_version"], "row-title")
+                title.set_hexpand(True)
+                row.append(title)
+                row.append(status_pill("Installed · Debian · Default", True))
+                node.append(row)
+            else:
+                node.append(label("Debian Node.js is not currently usable.", "muted"))
+            self._replace(self.node_card, node)
+            return
+
+        if provider != "nvm":
+            node.append(label("Choose a Node provider to manage versions.", "muted"))
+            self._replace(self.node_card, node)
+            return
+
+        summary = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        summary.append(status_pill(f"Default: {data['default'] or 'none'}", bool(data["default"])))
+        if data["current"]:
+            summary.append(status_pill(f"Current: {data['current']}", True))
+        node.append(summary)
+        if data["lts_error"]:
+            node.append(label(f"Could not refresh remote LTS list: {data['lts_error']}", "error-text", wrap=True))
+
+        installed = set(data["versions"])
+        release_names = {release.version: release.codename for release in data["lts"]}
+
+        # Installed versions are deliberately rendered first; remote releases are
+        # discovery/install choices and belong below the actual machine state.
+        for version in data["versions"]:
+            node.append(self._node_version_row(version, release_names.get(version, "Installed"), installed, data["default"]))
+
+        available = [release for release in data["lts"] if release.version not in installed]
+        if available:
+            node.append(label("Available LTS releases", "section-title"))
+            for release in available:
+                node.append(self._node_version_row(release.version, release.codename, installed, data["default"]))
+        elif not data["versions"]:
+            node.append(label("No NVM-managed Node.js versions found.", "muted"))
+
+        self._replace(self.node_card, node)
 
     def _node_version_row(self, version: str, subtitle: str, installed: set[str], default_version: str) -> Gtk.Widget:
         row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
@@ -528,7 +726,10 @@ class NodePage(Page):
         copy.append(label(subtitle, "muted"))
         top.append(copy)
         is_installed = version in installed
-        top.append(status_pill("Installed" if is_installed else "Available", True if is_installed else None))
+        if is_installed and default_version == version:
+            top.append(status_pill("Installed · Default", True))
+        else:
+            top.append(status_pill("Installed" if is_installed else "Available", True if is_installed else None))
         row.append(top)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -541,10 +742,7 @@ class NodePage(Page):
                 default.connect(
                     "clicked",
                     lambda _b, v=version, btn=default: self.action(
-                        btn,
-                        lambda: self.context.node.set_default(v),
-                        success_message=f"Node {v} is now default",
-                        after=self.refresh,
+                        btn, lambda: self.context.node.set_default(v), success_message=f"Node {v} is now default", after=self.refresh
                     ),
                 )
             actions.append(default)
@@ -567,10 +765,7 @@ class NodePage(Page):
             install.connect(
                 "clicked",
                 lambda _b, v=version, btn=install: self.action(
-                    btn,
-                    lambda: self.context.node.install_version(v),
-                    success_message=f"Node {v} installed",
-                    after=self.refresh,
+                    btn, lambda: self.context.node.install_version(v), success_message=f"Node {v} installed", after=self.refresh
                 ),
             )
             actions.append(install)
@@ -827,7 +1022,7 @@ class ProjectsPage(Page):
                 return
             self.action(
                 dropdown,
-                lambda: self.context.localdev.set_project_php(project, value),
+                lambda: self.context.controller.set_project_php(project, value),
                 success_message=f"{project.name} now uses {'Default PHP' if value == 'default' else 'PHP ' + value}",
                 after=self.refresh,
             )
@@ -980,11 +1175,19 @@ class LocalDevPage(Page):
             if not value or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789-" for ch in value):
                 self.window.set_activity(False, "Local TLD must contain only letters, numbers or hyphens", error=True)
                 return
-            self.context.config.park_dir = str(Path(park.get_text()).expanduser())
-            self.context.config.domain = value
-            self.context.config.save()
-            self.window.set_activity(False, "Settings saved")
-            self.refresh()
+            park_value = str(Path(park.get_text()).expanduser())
+
+            def apply_settings():
+                self.context.config.park_dir = park_value
+                self.context.config.domain = value
+                self.context.config.save()
+
+            self.action(
+                save,
+                apply_settings,
+                success_message="Settings saved",
+                after=self.refresh,
+            )
 
         save.connect("clicked", save_settings)
         self.settings_card.append(save)

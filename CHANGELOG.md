@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.9 - 2026-09-03
+
+- Added native Debian PHP/Node provider discovery. Existing distro PHP can be configured for NativeDev `*.test` through the per-user FPM pool, and existing Debian Node remains untouched until the user explicitly chooses multi-version management.
+- Added one-way provider migrations: **Debian PHP → Sury Multi-PHP** and **Debian Node → NVM Multi-Node**. Sury/NVM mode no longer exposes a switch back to Debian or a second Debian runtime choice. Leftover old-provider state is presented only as an incomplete migration to normalize.
+- PHP migration enables Sury first and replaces compatible versioned PHP packages in place, preserving reverse dependencies instead of uninstalling Debian PHP first.
+- Node migration performs an APT removal simulation and blocks when unrelated packages would be removed; an approved migration removes Debian `nodejs`/`npm`, installs NVM/LTS, and attempts to restore Debian Node if migration fails.
+- PHP version installation now includes a Laravel/Symfony-friendly extension baseline. PHP versions before 8.5 include the separate OPcache package; PHP 8.5+ does not request one.
+- Fixed installed-but-disabled/missing PHP modules after reinstall. The explicit PHP Install flow restores missing UCF-managed `mods-available/*.ini` definitions with `UCF_FORCE_CONFFMISS=1`, then enables the baseline for both CLI and FPM. User module choices made later are not changed by normal refresh/service operations.
+- PHP uninstall now discovers and removes every installed package scoped to that PHP version, including extensions installed after the original NativeDev install.
+- PHP and Node version lists now render installed versions before available versions. PHP FPM Disable now means **Disable & Stop**, while CLI PHP remains independent.
+- Privileged RPC advanced to protocol 5 for restricted PHP package/module operations and Debian Node migration. Client and root-owned helper versions are kept in sync by the full 0.1.9 archive; incompatible helpers fail closed with a version-mismatch message.
+- Expanded regression coverage to 44 tests, including one-way provider semantics, migration safeguards, installed-first ordering, UCF module restoration, PHP extension activation, and privileged protocol operations.
+
+## 0.1.8 - 2026-09-02
+
+- Added `NativeDevController` as the application/orchestration layer. PHP default/install/uninstall/repair and per-project PHP selection now reconcile already-managed Nginx state instead of leaving `*.test` routing stale.
+- Added global mutation serialization: GTK read-only probes keep a small concurrent pool, while every system-changing action uses one mutation queue plus the controller's re-entrant mutation lock.
+- Reworked PHP-FPM repair to avoid `apt purge`. Repair now uses `apt-get install --reinstall` with dpkg `--force-confmiss`, restoring missing package-owned conffiles while preserving existing custom configuration. Fresh PHP installs no longer purge retained `rc` package state.
+- Replaced raw privileged `argv` RPC with protocol-versioned structured operations. The root helper constructs commands itself and narrows APT access to NativeDev components/PHP packages, service access to NativeDev-managed services, and file access to NativeDev-owned paths.
+- Production installs now require the root-owned helper and install a dedicated Polkit action. Source-tree helper execution is available only through the explicit `./run.sh` development opt-in.
+- Expanded the regression suite from 22 to 26 tests, including controller reconciliation, mutation serialization, non-destructive PHP repair, semantic privileged RPC, and raw-command rejection.
+
 ## 0.1.7 - 2026-09-01
 
 - Fixed the clean-machine PHP page when `/usr/bin/php` is absent by checking CLI PHP availability before invoking it.

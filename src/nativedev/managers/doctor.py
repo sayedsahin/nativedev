@@ -44,7 +44,7 @@ class Doctor:
             Check(bool(shutil.which("pkexec")), "Polkit / pkexec available"),
             Check(self.php.sury_configured(), "Sury PHP repository", "optional" if not self.php.sury_configured() else "configured"),
             Check(bool(self.php.installed_versions()), "PHP installed", ", ".join(self.php.installed_versions())),
-            Check(self.node.installed(), "NVM installed", self.node.nvm_version()),
+            Check(self.node.provider() != "none", "Node.js provider", self.node.provider()),
             Check(self.localdev.dns_ready(), f"*.{self.localdev.config.domain} DNS", self.localdev.dns_strategy()),
             Check(self.localdev.nginx_ready(), "NativeDev Nginx sites configured", f"{len(self.localdev.projects())} projects"),
         ]

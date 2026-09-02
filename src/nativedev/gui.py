@@ -571,7 +571,7 @@ class NodePage(Page):
             ))
             if data["removal_impact"]:
                 children.append(label(
-                    "NVM migration is blocked because removing Debian Node would also affect: " + ", ".join(data["removal_impact"]),
+                    "NVM migration is blocked because APT would also remove manually installed package(s): " + ", ".join(data["removal_impact"]),
                     "error-text", wrap=True,
                 ))
             actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -583,7 +583,7 @@ class NodePage(Page):
                 lambda *_: confirm(
                     self.window,
                     "Enable NVM multi-Node?",
-                    f"NativeDev will remove Debian Node.js{('/npm' if data['system_npm'] else '')}, install/configure NVM, install an NVM-managed LTS runtime and set it as default. Once NVM is active NativeDev will no longer offer Debian Node as another provider.",
+                    f"NativeDev will remove Debian Node.js{('/npm' if data['system_npm'] else '')} and its automatically installed Debian Node dependency stack, then install/configure NVM, install an NVM-managed LTS runtime and set it as default. Manually installed packages are never removed implicitly.",
                     lambda: self.action(migrate, self.context.controller.enable_nvm_multi_node, success_message="NVM multi-Node enabled", after=self.refresh),
                 ),
             )
@@ -596,7 +596,7 @@ class NodePage(Page):
                 lambda *_: confirm(
                     self.window,
                     "Uninstall Debian Node.js?",
-                    "NativeDev will remove the Debian nodejs/npm packages only when APT reports no unrelated package removals.",
+                    "NativeDev will remove Debian nodejs/npm and their automatically installed Debian Node dependency packages. Migration is blocked if APT would remove another manually installed package.",
                     lambda: self.action(remove, self.context.node.uninstall_system_node, success_message="Debian Node.js removed", after=self.refresh),
                 ),
             )
@@ -611,7 +611,7 @@ class NodePage(Page):
             if data["system_installed"]:
                 if data["removal_impact"]:
                     children.append(label(
-                        "A Debian Node installation is still present, but cleanup is blocked because removing it would also affect: " + ", ".join(data["removal_impact"]),
+                        "A Debian Node installation is still present, but cleanup is blocked because APT would also remove manually installed package(s): " + ", ".join(data["removal_impact"]),
                         "error-text", wrap=True,
                     ))
                 else:

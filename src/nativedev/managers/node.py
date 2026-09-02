@@ -242,19 +242,49 @@ class NodeManager:
         self.runner.bash_nvm(self.nvm_dir, ["alias", "default", "node"], check=True)
 
     def system_removal_impact(self) -> list[str]:
-        """Return unrelated packages APT would remove with Debian node/npm."""
+        """Return manually-installed packages that would be removed with Node.
+
+        Debian's ``npm`` package pulls in a large graph of ``node-*`` packages
+        (and tools such as eslint/webpack) as automatic dependencies. Removing
+        the Debian Node provider may legitimately remove that dependency graph;
+        treating every simulated ``Remv`` row as unrelated makes a normal
+        Debian -> NVM migration impossible.
+
+        NativeDev therefore blocks only when APT would also remove a package
+        that is marked *manual* by apt-mark. If apt-mark cannot be queried, fall
+        back to the conservative behaviour and treat every extra removal as a
+        blocker.
+        """
         requested = [pkg for pkg in ("nodejs", "npm") if self.apt.is_installed(pkg)]
         if not requested:
             return []
+
         result = self.runner.run(["apt-get", "-s", "remove", *requested], timeout=60)
         if not result.ok:
             raise RuntimeError(result.output or "Could not calculate Node.js removal impact")
+
         removed: set[str] = set()
         for raw in result.stdout.splitlines():
             match = re.match(r"^Remv\s+(\S+)", raw.strip())
             if match:
                 removed.add(match.group(1).split(":", 1)[0])
-        return sorted(removed.difference(requested))
+
+        extras = removed.difference(requested)
+        if not extras:
+            return []
+
+        manual_result = self.runner.run(["apt-mark", "showmanual"], timeout=30)
+        if not manual_result.ok:
+            # Safety-first fallback: if package ownership cannot be classified,
+            # do not silently remove anything beyond nodejs/npm.
+            return sorted(extras)
+
+        manual = {
+            line.strip().split(":", 1)[0]
+            for line in manual_result.stdout.splitlines()
+            if line.strip()
+        }
+        return sorted(extras.intersection(manual))
 
     def install_system_node(self) -> str:
         packages = ["nodejs"]
@@ -270,7 +300,7 @@ class NodeManager:
         extras = self.system_removal_impact()
         if extras:
             raise RuntimeError(
-                "NativeDev will not remove Debian Node because APT would also remove: "
+                "NativeDev will not remove Debian Node because APT would also remove manually installed package(s): "
                 + ", ".join(extras)
             )
         packages = [pkg for pkg in ("nodejs", "npm") if self.apt.is_installed(pkg)]
@@ -283,7 +313,7 @@ class NodeManager:
         extras = self.system_removal_impact()
         if extras:
             raise RuntimeError(
-                "NativeDev will not remove Debian Node because APT would also remove: "
+                "NativeDev will not remove Debian Node because APT would also remove manually installed package(s): "
                 + ", ".join(extras)
             )
 

@@ -588,7 +588,7 @@ class ProviderMigrationTests(unittest.TestCase):
         manager.installed = lambda: True
         self.assertEqual(manager.provider(), "nvm")
 
-    def test_node_migration_blocks_unrelated_apt_removals(self):
+    def test_node_migration_blocks_manually_installed_apt_removals(self):
         from nativedev.system import CommandResult
 
         class Apt:
@@ -596,12 +596,33 @@ class ProviderMigrationTests(unittest.TestCase):
 
         class Runner:
             def run(self, argv, **kwargs):
-                return CommandResult(list(argv), 0, "Remv nodejs [20]\nRemv npm [9]\nRemv my-app [1]\n", "")
+                if argv[:2] == ["apt-mark", "showmanual"]:
+                    return CommandResult(list(argv), 0, "nodejs\nnpm\nmy-app\n", "")
+                return CommandResult(list(argv), 0, "Remv nodejs [20]\nRemv npm [9]\nRemv node-acorn [8]\nRemv my-app [1]\n", "")
 
         manager = NodeManager(Runner(), Apt())
         manager.install_nvm = lambda: self.fail("NVM bootstrap must not run when APT removal is unsafe")
         with self.assertRaisesRegex(RuntimeError, "my-app"):
             manager.enable_nvm_multi_node()
+
+    def test_node_migration_ignores_automatic_debian_node_dependency_removals(self):
+        from nativedev.system import CommandResult
+
+        class Apt:
+            def is_installed(self, package): return package in {"nodejs", "npm"}
+
+        class Runner:
+            def run(self, argv, **kwargs):
+                if argv[:2] == ["apt-mark", "showmanual"]:
+                    return CommandResult(list(argv), 0, "nodejs\nnpm\n", "")
+                return CommandResult(
+                    list(argv), 0,
+                    "Remv nodejs [20]\nRemv npm [9]\nRemv eslint [6]\nRemv webpack [5]\nRemv node-acorn [8]\n",
+                    "",
+                )
+
+        manager = NodeManager(Runner(), Apt())
+        self.assertEqual(manager.system_removal_impact(), [])
 
     def test_node_debian_to_nvm_removes_system_before_installing_nvm(self):
         from nativedev.system import CommandResult
@@ -614,7 +635,9 @@ class ProviderMigrationTests(unittest.TestCase):
 
         class Runner:
             def run(self, argv, **kwargs):
-                return CommandResult(list(argv), 0, "Remv nodejs [20]\nRemv npm [9]\n", "")
+                if argv[:2] == ["apt-mark", "showmanual"]:
+                    return CommandResult(list(argv), 0, "nodejs\nnpm\n", "")
+                return CommandResult(list(argv), 0, "Remv nodejs [20]\nRemv npm [9]\nRemv node-acorn [8]\n", "")
 
         manager = NodeManager(Runner(), Apt())
         manager.shell_configured = lambda: False

@@ -21,6 +21,7 @@ NM_DNSMASQ = Path("/etc/NetworkManager/dnsmasq.d/nativedev-test.conf")
 NGINX_CERT_DIR = Path("/etc/nginx/nativedev")
 NGINX_CERT = NGINX_CERT_DIR / "nativedev.pem"
 NGINX_KEY = NGINX_CERT_DIR / "nativedev-key.pem"
+NGINX_WILDCARD_MARKER = "# NativeDev wildcard router v1"
 WEB_USER = "www-data"
 PHP_DEFAULT = "default"
 
@@ -115,11 +116,33 @@ class LocalDevManager:
         return candidate
 
     # ---- Nginx read access -------------------------------------------------
-    # PHP-FPM workers run as the developer, so they need no special grant to
-    # read or write project files. Nginx (www-data) still serves static files
-    # under the document root directly and must stat its way there, so it
-    # needs traverse (x) on ancestor directories and read (rX) on the
-    # document root only. Nothing outside the document root is touched.
+    # PHP-FPM workers run as the developer. Nginx (www-data) still needs read
+    # access for static assets. Wildcard routing means projects may appear after
+    # the Nginx config was generated, so NativeDev prepares the park directory
+    # once with an inheritable ACL. A newly-created direct child then inherits
+    # the www-data read/traverse entry without a watcher or Nginx regeneration.
+
+    def ensure_park_readable(self) -> None:
+        root = self.park_dir
+        if not root.is_dir():
+            raise RuntimeError(f"Park directory does not exist: {root}")
+        self._ensure_acl_tool()
+        self._ensure_web_user()
+        self._grant_parent_traverse(root)
+
+        # The park directory itself needs an access ACL for traversal plus a
+        # default ACL. New project directories inherit both the access entry and
+        # the default entry, and that default entry keeps propagating to their
+        # descendants. This is what makes a new project work while NativeDev is
+        # closed, without a watcher or background service.
+        self._setfacl(["-m", f"u:{WEB_USER}:r-x", "--", str(root)])
+        self._setfacl(["-m", f"d:u:{WEB_USER}:r-x", "--", str(root)])
+
+        # Existing projects pre-date the park default ACL, so prepare their
+        # current document roots once. When /public exists, existing source files
+        # outside /public keep the narrower previous ACL behaviour.
+        for project in self.projects():
+            self.ensure_project_readable(project)
 
     def ensure_project_readable(self, project: Path) -> None:
         project = self._validate_project(project)
@@ -130,22 +153,14 @@ class LocalDevManager:
 
         # A parked project may contain Docker/container-created files owned by
         # root or another UID. NativeDev does not own those files and must not
-        # try to rewrite their ACLs: setfacl would emit EPERM for every such
-        # entry and abort the whole Nginx generation. Apply Nginx read ACLs
-        # only to the developer-owned part of the tree and prune foreign-owned
-        # directories entirely. Existing Unix mode bits on skipped paths are
-        # left untouched.
+        # try to rewrite their ACLs.
         self._set_owned_tree_acl(docroot, f"u:{WEB_USER}:rX")
 
         # Default ACL so files created later by the developer remain servable.
-        # Again, only developer-owned directories are NativeDev's concern.
         self._set_default_acl_on_owned_dirs(docroot, f"u:{WEB_USER}:r-x")
 
     def _grant_parent_traverse(self, target: Path) -> None:
         uid = os.getuid()
-        # Only modify ancestors owned by the desktop user. System-owned
-        # ancestors such as / and /home are left untouched; they are normally
-        # traversable already.
         for ancestor in reversed(list(target.parents)):
             if ancestor == Path("/"):
                 continue
@@ -158,16 +173,6 @@ class LocalDevManager:
 
     def _owned_find_prefix(self, root: Path) -> list[str]:
         uid = str(os.getuid())
-        # -xdev keeps an embedded mount (for example a container mount) from
-        # turning a local-site refresh into an ACL walk of another filesystem.
-        #
-        # Never pass symlink pathnames to setfacl. setfacl follows a symlink to
-        # its target; a common Laravel-in-Docker layout has public/storage ->
-        # /var/www/html/storage/app/public, which is meaningful inside the
-        # container but is a broken absolute link on the host. Passing that
-        # pathname to setfacl makes the entire Nginx generation fail with ENOENT.
-        # Symlinks need no ACL of their own, so prune them unconditionally.
-        # Also prune directories owned by another UID (Docker/root-owned trees).
         return [
             "find", str(root), "-xdev",
             "(",
@@ -306,7 +311,12 @@ class LocalDevManager:
     # ---- Nginx ---------------------------------------------------------------
 
     def nginx_ready(self) -> bool:
-        return NGINX_SITE.exists() and NGINX_ENABLED.exists()
+        if not (NGINX_SITE.exists() and NGINX_ENABLED.exists()):
+            return False
+        try:
+            return NGINX_WILDCARD_MARKER in NGINX_SITE.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
 
     def nginx_managed(self) -> bool:
         """Return whether NativeDev has already created any Nginx site state."""
@@ -319,13 +329,35 @@ class LocalDevManager:
         escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
         return f'"{escaped}"'
 
-    def https_ready(self) -> bool:
-        """Return True only when HTTPS is enabled *and* both TLS files exist.
+    @staticmethod
+    def _nginx_template_path(prefix: str, variable: str) -> str:
+        """Quote a literal path prefix while preserving one Nginx variable."""
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in prefix):
+            raise RuntimeError("Nginx paths may not contain control characters")
+        escaped = prefix.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+        return f'"{escaped}${variable}"'
 
-        The config flag can become stale when a user manually cleans /etc/nginx
-        or restores a system snapshot.  Missing NativeDev-owned certificate files
-        must never make ordinary HTTP site generation fail.
-        """
+    def _project_hostname(self, project: Path) -> str | None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project.name):
+            return None
+        return f"{project.name}.{self.config.domain}".lower()
+
+    def _known_project_routes(self) -> dict[str, Path]:
+        routes: dict[str, Path] = {}
+        for project in self.projects():
+            host = self._project_hostname(project)
+            if not host:
+                continue
+            previous = routes.get(host)
+            if previous is not None and previous != project:
+                raise RuntimeError(
+                    f"Project hostname collision: {previous.name} and {project.name} both map to {host}"
+                )
+            routes[host] = project
+        return routes
+
+    def https_ready(self) -> bool:
+        """Return True only when HTTPS is enabled *and* both TLS files exist."""
         return bool(self.config.https_enabled and NGINX_CERT.is_file() and NGINX_KEY.is_file())
 
     def _reconcile_https_state(self) -> None:
@@ -335,37 +367,74 @@ class LocalDevManager:
             self.config.save()
 
     def render_nginx(self) -> str:
+        """Render one persistent wildcard router instead of one server per project."""
         domain = self.config.domain
-        blocks: list[str] = [
-            "# Managed by NativeDev. Manual edits may be replaced.\n",
-            f"# PHP-FPM workers run as local developer: {self.php.developer_user}\n",
+        default_version = self.default_php_version()
+        if not default_version:
+            return (
+                f"{NGINX_WILDCARD_MARKER}\n"
+                "# Managed by NativeDev. Manual edits may be replaced.\n"
+                "# No PHP-FPM runtime is currently available.\n"
+            )
+
+        default_socket = f"unix:{self.php.developer_socket_path(default_version)}"
+        routes = self._known_project_routes()
+        dynamic_path = self._nginx_template_path(str(self.park_dir) + os.sep, "nativedev_auto_project")
+        domain_re = re.escape(domain)
+
+        project_map = [
+            "map $host $nativedev_project_dir {",
+            '    default "";',
         ]
-        for project in self.projects():
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project.name):
+        for host, project in sorted(routes.items()):
+            # Normal lowercase DNS-safe projects are intentionally *not* baked
+            # into the file. Their host always resolves through the live park
+            # fallback, so delete/recreate/rename workflows stay zero-reload.
+            # Exact entries exist only to preserve already-known legacy names
+            # such as Shop, foo_bar or foo.bar on case-sensitive filesystems.
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", project.name):
+                project_map.append(f"    {host} {self._nginx_quote(str(project))};")
+        project_map.append(
+            f"    ~^(?<nativedev_auto_project>[a-z0-9][a-z0-9-]*)\\.{domain_re}$ {dynamic_path};"
+        )
+        project_map.append("}")
+
+        php_map = [
+            "map $host $nativedev_php_backend {",
+            f"    default {self._nginx_quote(default_socket)};",
+        ]
+        installed = set(self.php.installed_fpm_versions())
+        for host, project in sorted(routes.items()):
+            version = self.project_preferences(project)["php"]
+            if version == PHP_DEFAULT or version not in installed:
                 continue
-            try:
-                php_version = self.project_php_version(project)
-            except RuntimeError:
-                # No PHP-FPM installed yet for this project's selection; skip
-                # it rather than failing the whole site file.
-                continue
-            socket_path = self.php.developer_socket_path(php_version)
-            docroot = self.document_root(project)
-            escaped_root = self._nginx_quote(str(docroot))
-            ssl = ""
-            if self.https_ready():
-                ssl = (
-                    "    listen 443 ssl;\n"
-                    "    listen [::]:443 ssl;\n"
-                    f"    ssl_certificate {NGINX_CERT};\n"
-                    f"    ssl_certificate_key {NGINX_KEY};\n"
-                )
-            blocks.append(
-                f"""server {{
+            socket_value = f"unix:{self.php.developer_socket_path(version)}"
+            php_map.append(f"    {host} {self._nginx_quote(socket_value)};")
+        php_map.append("}")
+
+        ssl = ""
+        if self.https_ready():
+            ssl = (
+                "    listen 443 ssl;\n"
+                "    listen [::]:443 ssl;\n"
+                f"    ssl_certificate {NGINX_CERT};\n"
+                f"    ssl_certificate_key {NGINX_KEY};\n"
+            )
+
+        server = f"""server {{
     listen 80;
     listen [::]:80;
-{ssl}    server_name {project.name}.{domain};
-    root {escaped_root};
+{ssl}    server_name ~^.+\\.{domain_re}$;
+
+    if ($nativedev_project_dir = "") {{ return 404; }}
+    if (!-d $nativedev_project_dir) {{ return 404; }}
+
+    set $nativedev_document_root $nativedev_project_dir;
+    if (-d "$nativedev_project_dir/public") {{
+        set $nativedev_document_root "$nativedev_project_dir/public";
+    }}
+
+    root $nativedev_document_root;
     index index.php index.html index.htm;
 
     location / {{
@@ -375,7 +444,7 @@ class LocalDevManager:
     location ~ \\.php$ {{
         try_files $uri =404;
         include fastcgi_params;
-        fastcgi_pass unix:{socket_path};
+        fastcgi_pass $nativedev_php_backend;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_param HTTPS $https if_not_empty;
     }}
@@ -385,35 +454,43 @@ class LocalDevManager:
     }}
 }}
 """
-            )
-        return "\n".join(blocks)
+        return "\n".join(
+            [
+                NGINX_WILDCARD_MARKER,
+                "# Managed by NativeDev. Manual edits may be replaced.",
+                f"# PHP-FPM workers run as local developer: {self.php.developer_user}",
+                "# New lowercase project directories under the park are routable without regeneration.",
+                "",
+                *project_map,
+                "",
+                *php_map,
+                "",
+                server,
+            ]
+        )
 
     def configure_nginx_sites(self) -> None:
         if not shutil.which("nginx"):
             raise RuntimeError("Nginx is not installed")
 
-        # A user may manually remove /etc/nginx/nativedev while NativeDev's
-        # persisted config still says HTTPS is enabled. Heal that stale state
-        # before rendering so HTTP sites remain recoverable instead of emitting
-        # ssl_certificate directives that make `nginx -t` fail.
         self._reconcile_https_state()
+        default_version = self.default_php_version()
+        if not default_version:
+            raise RuntimeError("Install and start a PHP-FPM version before configuring wildcard *.test routing")
 
-        projects = self.projects()
-        versions_needed: set[str] = set()
-        for project in projects:
-            try:
-                versions_needed.add(self.project_php_version(project))
-            except RuntimeError:
-                continue
+        versions_needed: set[str] = {default_version}
+        installed = set(self.php.installed_fpm_versions())
+        for project in self.projects():
+            version = self.project_preferences(project)["php"]
+            if version != PHP_DEFAULT and version in installed:
+                versions_needed.add(version)
 
-        # Critical ownership rule: *.test never targets Debian/Sury's default
-        # www-data pool. Ensure NativeDev's developer-user pool exists for
-        # every PHP version actually selected by a project.
         for version in versions_needed:
             self.php.ensure_developer_pool(version)
 
-        for project in projects:
-            self.ensure_project_readable(project)
+        # Existing roots are fixed now; a default ACL on the park makes future
+        # projects inherit Nginx read/traverse access automatically.
+        self.ensure_park_readable()
 
         content = self.render_nginx()
         previous = NGINX_SITE.read_text(encoding="utf-8") if NGINX_SITE.exists() else None
@@ -447,8 +524,6 @@ class LocalDevManager:
                         + (rollback_check.output or "nginx -t failed after rollback")
                     )
                 raise RuntimeError(check.output or "nginx -t failed; configuration rolled back")
-        # A stopped Nginx service still benefits from a validated generated
-        # config; there is simply nothing to reload until the user starts it.
         if self.systemd.is_active("nginx"):
             self.systemd.reload("nginx")
 

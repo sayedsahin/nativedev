@@ -51,31 +51,37 @@ class StubPhp:
 
 
 class NginxRenderTests(unittest.TestCase):
-    def test_project_public_directory_and_default_php_are_used(self):
+    def test_renders_one_persistent_wildcard_router(self):
+        from nativedev.config import AppConfig
+        from nativedev.managers.localdev import LocalDevManager, NGINX_WILDCARD_MARKER
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "shop" / "public").mkdir(parents=True)
+            manager = LocalDevManager(None, None, None, AppConfig(park_dir=str(root), domain="test"), StubPhp())
+            rendered = manager.render_nginx()
+            self.assertIn(NGINX_WILDCARD_MARKER, rendered)
+            self.assertIn("map $host $nativedev_project_dir", rendered)
+            self.assertIn("$nativedev_auto_project", rendered)
+            self.assertIn('if (-d "$nativedev_project_dir/public")', rendered)
+            self.assertIn("root $nativedev_document_root;", rendered)
+            self.assertIn("fastcgi_pass $nativedev_php_backend;", rendered)
+            self.assertIn("php8.4-fpm-nativedev-1000.sock", rendered)
+            self.assertNotIn(f'shop.test "{root / "shop"}";', rendered)
+            self.assertNotIn("server_name shop.test;", rendered)
+
+    def test_existing_project_gets_exact_path_but_future_projects_use_regex_fallback(self):
         from nativedev.config import AppConfig
         from nativedev.managers.localdev import LocalDevManager
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            (root / "shop" / "public").mkdir(parents=True)
-            config = AppConfig(park_dir=str(root), domain="test")
-            manager = LocalDevManager(None, None, None, config, StubPhp())  # render path is pure
+            (root / "Shop").mkdir()
+            manager = LocalDevManager(None, None, None, AppConfig(park_dir=str(root), domain="test"), StubPhp())
             rendered = manager.render_nginx()
-            self.assertIn("server_name shop.test;", rendered)
-            self.assertIn(str(root / "shop" / "public"), rendered)
-            self.assertIn("php8.4-fpm-nativedev-1000.sock", rendered)
-            self.assertNotIn("fastcgi_pass unix:/run/php/php8.4-fpm.sock", rendered)
-
-    def test_document_root_with_spaces_is_quoted(self):
-        from nativedev.config import AppConfig
-        from nativedev.managers.localdev import LocalDevManager
-
-        with tempfile.TemporaryDirectory(prefix="Native Dev ") as td:
-            root = Path(td)
-            (root / "app" / "public").mkdir(parents=True)
-            manager = LocalDevManager(None, None, None, AppConfig(park_dir=str(root)), StubPhp())
-            rendered = manager.render_nginx()
-            self.assertIn(f'root "{root / "app" / "public"}";', rendered)
+            self.assertIn(f'shop.test "{root / "Shop"}";', rendered)
+            self.assertIn(r"(?<nativedev_auto_project>[a-z0-9][a-z0-9-]*)\.test$", rendered)
+            self.assertIn(f'"{root}/$nativedev_auto_project"', rendered)
 
     def test_project_can_pin_an_installed_php_fpm_version(self):
         from nativedev.config import AppConfig
@@ -92,7 +98,18 @@ class NginxRenderTests(unittest.TestCase):
             )
             manager = LocalDevManager(None, None, None, config, StubPhp())
             rendered = manager.render_nginx()
-            self.assertIn("php8.3-fpm-nativedev-1000.sock", rendered)
+            self.assertIn('legacy.test "unix:/run/php/php8.3-fpm-nativedev-1000.sock";', rendered)
+            self.assertIn('default "unix:/run/php/php8.4-fpm-nativedev-1000.sock";', rendered)
+
+    def test_park_path_with_spaces_is_quoted_for_dynamic_projects(self):
+        from nativedev.config import AppConfig
+        from nativedev.managers.localdev import LocalDevManager
+
+        with tempfile.TemporaryDirectory(prefix="Native Dev ") as td:
+            root = Path(td)
+            manager = LocalDevManager(None, None, None, AppConfig(park_dir=str(root)), StubPhp())
+            rendered = manager.render_nginx()
+            self.assertIn(f'"{root}/$nativedev_auto_project"', rendered)
 
     def test_new_project_defaults_to_default_php(self):
         from nativedev.config import AppConfig
@@ -104,22 +121,25 @@ class NginxRenderTests(unittest.TestCase):
             project.mkdir()
             config = AppConfig(park_dir=str(root), domain="test")
             manager = LocalDevManager(None, None, None, config, StubPhp())
-            prefs = manager.project_preferences(project)
-            self.assertEqual(prefs["php"], "default")
+            self.assertEqual(manager.project_preferences(project)["php"], "default")
 
-    def test_project_missing_from_park_dir_is_skipped_not_fatal(self):
+    def test_no_php_runtime_does_not_emit_broken_server(self):
         from nativedev.config import AppConfig
-        from nativedev.managers.localdev import LocalDevManager
+        from nativedev.managers.localdev import LocalDevManager, NGINX_WILDCARD_MARKER
 
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            (root / "app").mkdir()
-            config = AppConfig(park_dir=str(root), domain="test")
-            manager = LocalDevManager(None, None, None, config, StubPhp(default="", installed=[]))
-            # No PHP-FPM installed at all: rendering must not raise, it should
-            # simply produce a site file with no server blocks for now.
+            manager = LocalDevManager(None, None, None, AppConfig(park_dir=td, domain="test"), StubPhp(default="", installed=[]))
             rendered = manager.render_nginx()
-            self.assertNotIn("server_name app.test;", rendered)
+            self.assertIn(NGINX_WILDCARD_MARKER, rendered)
+            self.assertNotIn("fastcgi_pass", rendered)
+            self.assertNotIn("server {", rendered)
+
+    def test_wildcard_setup_adds_inheritable_park_acl(self):
+        localdev = (
+            Path(__file__).resolve().parents[1] / "src" / "nativedev" / "managers" / "localdev.py"
+        ).read_text()
+        self.assertIn('self._setfacl(["-m", f"d:u:{WEB_USER}:r-x", "--", str(root)])', localdev)
+        self.assertIn("self.ensure_park_readable()", localdev)
 
 
 class DnsRegressionTests(unittest.TestCase):
@@ -196,7 +216,7 @@ class PrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=uid)[0]
 
     def test_allows_structured_native_operations(self):
-        protocol = 5
+        protocol = 6
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "restart", "now": False, "service": "nginx"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "disable", "now": True, "service": "php8.4-fpm"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["redis-tools"]}))
@@ -212,7 +232,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/php/8.4/fpm/pool.d/nativedev-1001.conf"]}, uid=1000))
 
     def test_rejects_raw_commands_and_outside_packages(self):
-        protocol = 5
+        protocol = 6
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "run", "argv": ["bash", "-c", "id"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["openssh-server"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["/tmp/nativedev-test/debsuryorg-archive-keyring.deb"]}))
@@ -238,7 +258,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {
-            "protocol": 5,
+            "protocol": 6,
             "action": "php.install_packages",
             "packages": ["php8.4-cli", "php8.4-gd", "php8.4-opcache"],
         }
@@ -253,6 +273,120 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertEqual(args[0][:4], ["/usr/bin/apt-get", "install", "--reinstall", "-y"])
         self.assertEqual(kwargs["env"]["UCF_FORCE_CONFFMISS"], "1")
         self.assertNotIn("UCF_FORCE_CONFFNEW", kwargs["env"])
+
+
+
+
+class ServiceCleanupTests(unittest.TestCase):
+    def _manager(self, dpkg_output: str):
+        from nativedev.services import ServiceManager
+        from nativedev.system import CommandResult
+
+        class Runner:
+            def run(self, argv, **kwargs):
+                if argv[:2] == ["dpkg-query", "-W"]:
+                    return CommandResult(list(argv), 0, dpkg_output, "")
+                return CommandResult(list(argv), 0, "", "")
+
+        class Apt:
+            def __init__(self):
+                self.removed = []
+            def candidate(self, package):
+                return "1"
+            def is_installed(self, package):
+                return any(
+                    line.startswith("ii ") and line.split("\t", 1)[-1].strip().split(":", 1)[0] == package
+                    for line in dpkg_output.splitlines()
+                )
+            def remove(self, packages):
+                self.removed.append(list(packages))
+            def install(self, packages):
+                pass
+
+        class Systemd:
+            def enabled_state(self, service):
+                return "not-found"
+            def is_active(self, service):
+                return False
+            def disable_now(self, service):
+                pass
+            def enable_now(self, service):
+                pass
+
+        apt = Apt()
+        return ServiceManager(Runner(), apt, Systemd()), apt
+
+    def test_redis_server_and_cli_are_one_component(self):
+        from nativedev.services import COMPONENTS
+        redis = next(spec for spec in COMPONENTS if spec.key == "redis")
+        self.assertEqual(redis.packages, ("redis-server", "redis-tools"))
+        self.assertFalse(any(spec.key == "redis-cli" for spec in COMPONENTS))
+
+    def test_postgresql_residual_versioned_runtime_remains_uninstallable(self):
+        from nativedev.services import COMPONENTS
+
+        output = (
+            "rc \tpostgresql\n"
+            "ii \tpostgresql-17\n"
+            "un \tpostgresql-client\n"
+            "ii \tpostgresql-client-17\n"
+            "ii \tpostgresql-client-common\n"
+            "ii \tpostgresql-common\n"
+            "ii \tpostgresql-common-dev\n"
+        )
+        manager, apt = self._manager(output)
+        spec = next(item for item in COMPONENTS if item.key == "postgresql")
+        state = manager.state(spec)
+        self.assertTrue(state.installed)
+        self.assertTrue(state.uninstallable)
+        self.assertEqual(
+            manager.installed_component_packages(spec),
+            ["postgresql-17", "postgresql-client-17"],
+        )
+        manager.uninstall(spec)
+        self.assertEqual(apt.removed[-1], ["postgresql-17", "postgresql-client-17"])
+        self.assertNotIn("postgresql-common", apt.removed[-1])
+        self.assertNotIn("postgresql-common-dev", apt.removed[-1])
+
+    def test_mariadb_cleanup_includes_server_and_client_core_but_not_common(self):
+        from nativedev.services import COMPONENTS
+
+        output = (
+            "ii \tmariadb-server\n"
+            "ii \tmariadb-client\n"
+            "ii \tmariadb-server-core\n"
+            "ii \tmariadb-client-core\n"
+            "ii \tmariadb-common\n"
+            "ii \tlibmariadb3\n"
+        )
+        manager, apt = self._manager(output)
+        spec = next(item for item in COMPONENTS if item.key == "mariadb")
+        manager.uninstall(spec)
+        removed = apt.removed[-1]
+        self.assertIn("mariadb-server", removed)
+        self.assertIn("mariadb-client", removed)
+        self.assertIn("mariadb-server-core", removed)
+        self.assertIn("mariadb-client-core", removed)
+        self.assertNotIn("mariadb-common", removed)
+        self.assertNotIn("libmariadb3", removed)
+
+    def test_redis_uninstall_removes_server_and_cli_package_together(self):
+        from nativedev.services import COMPONENTS
+
+        output = "ii \tredis-server\nii \tredis-tools\n"
+        manager, apt = self._manager(output)
+        spec = next(item for item in COMPONENTS if item.key == "redis")
+        manager.uninstall(spec)
+        self.assertEqual(apt.removed[-1], ["redis-server", "redis-tools"])
+
+    def test_helper_allows_runtime_cleanup_only_for_remove(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import validate_operation
+
+        with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
+            for package in ("postgresql-17", "postgresql-client-17", "mariadb-server-core", "mariadb-client-core"):
+                self.assertTrue(validate_operation({"protocol": 6, "action": "apt.remove", "packages": [package]})[0])
+                self.assertFalse(validate_operation({"protocol": 6, "action": "apt.install", "packages": [package]})[0])
 
 
 class ControllerTests(unittest.TestCase):

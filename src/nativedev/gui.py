@@ -815,7 +815,7 @@ class ServicesPage(Page):
                     top.append(status_pill("Installed", True))
                 else:
                     top.append(status_pill("Not installed", False))
-                if spec.service and state.installed:
+                if spec.service and state.service_available:
                     top.append(status_pill(state.enabled_state.capitalize(), state.enabled if state.enabled_state in {"enabled", "disabled"} else None))
                 box.append(top)
 
@@ -835,7 +835,7 @@ class ServicesPage(Page):
                     )
                     actions.append(install)
                 else:
-                    if spec.service:
+                    if spec.service and state.service_available:
                         if state.running:
                             stop = Gtk.Button(label="Stop")
                             stop.connect("clicked", lambda _b, s=spec, btn=stop: self.action(btn, lambda: self.context.services.stop(s), success_message=f"{s.title} stopped", after=self.refresh))
@@ -866,7 +866,7 @@ class ServicesPage(Page):
                             lambda _b, s=spec, btn=uninstall: confirm(
                                 self.window,
                                 f"Uninstall {s.title}?",
-                                "NativeDev removes only the package(s) listed for this component. Configuration files are not purged.",
+                                "NativeDev removes this component's server/client runtime packages. Configuration and database data are not purged.",
                                 lambda: self.action(btn, lambda: self.context.services.uninstall(s), success_message=f"{s.title} uninstalled", after=self.refresh),
                             ),
                         )
@@ -1090,30 +1090,28 @@ class LocalDevPage(Page):
             dns.append(dns_btn)
             self._replace(self.dns_card, dns)
 
-            sites = [label("Nginx sites", "section-title")]
-            sites.append(status_pill(f"{len(data['projects'])} projects detected", data["nginx"]))
+            sites = [label("Wildcard Nginx routing", "section-title")]
+            sites.append(status_pill("Automatic routing ready" if data["nginx"] else "Not configured / legacy config", data["nginx"]))
             sites.append(
                 label(
-                    f"*.{self.context.config.domain} PHP-FPM runs as {self.context.php.developer_user} "
-                    "via NativeDev's per-user pool. Set the PHP version per project on the Projects page.",
+                    f"After one-time setup, a new folder named with lowercase letters, numbers or hyphens inside {self.context.localdev.park_dir} "
+                    f"is immediately available as folder.{self.context.config.domain} — NativeDev does not need to be open. "
+                    "A public/ directory is selected automatically when present. Default PHP is used unless a project is pinned on the Projects page.",
                     "muted",
                     wrap=True,
                 )
             )
             if data["projects"]:
-                names = ", ".join(f"{p.name}.{self.context.config.domain}" for p in data["projects"][:8])
-                if len(data["projects"]) > 8:
-                    names += ", …"
-                sites.append(label(names, "muted", wrap=True))
-            site_btn = Gtk.Button(label="Generate / refresh Nginx sites")
+                sites.append(label(f"{len(data['projects'])} projects currently detected.", "muted", wrap=True))
+            site_btn = Gtk.Button(label="Repair / rebuild wildcard routing" if data["nginx"] else "Configure wildcard routing")
             site_btn.add_css_class("suggested-action")
             site_btn.connect(
                 "clicked",
                 lambda *_: confirm(
                     self.window,
-                    "Generate NativeDev Nginx config?",
-                    "Only /etc/nginx/sites-available/nativedev-sites.conf and its symlink are managed. nginx -t is run before reload and a failed change is rolled back.",
-                    lambda: self.action(site_btn, self.context.localdev.configure_nginx_sites, success_message="Nginx sites refreshed", after=self.refresh),
+                    "Configure NativeDev wildcard Nginx routing?",
+                    "NativeDev will install one persistent *.test router, prepare an inheritable read-only Nginx ACL on the park directory, validate with nginx -t, and reload Nginx. New projects will not require regeneration.",
+                    lambda: self.action(site_btn, self.context.localdev.configure_nginx_sites, success_message="Wildcard Nginx routing ready", after=self.refresh),
                 ),
             )
             sites.append(site_btn)
@@ -1227,11 +1225,11 @@ class DoctorPage(Page):
 class MainWindow(Gtk.ApplicationWindow):
     PAGES = (
         ("dashboard", "Dashboard", DashboardPage),
+        ("local", "Local development", LocalDevPage),
+        ("services", "Services & tools", ServicesPage),
         ("php", "PHP", PhpPage),
         ("node", "Node.js", NodePage),
-        ("services", "Services & tools", ServicesPage),
         ("projects", "Projects", ProjectsPage),
-        ("local", "Local development", LocalDevPage),
         ("doctor", "Doctor", DoctorPage),
     )
 

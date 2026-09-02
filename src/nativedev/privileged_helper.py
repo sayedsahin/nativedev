@@ -14,7 +14,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-PROTOCOL_VERSION = 5
+PROTOCOL_VERSION = 6
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 MANAGED_FILES = {
@@ -38,6 +38,8 @@ PHP_PACKAGE_RE = re.compile(r"^php\d+\.\d+(?:-[A-Za-z0-9][A-Za-z0-9.+~_-]*)?$")
 PHP_FPM_PACKAGE_RE = re.compile(r"^php\d+\.\d+-fpm$")
 VERSION_RE = re.compile(r"^\d+\.\d+$")
 PHP_MODULE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+POSTGRESQL_RUNTIME_PACKAGE_RE = re.compile(r"^postgresql(?:-client)?-\d+(?:\.\d+)*$")
+MARIADB_RUNTIME_PACKAGE_RE = re.compile(r"^mariadb-(?:server|client)-core(?:-\d+(?:\.\d+)*)?$")
 GENERIC_PHP_PACKAGES = {
     "php-cli", "php-fpm", "php-common",
     "php-bcmath", "php-curl", "php-gd", "php-intl", "php-mbstring",
@@ -121,6 +123,17 @@ def _allowed_package(value: str) -> bool:
     return bool(value in COMPONENT_PACKAGES or _allowed_php_package(value))
 
 
+def _allowed_remove_package(value: str) -> bool:
+    # Service cleanup may remove only the concrete runtime packages that Debian
+    # leaves behind after top-level PostgreSQL/MariaDB package removal. Keep
+    # install requests on the narrower normal component allowlist.
+    return bool(
+        _allowed_package(value)
+        or POSTGRESQL_RUNTIME_PACKAGE_RE.fullmatch(value)
+        or MARIADB_RUNTIME_PACKAGE_RE.fullmatch(value)
+    )
+
+
 def _binary(name: str) -> str:
     value = shutil.which(name, path=SAFE_PATH)
     if not value:
@@ -145,7 +158,8 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
 
     if action in {"apt.install", "apt.remove"}:
         packages = _string_list(request.get("packages"), "packages")
-        if not all(_allowed_package(item) for item in packages):
+        allowed = _allowed_package if action == "apt.install" else _allowed_remove_package
+        if not all(allowed(item) for item in packages):
             raise RuntimeError("APT package request is outside NativeDev's component allowlist")
         verb = "install" if action == "apt.install" else "remove"
         return [_binary("apt-get"), verb, "-y", *packages]

@@ -2,6 +2,10 @@
 
 ## 0.1.9 - 2026-09-03
 
+- Fixed native service uninstall cleanup: PostgreSQL now removes installed versioned server/client runtimes (for example `postgresql-17` and `postgresql-client-17`) even when the meta-packages were already removed; MariaDB removes its server/client core runtimes; both continue to use APT remove rather than purge so database data/configuration are preserved.
+- Merged Redis Server and `redis-cli` into one Redis component. Install/remove now manages `redis-server` and `redis-tools` together.
+- Privileged RPC advanced to protocol 6 so the helper can narrowly authorize versioned PostgreSQL and MariaDB core packages for removal only.
+- Replaced per-project Nginx server generation with a persistent wildcard router. After one-time setup, new lowercase directories under the park become `name.test` immediately, `public/` is detected at request time, and only per-project PHP pins require Nginx reconciliation. The park receives an inheritable read/traverse ACL so this works even while NativeDev is closed.
 - Added native Debian PHP/Node provider discovery. Existing distro PHP can be configured for NativeDev `*.test` through the per-user FPM pool, and existing Debian Node remains untouched until the user explicitly chooses multi-version management.
 - Added one-way provider migrations: **Debian PHP → Sury Multi-PHP** and **Debian Node → NVM Multi-Node**. Sury/NVM mode no longer exposes a switch back to Debian or a second Debian runtime choice. Leftover old-provider state is presented only as an incomplete migration to normalize.
 - PHP migration enables Sury first and replaces compatible versioned PHP packages in place, preserving reverse dependencies instead of uninstalling Debian PHP first.
@@ -10,8 +14,8 @@
 - Fixed installed-but-disabled/missing PHP modules after reinstall. The explicit PHP Install flow restores missing UCF-managed `mods-available/*.ini` definitions with `UCF_FORCE_CONFFMISS=1`, then enables the baseline for both CLI and FPM. User module choices made later are not changed by normal refresh/service operations.
 - PHP uninstall now discovers and removes every installed package scoped to that PHP version, including extensions installed after the original NativeDev install.
 - PHP and Node version lists now render installed versions before available versions. PHP FPM Disable now means **Disable & Stop**, while CLI PHP remains independent.
-- Privileged RPC advanced to protocol 5 for restricted PHP package/module operations and Debian Node migration. Client and root-owned helper versions are kept in sync by the full 0.1.9 archive; incompatible helpers fail closed with a version-mismatch message.
-- Expanded regression coverage to 44 tests, including one-way provider semantics, migration safeguards, installed-first ordering, UCF module restoration, PHP extension activation, and privileged protocol operations.
+- Privileged RPC is now protocol 6. Protocol 5 introduced restricted PHP package/module operations and Debian Node migration; protocol 6 narrowly adds removal-only authorization for concrete PostgreSQL and MariaDB runtime packages. Client/helper mismatches fail closed.
+- Expanded regression coverage to 52 tests, including one-way provider semantics, migration safeguards, wildcard routing, service-runtime cleanup, installed-first ordering, UCF module restoration, PHP extension activation, and privileged protocol operations.
 
 ## 0.1.8 - 2026-09-02
 

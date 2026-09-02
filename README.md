@@ -47,27 +47,28 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 
 ### Native services and tools
 - Nginx
-- Redis Server and `redis-cli` as separate components
+- Redis Server + `redis-cli` as one component (`redis-server` + `redis-tools`)
 - Memcached
 - MariaDB
 - MySQL when the configured APT repositories actually provide `mysql-server`
 - PostgreSQL
 - Composer
 - mkcert
-- Install/uninstall system packages
+- Install/uninstall system packages; PostgreSQL/MariaDB uninstall also removes their concrete server/client runtime packages without purging database data or configuration
 - systemd start/stop/restart and enable/disable controls when the unit supports them
 - MariaDB/MySQL conflict guard
 
 ### Projects / local development
 - Park one projects directory (default `~/Code`)
 - Scan first-level project directories and expose a dedicated **Projects** page
-- Use `public/` automatically when present, otherwise project root
+- Configure one persistent wildcard Nginx router: after one-time setup, creating a lowercase DNS-safe folder such as `~/Code/my-app` makes `my-app.test` available immediately without reopening NativeDev or regenerating Nginx
+- Resolve the project directory dynamically from the hostname and use `public/` automatically when present, otherwise project root
 - Use the system default PHP-FPM automatically; no global PHP-FPM field is required
 - Per-project PHP dropdown: `Default (X.Y)` plus installed PHP-FPM versions
 - Route `*.test` PHP requests to each project's own `/run/php/phpX.Y-fpm-nativedev-UID.sock`, not the distro `www-data` FPM pool
-- Grant Nginx a minimal, automatic **read-only** ACL on each project's document root (plus ancestor traverse) so it can serve static files directly; nothing outside the document root is touched, and PHP itself never needs an ACL since it already runs as the developer
+- Grant Nginx a read-only ACL on existing document roots and an inheritable read/traverse ACL on the configured park directory so projects created later work immediately; PHP itself never needs an ACL since it already runs as the developer
 - Install Debian's `acl` package automatically the first time that read grant is needed
-- Generate only `/etc/nginx/sites-available/nativedev-sites.conf`
+- Generate only `/etc/nginx/sites-available/nativedev-sites.conf`; the file contains a wildcard/default PHP route plus explicit backend overrides only for projects pinned to another PHP version
 - Quote generated Nginx document-root paths safely, including project directories containing spaces
 - Validate with `nginx -t` before reload and restore both the previous site file and enablement state on failure
 - Configure `*.test -> 127.0.0.1` using **NetworkManager-managed dnsmasq**
@@ -93,11 +94,11 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 The GTK4 UI has seven deliberately small pages:
 
 1. Dashboard
-2. PHP
-3. Node.js
-4. Services & tools
-5. Projects
-6. Local development
+2. Local development
+3. Services & tools
+4. PHP
+5. Node.js
+6. Projects
 7. Doctor
 
 It uses GTK CSS only; no libadwaita, WebView, Node/Electron, Qt, database, or extra Python UI framework.

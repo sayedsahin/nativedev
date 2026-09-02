@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
 
@@ -18,8 +19,14 @@ class ComponentSpec:
 
 COMPONENTS: tuple[ComponentSpec, ...] = (
     ComponentSpec("nginx", "Nginx", ("nginx",), "nginx", "nginx"),
-    ComponentSpec("redis-server", "Redis Server", ("redis-server",), "redis-server", "redis-server"),
-    ComponentSpec("redis-cli", "redis-cli", ("redis-tools",), None, "redis-cli", "Redis command-line client; no system service."),
+    ComponentSpec(
+        "redis",
+        "Redis",
+        ("redis-server", "redis-tools"),
+        "redis-server",
+        "redis-cli",
+        "Redis Server and redis-cli are installed and removed together.",
+    ),
     ComponentSpec("memcached", "Memcached", ("memcached",), "memcached", "memcached"),
     ComponentSpec("mariadb", "MariaDB", ("mariadb-server", "mariadb-client"), "mariadb", "mariadb"),
     ComponentSpec(
@@ -36,6 +43,14 @@ COMPONENTS: tuple[ComponentSpec, ...] = (
 )
 
 
+# Debian's PostgreSQL meta-packages and MariaDB top-level packages can be
+# removed while their actual version/core runtimes remain installed. NativeDev
+# treats those runtime packages as part of the component so Uninstall removes
+# the executable service/client too, without using apt purge or deleting data.
+POSTGRESQL_RUNTIME_RE = re.compile(r"^postgresql(?:-client)?-\d+(?:\.\d+)*$")
+MARIADB_RUNTIME_RE = re.compile(r"^mariadb-(?:server|client)-core(?:-\d+(?:\.\d+)*)?$")
+
+
 @dataclass(slots=True)
 class ComponentState:
     spec: ComponentSpec
@@ -45,6 +60,7 @@ class ComponentState:
     running: bool
     enabled: bool
     enabled_state: str
+    service_available: bool
     uninstallable: bool
     uninstall_note: str
     binary_path: str | None
@@ -56,27 +72,81 @@ class ServiceManager:
         self.apt = apt
         self.systemd = systemd
 
+    def _installed_package_names(self) -> set[str]:
+        result = self.runner.run(
+            ["dpkg-query", "-W", "-f=${db:Status-Abbrev}\t${binary:Package}\n"],
+            timeout=45,
+        )
+        if not result.ok:
+            return set()
+
+        packages: set[str] = set()
+        for raw in result.stdout.splitlines():
+            status, separator, package = raw.partition("\t")
+            if not separator or not status.startswith("ii "):
+                continue
+            packages.add(package.strip().split(":", 1)[0])
+        return packages
+
+    def installed_component_packages(self, spec: ComponentSpec) -> list[str]:
+        """Return installed runtime packages NativeDev should remove as one component.
+
+        Most components are represented directly by ``spec.packages``. Debian's
+        PostgreSQL meta-packages are different: removing ``postgresql`` can leave
+        ``postgresql-17``/``postgresql-client-17`` installed. MariaDB can likewise
+        leave ``mariadb-*-core`` binaries behind. Include those runtime packages
+        so the corresponding server/client executable actually disappears.
+
+        Shared/common packages and database data are deliberately not swept up.
+        This is an APT *remove* operation, never purge/autoremove.
+        """
+        installed = self._installed_package_names()
+        wanted = {package for package in spec.packages if package in installed}
+
+        if spec.key == "postgresql":
+            wanted.update(package for package in installed if POSTGRESQL_RUNTIME_RE.fullmatch(package))
+        elif spec.key == "mariadb":
+            wanted.update(package for package in installed if MARIADB_RUNTIME_RE.fullmatch(package))
+
+        return sorted(wanted)
+
     def state(self, spec: ComponentSpec) -> ComponentState:
-        package_states = {pkg: self.apt.is_installed(pkg) for pkg in spec.packages}
-        packages_installed = any(package_states.values())
-        # For a system service, the first package is the server/primary package.
-        # A client binary alone must not make the service look installed.
-        installed = package_states.get(spec.packages[0], False) if spec.service else packages_installed
+        installed_packages = self.installed_component_packages(spec)
+        packages_installed = bool(installed_packages)
         binary_path = shutil.which(spec.binary) if spec.binary else None
-        if binary_path and not spec.service:
+
+        # A partially removed component (for example postgresql meta-package gone
+        # but postgresql-client-17 still installed) must remain visible as
+        # installed/uninstallable so NativeDev can finish the cleanup.
+        installed = packages_installed
+        if not spec.service and binary_path:
             installed = True
+
         installable = any(self.apt.candidate(pkg) for pkg in spec.packages)
-        running = bool(spec.service and self.systemd.is_active(spec.service))
-        enabled_state = self.systemd.enabled_state(spec.service) if spec.service else "n/a"
-        enabled = enabled_state in {"enabled", "enabled-runtime", "linked", "linked-runtime"}
-        uninstallable = packages_installed
-        uninstall_note = ""
-        if spec.key == "redis-cli" and self.apt.is_installed("redis-server"):
-            uninstallable = False
-            uninstall_note = "redis-tools is required by the installed Redis Server package."
+
+        enabled_state = "n/a"
+        service_available = False
+        running = False
+        enabled = False
+        if spec.service and packages_installed:
+            enabled_state = self.systemd.enabled_state(spec.service)
+            service_available = enabled_state not in {"n/a", "not-found"} and not enabled_state.startswith("Failed ")
+            if service_available:
+                running = self.systemd.is_active(spec.service)
+                enabled = enabled_state in {"enabled", "enabled-runtime", "linked", "linked-runtime"}
+
         return ComponentState(
-            spec, installed, packages_installed, installable, running, enabled, enabled_state,
-            uninstallable, uninstall_note, binary_path
+            spec=spec,
+            installed=installed,
+            packages_installed=packages_installed,
+            installable=installable,
+            running=running,
+            enabled=enabled,
+            enabled_state=enabled_state,
+            service_available=service_available,
+            uninstallable=packages_installed,
+            uninstall_note="",
+            binary_path=binary_path,
         )
 
     def install(self, spec: ComponentSpec) -> None:
@@ -92,14 +162,13 @@ class ServiceManager:
             self.systemd.enable_now(spec.service)
 
     def uninstall(self, spec: ComponentSpec) -> None:
-        if spec.key == "redis-cli" and self.apt.is_installed("redis-server"):
-            raise RuntimeError("redis-cli cannot be removed while Redis Server is installed because Debian's redis-server depends on redis-tools.")
-        installed = [pkg for pkg in spec.packages if self.apt.is_installed(pkg)]
+        installed = self.installed_component_packages(spec)
         if not installed:
             raise RuntimeError(f"{spec.title} is not installed through APT")
         if spec.service:
-            # Stop and disable before package removal when possible. If the unit is
-            # already gone/disabled, package removal should still proceed.
+            # Stop and disable before package removal when the unit still exists.
+            # A previously half-removed component may already have lost its unit;
+            # package cleanup should still proceed in that case.
             try:
                 self.systemd.disable_now(spec.service)
             except RuntimeError:

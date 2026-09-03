@@ -499,6 +499,213 @@ class PhpPage(Page):
         box.append(label(text, "muted"))
 
 
+class PhpExtensionsPage(Page):
+    def __init__(self, window: "MainWindow"):
+        super().__init__(window)
+        self.selected_version: str | None = None
+        self.body.append(
+            page_header(
+                "PHP Extensions",
+                "Install, remove, enable or disable extensions for one PHP version. CLI and FPM are always changed together.",
+                self.refresh,
+            )
+        )
+        self.version_card = card()
+        self.extensions_card = card()
+        self.body.append(self.version_card)
+        self.body.append(self.extensions_card)
+        self.refresh()
+
+    def refresh(self):
+        self._replace(self.version_card, [label("Loading PHP versions…", "muted")])
+        self._replace(self.extensions_card, [label("Loading extension state…", "muted")])
+
+        def collect():
+            versions = sorted(
+                self.context.php_extensions.installed_versions(),
+                key=self.context.php._version_key,
+                reverse=True,
+            )
+            selected = self.selected_version if self.selected_version in versions else ""
+            cli = self.context.php.cli_version()
+            if not selected and cli in versions:
+                selected = cli
+            if not selected and versions:
+                selected = versions[0]
+            states = self.context.php_extensions.states(selected) if selected else []
+            return {
+                "provider": self.context.php.provider(),
+                "versions": versions,
+                "selected": selected,
+                "states": states,
+            }
+
+        def done(data):
+            self.selected_version = data["selected"] or None
+            self._build_version_selector(data)
+            self._build_extensions(data)
+            return False
+
+        self.worker.submit(collect, done, lambda exc: self.window.set_activity(False, str(exc), error=True))
+
+    def _build_version_selector(self, data):
+        children = [label("PHP version", "section-title")]
+        versions = data["versions"]
+        if not versions:
+            children.append(label("Install a PHP runtime before managing extensions.", "muted", wrap=True))
+            self._replace(self.version_card, children)
+            return
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        version_labels = [f"PHP {version}" for version in versions]
+        dropdown = Gtk.DropDown.new_from_strings(version_labels)
+        selected_index = versions.index(data["selected"])
+        dropdown.set_selected(selected_index)
+        row.append(dropdown)
+        provider_name = {"debian": "Debian", "sury": "Sury"}.get(data["provider"], data["provider"].title())
+        row.append(status_pill(provider_name, data["provider"] in {"debian", "sury"}))
+        children.append(row)
+        children.append(label(
+            "Every action applies to CLI and FPM together. Refresh only reads state; it never re-enables an extension you disabled.",
+            "muted", wrap=True,
+        ))
+
+        def changed(widget, _param):
+            index = widget.get_selected()
+            if index < 0 or index >= len(versions):
+                return
+            version = versions[index]
+            if version == self.selected_version:
+                return
+            self.selected_version = version
+            self.refresh()
+
+        dropdown.connect("notify::selected", changed)
+        self._replace(self.version_card, children)
+
+    def _build_extensions(self, data):
+        children: list[Gtk.Widget] = [label("Extensions", "section-title")]
+        version = data["selected"]
+        if not version:
+            children.append(label("No PHP version selected.", "muted"))
+            self._replace(self.extensions_card, children)
+            return
+
+        category = None
+        for state in data["states"]:
+            spec = state.spec
+            if spec.category != category:
+                category = spec.category
+                heading = label(category, "section-title")
+                heading.set_margin_top(6)
+                children.append(heading)
+
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+            row.add_css_class("service-row")
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            copy.set_hexpand(True)
+            copy.append(label(spec.title, "row-title"))
+            detail = "Built into this PHP runtime" if state.built_in else state.package
+            copy.append(label(detail, "muted"))
+            if spec.note:
+                copy.append(label(spec.note, "muted", wrap=True))
+            top.append(copy)
+
+            if state.built_in:
+                top.append(status_pill("Built-in", True))
+            elif state.installed and state.enabled:
+                top.append(status_pill("Installed · Enabled", True))
+            elif state.installed:
+                top.append(status_pill("Installed · Disabled", None))
+            elif state.installable:
+                top.append(status_pill("Available", None))
+            else:
+                top.append(status_pill("Unavailable", False))
+            row.append(top)
+
+            actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            if not state.built_in:
+                if not state.installed and state.installable:
+                    install = Gtk.Button(label="Install")
+                    install.add_css_class("suggested-action")
+                    install.connect(
+                        "clicked",
+                        lambda _b, v=version, key=spec.key, title=spec.title, btn=install: confirm(
+                            self.window,
+                            f"Install {title} for PHP {v}?",
+                            f"NativeDev will install the version-specific APT package, enable its modules for CLI and FPM together, validate PHP {v} FPM, then reload it when running.",
+                            lambda: self.action(
+                                btn,
+                                lambda: self.context.php_extensions.install(v, key),
+                                success_message=f"{title} installed and enabled for PHP {v}",
+                                after=self.refresh,
+                            ),
+                        ),
+                    )
+                    actions.append(install)
+                elif state.installed:
+                    if state.enabled:
+                        disable = Gtk.Button(label="Disable")
+                        disable.connect(
+                            "clicked",
+                            lambda _b, v=version, key=spec.key, title=spec.title, btn=disable: self.action(
+                                btn,
+                                lambda: self.context.php_extensions.disable(v, key),
+                                success_message=f"{title} disabled for PHP {v}",
+                                after=self.refresh,
+                            ),
+                        )
+                        actions.append(disable)
+                    else:
+                        enable = Gtk.Button(label="Enable")
+                        enable.add_css_class("suggested-action")
+                        enable.connect(
+                            "clicked",
+                            lambda _b, v=version, key=spec.key, title=spec.title, btn=enable: self.action(
+                                btn,
+                                lambda: self.context.php_extensions.enable(v, key),
+                                success_message=f"{title} enabled for PHP {v}",
+                                after=self.refresh,
+                            ),
+                        )
+                        actions.append(enable)
+
+                    uninstall = Gtk.Button(label="Uninstall")
+                    uninstall.add_css_class("destructive-action")
+                    uninstall.connect(
+                        "clicked",
+                        lambda _b, v=version, key=spec.key, title=spec.title, package=state.package, btn=uninstall: confirm(
+                            self.window,
+                            f"Uninstall {title} from PHP {v}?",
+                            f"NativeDev will APT-remove {package} after a dependency safety preflight. It does not purge PHP configuration. CLI and FPM lose the extension together.",
+                            lambda: self.action(
+                                btn,
+                                lambda: self.context.php_extensions.uninstall(v, key),
+                                success_message=f"{title} uninstalled from PHP {v}",
+                                after=self.refresh,
+                            ),
+                        ),
+                    )
+                    actions.append(uninstall)
+            if actions.get_first_child():
+                row.append(actions)
+            children.append(row)
+
+        children.append(label(
+            "Core/runtime modules such as JSON, OpenSSL, PDO and Session are intentionally not exposed as removable packages here.",
+            "muted", wrap=True,
+        ))
+        self._replace(self.extensions_card, children)
+
+    @staticmethod
+    def _replace(container: Gtk.Box, children: list[Gtk.Widget]):
+        while child := container.get_first_child():
+            container.remove(child)
+        for child in children:
+            container.append(child)
+
+
 class NodePage(Page):
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
@@ -1228,6 +1435,7 @@ class MainWindow(Gtk.ApplicationWindow):
         ("local", "Local development", LocalDevPage),
         ("services", "Services & tools", ServicesPage),
         ("php", "PHP", PhpPage),
+        ("extensions", "PHP Extensions", PhpExtensionsPage),
         ("node", "Node.js", NodePage),
         ("projects", "Projects", ProjectsPage),
         ("doctor", "Doctor", DoctorPage),

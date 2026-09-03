@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 
-PRIVILEGE_PROTOCOL_VERSION = 6
+PRIVILEGE_PROTOCOL_VERSION = 7
 PHP_FPM_COMMAND_RE = re.compile(r"^php-fpm(?P<version>\d+\.\d+)$")
 PHP_BINARY_PATH_RE = re.compile(r"^/usr/bin/php(?P<version>\d+\.\d+)$")
 

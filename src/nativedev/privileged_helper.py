@@ -14,7 +14,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-PROTOCOL_VERSION = 6
+PROTOCOL_VERSION = 7
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 MANAGED_FILES = {
@@ -53,6 +53,27 @@ ALLOWED_PHP_MODULES = {
     "readline", "sqlite3", "pdo_sqlite",
     "dom", "simplexml", "xml", "xmlreader", "xmlwriter", "xsl",
     "zip", "opcache",
+}
+PHP_EXTENSION_CATALOG = {
+    "mysql": ("mysql", ("mysqlnd", "mysqli", "pdo_mysql"), None),
+    "pgsql": ("pgsql", ("pgsql", "pdo_pgsql"), None),
+    "sqlite3": ("sqlite3", ("sqlite3", "pdo_sqlite"), None),
+    "bcmath": ("bcmath", ("bcmath",), None),
+    "curl": ("curl", ("curl",), None),
+    "gd": ("gd", ("gd",), None),
+    "intl": ("intl", ("intl",), None),
+    "mbstring": ("mbstring", ("mbstring",), None),
+    "xml": ("xml", ("dom", "simplexml", "xml", "xmlreader", "xmlwriter", "xsl"), None),
+    "zip": ("zip", ("zip",), None),
+    "opcache": ("opcache", ("opcache",), (8, 5)),
+    "soap": ("soap", ("soap",), None),
+    "ldap": ("ldap", ("ldap",), None),
+    "imap": ("imap", ("imap",), None),
+    "gmp": ("gmp", ("gmp",), None),
+    "redis": ("redis", ("redis",), None),
+    "memcached": ("memcached", ("memcached",), None),
+    "imagick": ("imagick", ("imagick",), None),
+    "xdebug": ("xdebug", ("xdebug",), None),
 }
 FPM_POOL_RE = re.compile(r"^/etc/php/(?P<version>\d+\.\d+)/fpm/pool\.d/nativedev-(?P<uid>\d+)\.conf$")
 TEMP_SOURCE_RE = re.compile(r"^/tmp/nativedev-[^/]+/.+$")
@@ -131,6 +152,86 @@ def _allowed_remove_package(value: str) -> bool:
         _allowed_package(value)
         or POSTGRESQL_RUNTIME_PACKAGE_RE.fullmatch(value)
         or MARIADB_RUNTIME_PACKAGE_RE.fullmatch(value)
+    )
+
+
+def _version_key(value: str) -> tuple[int, int]:
+    try:
+        major, minor = value.split(".", 1)
+        return int(major), int(minor)
+    except (TypeError, ValueError):
+        return 0, 0
+
+
+def _php_extension_details(request: dict) -> tuple[str, str, str, tuple[str, ...]]:
+    if any(field in request for field in ("sapi", "modules", "package")):
+        raise RuntimeError("PHP extension operations do not accept client-supplied package/module/SAPI selectors")
+    version = request.get("version")
+    extension = request.get("extension")
+    if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+        raise RuntimeError("Invalid PHP extension version")
+    if not isinstance(extension, str) or extension not in PHP_EXTENSION_CATALOG:
+        raise RuntimeError("PHP extension is outside NativeDev's curated catalog")
+    suffix, modules, built_in_from = PHP_EXTENSION_CATALOG[extension]
+    if built_in_from and _version_key(version) >= built_in_from:
+        raise RuntimeError(f"{extension} is built into PHP {version} and is not package-managed")
+    return version, extension, f"php{version}-{suffix}", modules
+
+
+def _php_module_link_exists(version: str, sapi: str, module: str) -> bool:
+    conf_dir = Path(f"/etc/php/{version}/{sapi}/conf.d")
+    if not conf_dir.is_dir():
+        return False
+    candidates = list(conf_dir.glob(f"*-{module}.ini"))
+    candidates.extend(conf_dir.glob(f"{module}.ini"))
+    return any(path.exists() for path in candidates)
+
+
+def _run_extension_module_pair(version: str, modules: tuple[str, ...], enable: bool, timeout: int) -> subprocess.CompletedProcess:
+    binary = "phpenmod" if enable else "phpdismod"
+    snapshot = {
+        sapi: {module: _php_module_link_exists(version, sapi, module) for module in modules}
+        for sapi in ("cli", "fpm")
+    }
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+
+    for sapi in ("cli", "fpm"):
+        argv = [_binary(binary), "-v", version, "-s", sapi, *modules]
+        proc = subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+        if proc.stdout:
+            stdout_parts.append(proc.stdout)
+        if proc.stderr:
+            stderr_parts.append(proc.stderr)
+        if proc.returncode == 0:
+            continue
+
+        rollback_errors: list[str] = []
+        for rollback_sapi in ("cli", "fpm"):
+            enabled_before = [module for module, value in snapshot[rollback_sapi].items() if value]
+            disabled_before = [module for module, value in snapshot[rollback_sapi].items() if not value]
+            for rollback_binary, rollback_modules in (("phpenmod", enabled_before), ("phpdismod", disabled_before)):
+                if not rollback_modules:
+                    continue
+                rollback = subprocess.run(
+                    [_binary(rollback_binary), "-v", version, "-s", rollback_sapi, *rollback_modules],
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout,
+                )
+                if rollback.returncode != 0:
+                    rollback_errors.append(
+                        rollback.stderr.strip() or rollback.stdout.strip() or f"{rollback_binary} rollback failed"
+                    )
+        if rollback_errors:
+            stderr_parts.append("Rollback: " + "; ".join(rollback_errors))
+        return subprocess.CompletedProcess(argv, proc.returncode, "".join(stdout_parts), "\n".join(stderr_parts))
+
+    return subprocess.CompletedProcess(
+        [f"nativedev:php.extension_{'enable' if enable else 'disable'}"],
+        0,
+        "".join(stdout_parts),
+        "\n".join(stderr_parts),
     )
 
 
@@ -260,6 +361,16 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
             *packages,
         ]
 
+    if action in {"php.extension_install", "php.extension_remove", "php.extension_enable", "php.extension_disable"}:
+        _version, _extension, package, _modules = _php_extension_details(request)
+        if action == "php.extension_install":
+            return [_binary("apt-get"), "install", "--reinstall", "-y", package]
+        if action == "php.extension_remove":
+            return [_binary("apt-get"), "remove", "-y", package]
+        # Enable/disable are executed as one CLI+FPM transaction by
+        # execute_operation(); no SAPI selector crosses the privilege boundary.
+        return []
+
     if action == "php.enable_modules":
         version = request.get("version")
         sapi = request.get("sapi")
@@ -270,8 +381,8 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
             raise RuntimeError("PHP module SAPI is outside NativeDev's allowlist")
         if not all(PHP_MODULE_RE.fullmatch(module) and module in ALLOWED_PHP_MODULES for module in modules):
             raise RuntimeError("PHP module request is outside NativeDev's development allowlist")
-        # phpenmod only manages Debian's /etc/php/<version>/<sapi>/conf.d links;
-        # it does not install arbitrary extensions or execute module code.
+        # phpenmod manages Debian's /etc/php/<version>/<sapi>/conf.d links;
+        # it is retained for the fixed install-time baseline only.
         return [_binary("phpenmod"), "-v", version, "-s", sapi, *modules]
 
     # This operation is intentionally executed by execute_operation(): both
@@ -295,6 +406,34 @@ def validate_operation(request: dict, uid: int = 1000) -> tuple[bool, str]:
 
 def execute_operation(request: dict, uid: int, timeout: int) -> subprocess.CompletedProcess:
     action = request.get("action")
+
+    if action == "php.extension_install":
+        version, _extension, _package, modules = _php_extension_details(request)
+        argv = command_for_operation(request, uid)
+        env = dict(os.environ)
+        env["PATH"] = SAFE_PATH
+        env["UCF_FORCE_CONFFMISS"] = "1"
+        install_proc = subprocess.run(
+            argv,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+        )
+        if install_proc.returncode != 0:
+            return install_proc
+        module_proc = _run_extension_module_pair(version, modules, True, timeout)
+        if install_proc.stdout:
+            module_proc.stdout = install_proc.stdout + module_proc.stdout
+        if install_proc.stderr:
+            module_proc.stderr = install_proc.stderr + module_proc.stderr
+        return module_proc
+
+    if action in {"php.extension_enable", "php.extension_disable"}:
+        version, _extension, _package, modules = _php_extension_details(request)
+        command_for_operation(request, uid)
+        return _run_extension_module_pair(version, modules, action == "php.extension_enable", timeout)
+
     if action == "php.install_packages":
         # PHP's mods-available/*.ini files are UCF-managed. UCF intentionally
         # preserves a local deletion across ordinary reinstalls, so NativeDev's

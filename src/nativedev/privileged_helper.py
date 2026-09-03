@@ -14,7 +14,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 8
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 MANAGED_FILES = {
@@ -63,16 +63,33 @@ PHP_EXTENSION_CATALOG = {
     "gd": ("gd", ("gd",), None),
     "intl": ("intl", ("intl",), None),
     "mbstring": ("mbstring", ("mbstring",), None),
+    "readline": ("readline", ("readline",), None),
     "xml": ("xml", ("dom", "simplexml", "xml", "xmlreader", "xmlwriter", "xsl"), None),
     "zip": ("zip", ("zip",), None),
     "opcache": ("opcache", ("opcache",), (8, 5)),
-    "soap": ("soap", ("soap",), None),
-    "ldap": ("ldap", ("ldap",), None),
-    "imap": ("imap", ("imap",), None),
+    "apcu": ("apcu", ("apcu",), None),
+    "bz2": ("bz2", ("bz2",), None),
+    "dba": ("dba", ("dba",), None),
+    "enchant": ("enchant", ("enchant",), None),
     "gmp": ("gmp", ("gmp",), None),
+    "imap": ("imap", ("imap",), None),
+    "ldap": ("ldap", ("ldap",), None),
+    "odbc": ("odbc", ("odbc", "pdo_odbc"), None),
+    "pspell": ("pspell", ("pspell",), None),
+    "snmp": ("snmp", ("snmp",), None),
+    "soap": ("soap", ("soap",), None),
+    "tidy": ("tidy", ("tidy",), None),
     "redis": ("redis", ("redis",), None),
     "memcached": ("memcached", ("memcached",), None),
     "imagick": ("imagick", ("imagick",), None),
+    "amqp": ("amqp", ("amqp",), None),
+    "igbinary": ("igbinary", ("igbinary",), None),
+    "mongodb": ("mongodb", ("mongodb",), None),
+    "msgpack": ("msgpack", ("msgpack",), None),
+    "smbclient": ("smbclient", ("smbclient",), None),
+    "ssh2": ("ssh2", ("ssh2",), None),
+    "yaml": ("yaml", ("yaml",), None),
+    "pcov": ("pcov", ("pcov",), None),
     "xdebug": ("xdebug", ("xdebug",), None),
 }
 FPM_POOL_RE = re.compile(r"^/etc/php/(?P<version>\d+\.\d+)/fpm/pool\.d/nativedev-(?P<uid>\d+)\.conf$")

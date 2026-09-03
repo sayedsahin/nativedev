@@ -517,6 +517,17 @@ class PhpExtensionsPage(Page):
         self.refresh()
 
     def refresh(self):
+        # An explicit page Refresh follows the current system PHP default. This
+        # matters when the default was changed on the PHP page while this page
+        # instance remained alive in the Gtk.Stack.
+        self._refresh(prefer_default=True)
+
+    def refresh_selected(self):
+        # Dropdown changes and extension mutations should keep the version the
+        # user is actively working on instead of jumping back to the default.
+        self._refresh(prefer_default=False)
+
+    def _refresh(self, *, prefer_default: bool):
         self._replace(self.version_card, [label("Loading PHP versions…", "muted")])
         self._replace(self.extensions_card, [label("Loading extension state…", "muted")])
 
@@ -526,18 +537,25 @@ class PhpExtensionsPage(Page):
                 key=self.context.php._version_key,
                 reverse=True,
             )
-            selected = self.selected_version if self.selected_version in versions else ""
             cli = self.context.php.cli_version()
-            if not selected and cli in versions:
+            selected = ""
+            if prefer_default and cli in versions:
                 selected = cli
-            if not selected and versions:
+            elif self.selected_version in versions:
+                selected = self.selected_version or ""
+            elif cli in versions:
+                selected = cli
+            elif versions:
                 selected = versions[0]
             states = self.context.php_extensions.states(selected) if selected else []
+            runtime_modules = self.context.php_extensions.runtime_modules(selected) if selected else []
             return {
                 "provider": self.context.php.provider(),
                 "versions": versions,
                 "selected": selected,
+                "default": cli if cli in versions else "",
                 "states": states,
+                "runtime_modules": runtime_modules,
             }
 
         def done(data):
@@ -557,13 +575,19 @@ class PhpExtensionsPage(Page):
             return
 
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        version_labels = [f"PHP {version}" for version in versions]
+        default_version = data.get("default", "")
+        version_labels = [
+            f"PHP {version} · Default" if version == default_version else f"PHP {version}"
+            for version in versions
+        ]
         dropdown = Gtk.DropDown.new_from_strings(version_labels)
         selected_index = versions.index(data["selected"])
         dropdown.set_selected(selected_index)
         row.append(dropdown)
         provider_name = {"debian": "Debian", "sury": "Sury"}.get(data["provider"], data["provider"].title())
         row.append(status_pill(provider_name, data["provider"] in {"debian", "sury"}))
+        if default_version:
+            row.append(status_pill(f"Default PHP {default_version}", True))
         children.append(row)
         children.append(label(
             "Every action applies to CLI and FPM together. Refresh only reads state; it never re-enables an extension you disabled.",
@@ -578,7 +602,7 @@ class PhpExtensionsPage(Page):
             if version == self.selected_version:
                 return
             self.selected_version = version
-            self.refresh()
+            self.refresh_selected()
 
         dropdown.connect("notify::selected", changed)
         self._replace(self.version_card, children)
@@ -591,8 +615,29 @@ class PhpExtensionsPage(Page):
             self._replace(self.extensions_card, children)
             return
 
+        runtime_modules = data.get("runtime_modules", [])
+        if runtime_modules:
+            heading = label("Runtime / Core", "section-title")
+            heading.set_margin_top(6)
+            children.append(heading)
+            for module in runtime_modules:
+                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+                row.add_css_class("service-row")
+                name = label(module, "row-title")
+                name.set_hexpand(True)
+                row.append(name)
+                status = status_pill("Built-in", True)
+                status.add_css_class("extension-status")
+                row.append(status)
+                children.append(row)
+
         category = None
         for state in data["states"]:
+            # Built-in catalog entries are rendered in Runtime / Core with the
+            # selected runtime's real module inventory, never as fake packages.
+            if state.built_in:
+                continue
+
             spec = state.spec
             if spec.category != category:
                 category = spec.category
@@ -600,102 +645,101 @@ class PhpExtensionsPage(Page):
                 heading.set_margin_top(6)
                 children.append(heading)
 
-            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
             row.add_css_class("service-row")
-            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-            copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            copy.set_hexpand(True)
-            copy.append(label(spec.title, "row-title"))
-            detail = "Built into this PHP runtime" if state.built_in else state.package
-            copy.append(label(detail, "muted"))
+            name = label(state.package, "row-title")
+            tooltip = spec.title
             if spec.note:
-                copy.append(label(spec.note, "muted", wrap=True))
-            top.append(copy)
+                tooltip += f" — {spec.note}"
+            name.set_tooltip_text(tooltip)
+            row.append(name)
 
-            if state.built_in:
-                top.append(status_pill("Built-in", True))
-            elif state.installed and state.enabled:
-                top.append(status_pill("Installed · Enabled", True))
+            actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            actions.set_margin_start(8)
+
+            if not state.installed and state.installable:
+                install = Gtk.Button(label="Install")
+                install.add_css_class("suggested-action")
+                install.connect(
+                    "clicked",
+                    lambda _b, v=version, key=spec.key, title=spec.title, package=state.package, btn=install: confirm(
+                        self.window,
+                        f"Install {package}?",
+                        f"NativeDev will install {package}, enable it for CLI and FPM together, validate PHP {v} FPM, then reload it when running.",
+                        lambda: self.action(
+                            btn,
+                            lambda: self.context.php_extensions.install(v, key),
+                            success_message=f"{package} installed and enabled",
+                            after=self.refresh_selected,
+                        ),
+                    ),
+                )
+                actions.append(install)
             elif state.installed:
-                top.append(status_pill("Installed · Disabled", None))
-            elif state.installable:
-                top.append(status_pill("Available", None))
-            else:
-                top.append(status_pill("Unavailable", False))
-            row.append(top)
-
-            actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            if not state.built_in:
-                if not state.installed and state.installable:
-                    install = Gtk.Button(label="Install")
-                    install.add_css_class("suggested-action")
-                    install.connect(
+                if state.enabled:
+                    disable = Gtk.Button(label="Disable")
+                    disable.connect(
                         "clicked",
-                        lambda _b, v=version, key=spec.key, title=spec.title, btn=install: confirm(
-                            self.window,
-                            f"Install {title} for PHP {v}?",
-                            f"NativeDev will install the version-specific APT package, enable its modules for CLI and FPM together, validate PHP {v} FPM, then reload it when running.",
-                            lambda: self.action(
-                                btn,
-                                lambda: self.context.php_extensions.install(v, key),
-                                success_message=f"{title} installed and enabled for PHP {v}",
-                                after=self.refresh,
-                            ),
+                        lambda _b, v=version, key=spec.key, package=state.package, btn=disable: self.action(
+                            btn,
+                            lambda: self.context.php_extensions.disable(v, key),
+                            success_message=f"{package} disabled",
+                            after=self.refresh_selected,
                         ),
                     )
-                    actions.append(install)
-                elif state.installed:
-                    if state.enabled:
-                        disable = Gtk.Button(label="Disable")
-                        disable.connect(
-                            "clicked",
-                            lambda _b, v=version, key=spec.key, title=spec.title, btn=disable: self.action(
-                                btn,
-                                lambda: self.context.php_extensions.disable(v, key),
-                                success_message=f"{title} disabled for PHP {v}",
-                                after=self.refresh,
-                            ),
-                        )
-                        actions.append(disable)
-                    else:
-                        enable = Gtk.Button(label="Enable")
-                        enable.add_css_class("suggested-action")
-                        enable.connect(
-                            "clicked",
-                            lambda _b, v=version, key=spec.key, title=spec.title, btn=enable: self.action(
-                                btn,
-                                lambda: self.context.php_extensions.enable(v, key),
-                                success_message=f"{title} enabled for PHP {v}",
-                                after=self.refresh,
-                            ),
-                        )
-                        actions.append(enable)
-
-                    uninstall = Gtk.Button(label="Uninstall")
-                    uninstall.add_css_class("destructive-action")
-                    uninstall.connect(
+                    actions.append(disable)
+                else:
+                    enable = Gtk.Button(label="Enable")
+                    enable.add_css_class("suggested-action")
+                    enable.connect(
                         "clicked",
-                        lambda _b, v=version, key=spec.key, title=spec.title, package=state.package, btn=uninstall: confirm(
-                            self.window,
-                            f"Uninstall {title} from PHP {v}?",
-                            f"NativeDev will APT-remove {package} after a dependency safety preflight. It does not purge PHP configuration. CLI and FPM lose the extension together.",
-                            lambda: self.action(
-                                btn,
-                                lambda: self.context.php_extensions.uninstall(v, key),
-                                success_message=f"{title} uninstalled from PHP {v}",
-                                after=self.refresh,
-                            ),
+                        lambda _b, v=version, key=spec.key, package=state.package, btn=enable: self.action(
+                            btn,
+                            lambda: self.context.php_extensions.enable(v, key),
+                            success_message=f"{package} enabled",
+                            after=self.refresh_selected,
                         ),
                     )
-                    actions.append(uninstall)
+                    actions.append(enable)
+
+                uninstall = Gtk.Button(label="Uninstall")
+                uninstall.add_css_class("destructive-action")
+                uninstall.connect(
+                    "clicked",
+                    lambda _b, v=version, key=spec.key, package=state.package, btn=uninstall: confirm(
+                        self.window,
+                        f"Uninstall {package}?",
+                        f"NativeDev will APT-remove {package} after a dependency safety preflight. It does not purge PHP configuration. CLI and FPM lose the extension together.",
+                        lambda: self.action(
+                            btn,
+                            lambda: self.context.php_extensions.uninstall(v, key),
+                            success_message=f"{package} uninstalled",
+                            after=self.refresh_selected,
+                        ),
+                    ),
+                )
+                actions.append(uninstall)
+
             if actions.get_first_child():
                 row.append(actions)
+
+            spacer = Gtk.Box()
+            spacer.set_hexpand(True)
+            row.append(spacer)
+
+            if state.installed and state.enabled:
+                status = status_pill("Installed · Enabled", True)
+            elif state.installed:
+                status = status_pill("Installed · Disabled", None)
+            elif state.installable:
+                status = status_pill("Available", None)
+            else:
+                status = status_pill("Unavailable", False)
+            status.add_css_class("extension-status")
+            row.append(status)
+
             children.append(row)
 
-        children.append(label(
-            "Core/runtime modules such as JSON, OpenSSL, PDO and Session are intentionally not exposed as removable packages here.",
-            "muted", wrap=True,
-        ))
         self._replace(self.extensions_card, children)
 
     @staticmethod

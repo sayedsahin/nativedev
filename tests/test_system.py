@@ -216,7 +216,7 @@ class PrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=uid)[0]
 
     def test_allows_structured_native_operations(self):
-        protocol = 6
+        protocol = 8
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "restart", "now": False, "service": "nginx"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "disable", "now": True, "service": "php8.4-fpm"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["redis-tools"]}))
@@ -226,13 +226,17 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "php.install_packages", "packages": ["php-cli", "php-fpm"], "allow_downgrades": True}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "apt.remove", "packages": ["nodejs", "npm"]}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "php.enable_modules", "version": "8.4", "sapi": "cli", "modules": ["gd", "mysqli", "pdo_mysql", "opcache"]}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "php.extension_install", "version": "8.4", "extension": "xdebug"}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "php.extension_enable", "version": "8.4", "extension": "redis"}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "php.extension_disable", "version": "8.4", "extension": "xdebug"}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "php.extension_remove", "version": "8.4", "extension": "imagick"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "networkmanager.reload", "scope": "conf"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.install", "mode": "0644", "source": "/tmp/nativedev-fpm-test/pool.conf", "destination": "/etc/php/8.4/fpm/pool.d/nativedev-1000.conf"}, uid=1000))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/php/8.4/fpm/pool.d/nativedev-1000.conf"]}, uid=1000))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/php/8.4/fpm/pool.d/nativedev-1001.conf"]}, uid=1000))
 
     def test_rejects_raw_commands_and_outside_packages(self):
-        protocol = 6
+        protocol = 8
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "run", "argv": ["bash", "-c", "id"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["openssh-server"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["/tmp/nativedev-test/debsuryorg-archive-keyring.deb"]}))
@@ -244,6 +248,10 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.install_packages", "packages": ["php-arbitrary-root-tool"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.enable_modules", "version": "8.4", "sapi": "apache2", "modules": ["gd"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.enable_modules", "version": "8.4", "sapi": "cli", "modules": ["xdebug"]}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.extension_enable", "version": "8.4", "extension": "evil"}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.extension_install", "version": "8.5", "extension": "opcache"}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.extension_enable", "version": "8.4", "extension": "gd", "sapi": "cli"}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.extension_install", "version": "8.4", "extension": "gd", "package": "php8.4-xdebug"}))
 
     def test_client_translates_to_semantic_rpc_without_argv(self):
         from nativedev.system import privileged_operation_for_command
@@ -258,7 +266,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {
-            "protocol": 6,
+            "protocol": 8,
             "action": "php.install_packages",
             "packages": ["php8.4-cli", "php8.4-gd", "php8.4-opcache"],
         }
@@ -274,6 +282,26 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertEqual(kwargs["env"]["UCF_FORCE_CONFFMISS"], "1")
         self.assertNotIn("UCF_FORCE_CONFFNEW", kwargs["env"])
 
+    def test_curated_extension_install_restores_ucf_and_enables_both_sapis(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import execute_operation
+        from nativedev.system import CommandResult
+
+        request = {"protocol": 8, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
+        with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
+             patch("nativedev.privileged_helper.subprocess.run") as run, \
+             patch("nativedev.privileged_helper._run_extension_module_pair") as modules:
+            run.return_value.returncode = 0
+            run.return_value.stdout = "installed"
+            run.return_value.stderr = ""
+            modules.return_value = __import__("subprocess").CompletedProcess(["modules"], 0, "enabled", "")
+            result = execute_operation(request, uid=1000, timeout=1200)
+
+        args, kwargs = run.call_args
+        self.assertEqual(args[0], ["/usr/bin/apt-get", "install", "--reinstall", "-y", "php8.4-redis"])
+        self.assertEqual(kwargs["env"]["UCF_FORCE_CONFFMISS"], "1")
+        modules.assert_called_once_with("8.4", ("redis",), True, 1200)
+        self.assertEqual(result.returncode, 0)
 
 
 
@@ -385,8 +413,8 @@ class ServiceCleanupTests(unittest.TestCase):
 
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
             for package in ("postgresql-17", "postgresql-client-17", "mariadb-server-core", "mariadb-client-core"):
-                self.assertTrue(validate_operation({"protocol": 6, "action": "apt.remove", "packages": [package]})[0])
-                self.assertFalse(validate_operation({"protocol": 6, "action": "apt.install", "packages": [package]})[0])
+                self.assertTrue(validate_operation({"protocol": 8, "action": "apt.remove", "packages": [package]})[0])
+                self.assertFalse(validate_operation({"protocol": 8, "action": "apt.install", "packages": [package]})[0])
 
 
 class ControllerTests(unittest.TestCase):
@@ -859,6 +887,181 @@ class MissingExecutableRegressionTests(unittest.TestCase):
         manager = PhpManager(Runner(), None, None, distro)
         manager.sury_configured = lambda: False
         self.assertEqual(manager.available_versions(), [])
+
+
+class PhpExtensionManagerTests(unittest.TestCase):
+    def _manager(self, root, *, installed=None, apt_simulation="", manual="", runtime_modules="", common_files=""):
+        from nativedev.managers.php_extensions import PhpExtensionManager
+        from nativedev.system import CommandResult
+
+        installed = set(installed or {"php8.4-cli", "php8.4-fpm"})
+
+        class Php:
+            def installed_versions(self): return ["8.4"]
+            def fpm_config_ready(self, version): return True
+
+        class Runner:
+            def __init__(self): self.operations = []; self.commands = []
+            def run(self, argv, **kwargs):
+                self.commands.append(list(argv))
+                if argv[:3] == ["apt-get", "-s", "remove"]:
+                    return CommandResult(list(argv), 0, apt_simulation, "")
+                if argv[:2] == ["apt-mark", "showmanual"]:
+                    return CommandResult(list(argv), 0, manual, "")
+                if len(argv) >= 3 and str(argv[0]).endswith("php8.4") and argv[1:] == ["-n", "-m"]:
+                    return CommandResult(list(argv), 0, runtime_modules, "")
+                if argv[:3] == ["dpkg-query", "-L", "php8.4-common"]:
+                    return CommandResult(list(argv), 0, common_files, "")
+                return CommandResult(list(argv), 0, "", "")
+            def privileged_operation(self, action, **fields):
+                self.operations.append((action, fields))
+                return CommandResult([f"nativedev:{action}"], 0, "", "")
+
+        class Apt:
+            def __init__(self): self.installed = installed; self.installs = []; self.removes = []
+            def is_installed(self, package): return package in self.installed
+            def candidate(self, package): return "1"
+            def install_php(self, packages):
+                self.installs.append(list(packages))
+                self.installed.update(packages)
+            def remove(self, packages):
+                self.removes.append(list(packages))
+                self.installed.difference_update(packages)
+
+        class Systemd:
+            def __init__(self): self.reloads = []; self.restarts = []
+            def is_active(self, service): return False
+            def reload(self, service): self.reloads.append(service)
+            def restart(self, service): self.restarts.append(service)
+
+        runner, apt, systemd = Runner(), Apt(), Systemd()
+        return PhpExtensionManager(runner, apt, systemd, Php(), config_root=Path(root)), runner, apt, systemd
+
+    def test_mysql_package_maps_to_all_mysql_modules(self):
+        from nativedev.managers.php_extensions import EXTENSIONS_BY_KEY
+        spec = EXTENSIONS_BY_KEY["mysql"]
+        self.assertEqual(spec.package_suffix, "mysql")
+        self.assertEqual(spec.modules, ("mysqlnd", "mysqli", "pdo_mysql"))
+
+    def test_root_helper_curated_catalog_matches_application_catalog(self):
+        from nativedev.managers.php_extensions import EXTENSIONS_BY_KEY
+        from nativedev.privileged_helper import PHP_EXTENSION_CATALOG
+        self.assertEqual(set(EXTENSIONS_BY_KEY), set(PHP_EXTENSION_CATALOG))
+        for key, spec in EXTENSIONS_BY_KEY.items():
+            suffix, modules, built_in_from = PHP_EXTENSION_CATALOG[key]
+            self.assertEqual(suffix, spec.package_suffix)
+            self.assertEqual(modules, spec.modules)
+            self.assertEqual(built_in_from, spec.built_in_from)
+
+    def test_enabled_state_requires_cli_and_fpm_together(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manager, _runner, apt, _systemd = self._manager(root, installed={"php8.4-cli", "php8.4-fpm", "php8.4-mysql"})
+            for sapi in ("cli", "fpm"):
+                conf = root / "8.4" / sapi / "conf.d"
+                mods = root / "8.4" / "mods-available"
+                conf.mkdir(parents=True, exist_ok=True)
+                mods.mkdir(parents=True, exist_ok=True)
+                for module in ("mysqlnd", "mysqli", "pdo_mysql"):
+                    source = mods / f"{module}.ini"
+                    source.write_text(f"extension={module}.so\n")
+                    target = conf / f"20-{module}.ini"
+                    if not target.exists():
+                        target.symlink_to(source)
+            self.assertTrue(manager.extension_enabled("8.4", "mysql"))
+            (root / "8.4" / "fpm" / "conf.d" / "20-pdo_mysql.ini").unlink()
+            self.assertFalse(manager.extension_enabled("8.4", "mysql"))
+
+    def test_install_and_disable_apply_to_cli_and_fpm_as_one_semantic_action(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager, runner, apt, _systemd = self._manager(td)
+            manager.install("8.4", "gd")
+            install = next((action, fields) for action, fields in runner.operations if action == "php.extension_install")
+            self.assertEqual(install[1]["version"], "8.4")
+            self.assertEqual(install[1]["extension"], "gd")
+            self.assertNotIn("sapi", install[1])
+            # The real root helper installs the package; reflect that state in the
+            # test double before exercising the next UI action.
+            apt.installed.add("php8.4-gd")
+            runner.operations.clear()
+            manager.disable("8.4", "gd")
+            self.assertEqual(runner.operations[0][0], "php.extension_disable")
+            self.assertEqual(runner.operations[0][1]["extension"], "gd")
+            self.assertNotIn("sapi", runner.operations[0][1])
+
+    def test_opcache_is_built_in_from_php_85(self):
+        from nativedev.managers.php_extensions import PhpExtensionManager
+        self.assertFalse(PhpExtensionManager._version_key("8.4") >= (8, 5))
+        with tempfile.TemporaryDirectory() as td:
+            manager, _runner, _apt, _systemd = self._manager(td)
+            self.assertFalse(manager.is_built_in("8.4", "opcache"))
+            self.assertTrue(manager.is_built_in("8.5", "opcache"))
+
+    def test_runtime_inventory_shows_compiled_and_php_common_modules_without_package_actions(self):
+        runtime = "[PHP Modules]\nCore\ndate\njson\nopenssl\nPDO\n[Zend Modules]\n"
+        common = "/etc/php/8.4/mods-available/ctype.ini\n/etc/php/8.4/mods-available/fileinfo.ini\n"
+        with tempfile.TemporaryDirectory() as td:
+            manager, _runner, _apt, _systemd = self._manager(
+                td,
+                installed={"php8.4-cli", "php8.4-fpm", "php8.4-common"},
+                runtime_modules=runtime,
+                common_files=common,
+            )
+            from unittest.mock import patch
+            with patch("nativedev.managers.php_extensions.Path.is_file", return_value=True):
+                modules = manager.runtime_modules("8.4")
+            self.assertIn("json", modules)
+            self.assertIn("openssl", modules)
+            self.assertIn("PDO", modules)
+            self.assertIn("ctype", modules)
+            self.assertIn("fileinfo", modules)
+            self.assertNotIn("Core", modules)
+
+    def test_optional_catalog_includes_common_debian_sury_suggestions(self):
+        from nativedev.managers.php_extensions import EXTENSIONS_BY_KEY
+        for key in ("apcu", "bz2", "odbc", "snmp", "tidy", "mongodb", "ssh2", "yaml", "pcov"):
+            self.assertIn(key, EXTENSIONS_BY_KEY)
+
+    def test_uninstall_preflight_ignores_matching_generic_meta_but_blocks_unrelated_manual_package(self):
+        simulation = "Remv php8.4-gd [8.4]\nRemv php-gd [2:8.4]\nRemv composer-plugin [1]\n"
+        manual = "php8.4-gd\nphp-gd\ncomposer-plugin\n"
+        with tempfile.TemporaryDirectory() as td:
+            manager, _runner, _apt, _systemd = self._manager(
+                td,
+                installed={"php8.4-cli", "php8.4-fpm", "php8.4-gd"},
+                apt_simulation=simulation,
+                manual=manual,
+            )
+            self.assertEqual(manager.removal_impact("8.4", "gd"), ["composer-plugin"])
+
+    def test_gui_places_php_extensions_immediately_after_php(self):
+        gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
+        pages = gui[gui.index("PAGES = ("):gui.index("def __init__", gui.index("PAGES = ("))]
+        self.assertLess(pages.index('("php", "PHP", PhpPage)'), pages.index('("extensions", "PHP Extensions", PhpExtensionsPage)'))
+        self.assertLess(pages.index('("extensions", "PHP Extensions", PhpExtensionsPage)'), pages.index('("node", "Node.js", NodePage)'))
+        extension_page = gui[gui.index("class PhpExtensionsPage"):gui.index("class NodePage")]
+        self.assertIn("CLI and FPM are always changed together", extension_page)
+        self.assertIn("Runtime / Core", extension_page)
+        self.assertIn("Default PHP", extension_page)
+        self.assertIn("state.package", extension_page)
+        self.assertNotIn('copy.append(label(spec.title, "row-title"))', extension_page)
+        # Explicit Refresh follows a newly changed system default, while dropdown
+        # changes and extension mutations keep the user's selected PHP version.
+        self.assertIn("self._refresh(prefer_default=True)", extension_page)
+        self.assertIn("def refresh_selected(self):", extension_page)
+        self.assertIn("self._refresh(prefer_default=False)", extension_page)
+        self.assertIn("if prefer_default and cli in versions:", extension_page)
+        # Package name and actions stay together on the left; a flexible spacer
+        # pushes the compact status pill to the far right of each extension row.
+        package_rows = extension_page[extension_page.index("row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)"):]
+        self.assertLess(package_rows.index("row.append(name)"), package_rows.index("row.append(actions)"))
+        self.assertLess(package_rows.index("row.append(actions)"), package_rows.index("spacer.set_hexpand(True)"))
+        self.assertLess(package_rows.index("spacer.set_hexpand(True)"), package_rows.index("row.append(status)"))
+        style = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "style.css").read_text()
+        self.assertIn(".extension-status", style)
+        self.assertIn("padding: 1px 6px", style)
+        self.assertIn("button {\n  min-height: 15px;", style)
+
 
 if __name__ == "__main__":
     unittest.main()

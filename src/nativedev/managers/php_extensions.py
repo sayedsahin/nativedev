@@ -41,6 +41,7 @@ EXTENSIONS: tuple[PhpExtensionSpec, ...] = (
     PhpExtensionSpec("gd", "GD", "Common", "gd", ("gd",)),
     PhpExtensionSpec("intl", "Intl", "Common", "intl", ("intl",)),
     PhpExtensionSpec("mbstring", "Mbstring", "Common", "mbstring", ("mbstring",)),
+    PhpExtensionSpec("readline", "Readline", "Common", "readline", ("readline",)),
     PhpExtensionSpec("xml", "XML", "Common", "xml", ("dom", "simplexml", "xml", "xmlreader", "xmlwriter", "xsl")),
     PhpExtensionSpec("zip", "ZIP", "Common", "zip", ("zip",)),
     PhpExtensionSpec(
@@ -52,10 +53,18 @@ EXTENSIONS: tuple[PhpExtensionSpec, ...] = (
         "PHP 8.5+ provides OPcache as part of the runtime rather than a separate package.",
         built_in_from=(8, 5),
     ),
-    PhpExtensionSpec("soap", "SOAP", "Optional", "soap", ("soap",)),
-    PhpExtensionSpec("ldap", "LDAP", "Optional", "ldap", ("ldap",)),
-    PhpExtensionSpec("imap", "IMAP", "Optional", "imap", ("imap",)),
+    PhpExtensionSpec("apcu", "APCu", "Optional", "apcu", ("apcu",)),
+    PhpExtensionSpec("bz2", "BZip2", "Optional", "bz2", ("bz2",)),
+    PhpExtensionSpec("dba", "DBA", "Optional", "dba", ("dba",)),
+    PhpExtensionSpec("enchant", "Enchant", "Optional", "enchant", ("enchant",)),
     PhpExtensionSpec("gmp", "GMP", "Optional", "gmp", ("gmp",)),
+    PhpExtensionSpec("imap", "IMAP", "Optional", "imap", ("imap",)),
+    PhpExtensionSpec("ldap", "LDAP", "Optional", "ldap", ("ldap",)),
+    PhpExtensionSpec("odbc", "ODBC", "Optional", "odbc", ("odbc", "pdo_odbc")),
+    PhpExtensionSpec("pspell", "Pspell", "Optional", "pspell", ("pspell",)),
+    PhpExtensionSpec("snmp", "SNMP", "Optional", "snmp", ("snmp",)),
+    PhpExtensionSpec("soap", "SOAP", "Optional", "soap", ("soap",)),
+    PhpExtensionSpec("tidy", "Tidy", "Optional", "tidy", ("tidy",)),
     PhpExtensionSpec(
         "redis",
         "Redis PHP extension",
@@ -73,6 +82,14 @@ EXTENSIONS: tuple[PhpExtensionSpec, ...] = (
         "Separate from the Memcached system service.",
     ),
     PhpExtensionSpec("imagick", "Imagick", "Integrations", "imagick", ("imagick",)),
+    PhpExtensionSpec("amqp", "AMQP", "Integrations", "amqp", ("amqp",)),
+    PhpExtensionSpec("igbinary", "Igbinary", "Integrations", "igbinary", ("igbinary",)),
+    PhpExtensionSpec("mongodb", "MongoDB", "Integrations", "mongodb", ("mongodb",)),
+    PhpExtensionSpec("msgpack", "MessagePack", "Integrations", "msgpack", ("msgpack",)),
+    PhpExtensionSpec("smbclient", "SMB Client", "Integrations", "smbclient", ("smbclient",)),
+    PhpExtensionSpec("ssh2", "SSH2", "Integrations", "ssh2", ("ssh2",)),
+    PhpExtensionSpec("yaml", "YAML", "Integrations", "yaml", ("yaml",)),
+    PhpExtensionSpec("pcov", "PCOV", "Debugging", "pcov", ("pcov",)),
     PhpExtensionSpec("xdebug", "Xdebug", "Debugging", "xdebug", ("xdebug",)),
 )
 
@@ -151,6 +168,69 @@ class PhpExtensionManager:
             self._module_link_exists(version, sapi, module)
             for sapi in SAPIS
             for module in item.modules
+        )
+
+    def runtime_modules(self, version: str) -> list[str]:
+        """Return PHP runtime/common modules that are not separate extension packages.
+
+        NativeDev presents these as read-only ``Built-in`` inventory. The list is
+        derived from the selected version instead of a hard-coded PHP-version
+        matrix: compiled modules come from ``phpX.Y -n -m`` and modules shipped by
+        ``phpX.Y-common`` come from that package's mods-available files.
+        """
+
+        if version not in self.php.installed_versions():
+            return []
+
+        display_by_key: dict[str, str] = {}
+
+        binary = Path(f"/usr/bin/php{version}")
+        if binary.is_file():
+            result = self.runner.run([str(binary), "-n", "-m"], timeout=20)
+            if result.ok:
+                in_php_modules = False
+                for raw in result.stdout.splitlines():
+                    value = raw.strip()
+                    if value == "[PHP Modules]":
+                        in_php_modules = True
+                        continue
+                    if value == "[Zend Modules]":
+                        break
+                    if not in_php_modules or not value or value == "Core":
+                        continue
+                    display_by_key.setdefault(value.casefold(), value)
+
+        common_package = f"php{version}-common"
+        if self.apt.is_installed(common_package):
+            result = self.runner.run(["dpkg-query", "-L", common_package], timeout=30)
+            if result.ok:
+                prefix = f"/etc/php/{version}/mods-available/"
+                for raw in result.stdout.splitlines():
+                    path = raw.strip()
+                    if not path.startswith(prefix) or not path.endswith(".ini"):
+                        continue
+                    module = Path(path).stem
+                    if module:
+                        display_by_key.setdefault(module.casefold(), module)
+
+        # Catalog entries that become part of the runtime in newer PHP versions
+        # (currently OPcache from PHP 8.5) belong in the same read-only inventory.
+        for spec in EXTENSIONS:
+            if self.is_built_in(version, spec):
+                for module in spec.modules:
+                    display_by_key.setdefault(module.casefold(), module)
+
+        # Package-managed modules have their own rows and must not be duplicated
+        # in the runtime/core inventory.
+        managed_modules = {
+            module.casefold()
+            for spec in EXTENSIONS
+            if not self.is_built_in(version, spec)
+            for module in spec.modules
+        }
+        return sorted(
+            (name for key, name in display_by_key.items() if key not in managed_modules),
+            key=str.casefold,
         )
 
     def states(self, version: str) -> list[PhpExtensionState]:

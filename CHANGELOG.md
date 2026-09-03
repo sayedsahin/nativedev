@@ -2,9 +2,19 @@
 
 ## 0.1.9 - 2026-09-03
 
+- Fixed PHP Extensions refresh after changing the global default PHP: an explicit page Refresh now reselects the current `/usr/bin/php` default, while dropdown changes and extension actions preserve the version being edited.
+- Reworked extension rows so the versioned package name and action buttons stay together on the left, with the compact state pill aligned at the far right. Preserved the app-wide compact `button { min-height: 15px; }` sizing.
+- PHP Extensions now shows the selected runtime's non-package core/common modules (for example JSON, OpenSSL and PDO) as read-only **Built-in** rows with no action buttons. Runtime inventory is detected from `phpX.Y -n -m` plus `phpX.Y-common`, not hard-coded per PHP release.
+- Simplified extension rows to the real versioned package name plus compact status/actions on one line; the default PHP version is preselected/marked and extension status pills use reduced padding.
+- Expanded the curated optional catalog with Readline, APCu, BZip2, DBA, Enchant, ODBC, Pspell, SNMP, Tidy, AMQP, MongoDB, SSH2, SMB Client, YAML, Igbinary, MessagePack and PCOV where repository candidates exist.
+- Privileged RPC advanced to protocol 8 so the root helper and application share the expanded extension allowlist.
+- Added a dedicated **PHP Extensions** page with per-version package management. Curated database/common/optional/integration/debugging extensions can be installed, uninstalled, enabled or disabled without changing other PHP versions.
+- PHP extension actions treat CLI and FPM as one state: Install enables both, Enable/Disable changes both transactionally, and Uninstall removes the selected version-specific package after an APT manual-dependency safety preflight. FPM configuration is validated and a running FPM service is reloaded (restart fallback) after module changes.
+- Added optional SOAP, LDAP, IMAP, GMP, Redis, Memcached, Imagick and Xdebug management alongside the existing framework baseline. Redis/Memcached PHP extensions are labelled separately from their system services. PHP 8.5+ OPcache is shown as runtime-built-in rather than a removable package.
+- Privileged RPC introduced curated `php.extension_*` operations in protocol 7. Extension IDs, package mapping and CLI+FPM module changes are validated again by the root helper; refresh remains read-only and never re-enables extensions the user disabled.
 - Fixed native service uninstall cleanup: PostgreSQL now removes installed versioned server/client runtimes (for example `postgresql-17` and `postgresql-client-17`) even when the meta-packages were already removed; MariaDB removes its server/client core runtimes; both continue to use APT remove rather than purge so database data/configuration are preserved.
 - Merged Redis Server and `redis-cli` into one Redis component. Install/remove now manages `redis-server` and `redis-tools` together.
-- Privileged RPC advanced to protocol 6 so the helper can narrowly authorize versioned PostgreSQL and MariaDB core packages for removal only.
+- Protocol 6 added narrow removal-only authorization for versioned PostgreSQL and MariaDB core runtime packages.
 - Replaced per-project Nginx server generation with a persistent wildcard router. After one-time setup, new lowercase directories under the park become `name.test` immediately, `public/` is detected at request time, and only per-project PHP pins require Nginx reconciliation. The park receives an inheritable read/traverse ACL so this works even while NativeDev is closed.
 - Added native Debian PHP/Node provider discovery. Existing distro PHP can be configured for NativeDev `*.test` through the per-user FPM pool, and existing Debian Node remains untouched until the user explicitly chooses multi-version management.
 - Added one-way provider migrations: **Debian PHP → Sury Multi-PHP** and **Debian Node → NVM Multi-Node**. Sury/NVM mode no longer exposes a switch back to Debian or a second Debian runtime choice. Leftover old-provider state is presented only as an incomplete migration to normalize.
@@ -14,8 +24,8 @@
 - Fixed installed-but-disabled/missing PHP modules after reinstall. The explicit PHP Install flow restores missing UCF-managed `mods-available/*.ini` definitions with `UCF_FORCE_CONFFMISS=1`, then enables the baseline for both CLI and FPM. User module choices made later are not changed by normal refresh/service operations.
 - PHP uninstall now discovers and removes every installed package scoped to that PHP version, including extensions installed after the original NativeDev install.
 - PHP and Node version lists now render installed versions before available versions. PHP FPM Disable now means **Disable & Stop**, while CLI PHP remains independent.
-- Privileged RPC is now protocol 6. Protocol 5 introduced restricted PHP package/module operations and Debian Node migration; protocol 6 narrowly adds removal-only authorization for concrete PostgreSQL and MariaDB runtime packages. Client/helper mismatches fail closed.
-- Expanded regression coverage to 52 tests, including one-way provider semantics, migration safeguards, wildcard routing, service-runtime cleanup, installed-first ordering, UCF module restoration, PHP extension activation, and privileged protocol operations.
+- Privileged RPC is now protocol 8. Protocol 5 introduced restricted PHP package/module operations and Debian Node migration; protocol 6 added removal-only PostgreSQL/MariaDB runtime cleanup; protocol 7 added curated PHP-extension operations; protocol 8 expands the root-side extension allowlist and keeps client/helper catalogs synchronized. Client/helper mismatches fail closed.
+- Expanded regression coverage to 62 tests, including one-way provider semantics, migration safeguards, wildcard routing, service-runtime cleanup, installed-first ordering, UCF module restoration, per-version PHP extension management, catalog/helper consistency, and privileged protocol operations.
 
 ## 0.1.8 - 2026-09-02
 

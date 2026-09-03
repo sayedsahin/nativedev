@@ -83,3 +83,8 @@ entry {
 button {
   min-height: 15px;
 }
+
+.extension-status {
+  padding: 1px 6px;
+  font-size: 11px;
+}

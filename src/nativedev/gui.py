@@ -869,40 +869,6 @@ class PhpIniPage(Page):
             self._replace(self.settings_card, children)
             return
 
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        save = Gtk.Button(label="Save")
-        save.add_css_class("suggested-action")
-        save.connect(
-            "clicked",
-            lambda *_: self.action(
-                save,
-                lambda: self.context.php_ini.apply(version, dict(self.pending_settings)),
-                success_message=f"PHP {version} settings saved",
-                after=self.refresh_selected,
-            ),
-        )
-        actions.append(save)
-
-        reset = Gtk.Button(label="Reset")
-        reset.set_sensitive(bool(self.applied_settings or self.saved_profile))
-        if reset.get_sensitive():
-            reset.connect(
-                "clicked",
-                lambda *_: confirm(
-                    self.window,
-                    f"Reset PHP {version} NativeDev settings?",
-                    "Only NativeDev's per-version override file and CLI/FPM links will be removed. Debian/Sury php.ini files and PHP extension configuration are not changed.",
-                    lambda: self.action(
-                        reset,
-                        lambda: self.context.php_ini.reset(version),
-                        success_message=f"PHP {version} NativeDev settings reset",
-                        after=self.refresh_selected,
-                    ),
-                ),
-            )
-        actions.append(reset)
-        children.append(actions)
-
         if self.saved_profile and not self.applied_settings:
             restore_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             restore_note = label(
@@ -931,6 +897,8 @@ class PhpIniPage(Page):
             restore_box.append(restore)
             children.append(restore_box)
 
+        has_unsaved_changes = self.pending_settings != self.applied_settings
+
         if self.pending_settings:
             for directive in sorted(self.pending_settings, key=str.casefold):
                 row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -957,8 +925,47 @@ class PhpIniPage(Page):
                 remove.connect("clicked", lambda _b, key=directive: self._remove_pending(key))
                 row.append(remove)
                 children.append(row)
+
+        elif has_unsaved_changes:
+            children.append(label("All NativeDev overrides are marked for removal. Save to apply this change.", "muted"))
         else:
             children.append(label("No NativeDev overrides are active for this PHP version.", "muted"))
+
+        # Keep Save/Reset visible while there are rows *or* an unsaved removal.
+        # In particular, removing the final persisted override leaves an empty
+        # pending mapping that still needs to be saved (apply({}) performs reset).
+        if self.pending_settings or has_unsaved_changes:
+            actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            save = Gtk.Button(label="Save")
+            save.add_css_class("suggested-action")
+            save.connect(
+                "clicked",
+                lambda *_: self.action(
+                    save,
+                    lambda: self.context.php_ini.apply(version, dict(self.pending_settings)),
+                    success_message=f"PHP {version} settings saved",
+                    after=self.refresh_selected,
+                ),
+            )
+            actions.append(save)
+
+            reset = Gtk.Button(label="Reset")
+            reset.connect(
+                "clicked",
+                lambda *_: confirm(
+                    self.window,
+                    f"Reset PHP {version} NativeDev settings?",
+                    "Only NativeDev's per-version override file and CLI/FPM links will be removed. Debian/Sury php.ini files and PHP extension configuration are not changed.",
+                    lambda: self.action(
+                        reset,
+                        lambda: self.context.php_ini.reset(version),
+                        success_message=f"PHP {version} NativeDev settings reset",
+                        after=self.refresh_selected,
+                    ),
+                ),
+            )
+            actions.append(reset)
+            children.append(actions)
 
         add_heading = label("Add / update setting", "section-title")
         add_heading.set_margin_top(8)

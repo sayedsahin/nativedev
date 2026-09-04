@@ -1290,6 +1290,25 @@ class PhpIniManagerTests(unittest.TestCase):
         self.assertIn("Extension loading is managed on PHP Extensions", php_ini_page)
         self.assertIn("newline, carriage-return and NUL", php_ini_page)
 
+    def test_php_settings_save_reset_remain_visible_for_unsaved_final_removal(self):
+        gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
+        php_ini_page = gui[gui.index("class PhpIniPage"):gui.index("class NodePage")]
+        dirty = php_ini_page.index("has_unsaved_changes = self.pending_settings != self.applied_settings")
+        rows = php_ini_page.index("if self.pending_settings:", dirty)
+        final_removal = php_ini_page.index("All NativeDev overrides are marked for removal", rows)
+        actions_condition = php_ini_page.index("if self.pending_settings or has_unsaved_changes:", final_removal)
+        save = php_ini_page.index('save = Gtk.Button(label="Save")', actions_condition)
+        reset = php_ini_page.index('reset = Gtk.Button(label="Reset")', save)
+        add = php_ini_page.index('add_heading = label("Add / update setting"', reset)
+        self.assertLess(dirty, rows)
+        self.assertLess(rows, final_removal)
+        self.assertLess(final_removal, actions_condition)
+        self.assertLess(actions_condition, save)
+        self.assertLess(save, reset)
+        self.assertLess(reset, add)
+        self.assertIn("apply({}) performs reset", php_ini_page)
+        self.assertNotIn("reset.set_sensitive", php_ini_page)
+
 
 
 if __name__ == "__main__":

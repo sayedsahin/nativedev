@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pwd
 import re
 import signal
 import socket
@@ -14,7 +15,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-PROTOCOL_VERSION = 9
+PROTOCOL_VERSION = 14
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 MANAGED_FILES = {
@@ -43,6 +44,13 @@ PHP_INI_MAX_SETTINGS = 128
 PHP_INI_MAX_DIRECTIVE_LENGTH = 128
 PHP_INI_MAX_VALUE_LENGTH = 4096
 PHP_CONFIG_ROOT = Path("/etc/php")
+DATABASE_USERNAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,31}$")
+DATABASE_PASSWORD_RE = re.compile(r"^[A-Za-z0-9!@#$%^&*()_+\-=.,:?/]{1,128}$")
+MYSQL_DEV_PRIVILEGES = (
+    "SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, REFERENCES, INDEX, ALTER, "
+    "CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, "
+    "CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER"
+)
 PHP_MODULE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 POSTGRESQL_RUNTIME_PACKAGE_RE = re.compile(r"^postgresql(?:-client)?-\d+(?:\.\d+)*$")
 MARIADB_RUNTIME_PACKAGE_RE = re.compile(r"^mariadb-(?:server|client)-core(?:-\d+(?:\.\d+)*)?$")
@@ -104,6 +112,7 @@ SURY_KEYRING_URL = "https://packages.sury.org/debsuryorg-archive-keyring.deb"
 SURY_SOURCE_FILE = Path("/etc/apt/sources.list.d/nativedev-sury-php.sources")
 SURY_SUPPORTED_CODENAMES = {"bullseye", "bookworm", "trixie", "jammy", "noble", "resolute"}
 
+
 # Only packages NativeDev actually exposes as native stack components. PHP is
 # handled separately because the version/extension portion is dynamic.
 COMPONENT_PACKAGES = {
@@ -114,7 +123,6 @@ COMPONENT_PACKAGES = {
     "memcached",
     "mariadb-server",
     "mariadb-client",
-    "mysql-server",
     "postgresql",
     "postgresql-client",
     "composer",
@@ -501,12 +509,244 @@ def _string_list(value, field: str) -> list[str]:
     return value
 
 
+
+def _database_request_details(request: dict) -> tuple[str, str, str | None, str | None]:
+    """Validate fixed NativeDev database-account RPCs.
+
+    No database username, host, privilege list, SQL text or executable selector
+    is accepted from the client. The database username is derived root-side from
+    the authenticated NativeDev process UID. The target development-account
+    password remains narrowly validated because it is inserted into fixed SQL.
+
+    MariaDB/MySQL may additionally receive a one-shot ``admin_password`` only for
+    ``ensure_dev_account``. It is never interpolated into SQL or command-line
+    arguments; the helper writes it to a root-owned temporary client option file.
+    """
+    action = request.get("action")
+    status_actions = {
+        "database.mysql.account_status",
+        "database.postgresql.account_status",
+    }
+    ensure_actions = {
+        "database.mysql.ensure_dev_account",
+        "database.postgresql.ensure_dev_account",
+    }
+    if action not in status_actions | ensure_actions:
+        raise RuntimeError("Unsupported database account operation")
+
+    allowed = {"protocol", "action", "timeout"}
+    password = None
+    admin_password = None
+    if action in ensure_actions:
+        allowed.add("password")
+        password = request.get("password")
+        if not isinstance(password, str) or not DATABASE_PASSWORD_RE.fullmatch(password):
+            raise RuntimeError("Invalid NativeDev database password")
+
+    if action == "database.mysql.ensure_dev_account" and "admin_password" in request:
+        allowed.add("admin_password")
+        admin_password = request.get("admin_password")
+        if (
+            not isinstance(admin_password, str)
+            or not admin_password
+            or len(admin_password) > 512
+            or any(ch in admin_password for ch in ("\0", "\n", "\r"))
+        ):
+            raise RuntimeError("Invalid MariaDB/MySQL administrator password")
+
+    if set(request).difference(allowed):
+        raise RuntimeError("Database account operation contains unsupported fields")
+
+    family = "mysql" if ".mysql." in action else "postgresql"
+    verb = "status" if action.endswith("account_status") else "ensure"
+    return family, verb, password, admin_password
+
+
+def _database_username_for_uid(uid: int) -> str:
+    if not isinstance(uid, int) or uid <= 0:
+        raise RuntimeError("Database access requires a non-root developer user")
+    try:
+        username = pwd.getpwuid(uid).pw_name
+    except KeyError as exc:
+        raise RuntimeError(f"Could not resolve developer account for uid {uid}") from exc
+    if not DATABASE_USERNAME_RE.fullmatch(username):
+        raise RuntimeError("Developer username is not safe for NativeDev database access")
+    return username
+
+
+def _mysql_admin_argv(defaults_file: Path | None = None) -> list[str]:
+    client = None
+    for name in ("mariadb", "mysql"):
+        try:
+            client = _binary(name)
+            break
+        except RuntimeError:
+            continue
+    if not client:
+        raise RuntimeError("MariaDB/MySQL client binary was not found")
+    argv = [client]
+    if defaults_file is not None:
+        # MySQL-family clients require defaults-file selectors before ordinary
+        # options. The password therefore stays out of argv/process listings.
+        argv.append(f"--defaults-extra-file={defaults_file}")
+    argv.extend([
+        "--protocol=socket",
+        "--user=root",
+        "--batch",
+        "--skip-column-names",
+        "--silent",
+    ])
+    return argv
+
+
+def _mysql_option_value(value: str) -> str:
+    """Escape a password for a quoted MySQL/MariaDB option-file value."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\t", "\\t")
+    )
+
+
+def _run_mysql_admin(sql: str, admin_password: str | None, timeout: int, env: dict) -> subprocess.CompletedProcess:
+    if admin_password is None:
+        return subprocess.run(
+            _mysql_admin_argv(),
+            input=sql,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+        )
+
+    # The GUI-provided database-root password is one-shot only. Keep it out of
+    # command-line arguments and remove the root-owned 0600 option file promptly.
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        prefix="nativedev-mysql-admin-",
+        delete=False,
+    ) as handle:
+        defaults_file = Path(handle.name)
+        os.chmod(defaults_file, 0o600)
+        handle.write("[client]\n")
+        handle.write(f'password="{_mysql_option_value(admin_password)}"\n')
+    try:
+        return subprocess.run(
+            _mysql_admin_argv(defaults_file),
+            input=sql,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+        )
+    finally:
+        defaults_file.unlink(missing_ok=True)
+
+
+def _postgres_admin_argv() -> list[str]:
+    return [
+        _binary("runuser"),
+        "-u",
+        "postgres",
+        "--",
+        _binary("psql"),
+        "--no-psqlrc",
+        "--no-align",
+        "--tuples-only",
+        "--dbname=postgres",
+        "--set=ON_ERROR_STOP=1",
+    ]
+
+
+def _mysql_ensure_sql(username: str, password: str) -> str:
+    # Username is derived from the authenticated peer UID and validated against
+    # DATABASE_USERNAME_RE. Password validation excludes quote/backslash/control
+    # characters, so this fixed SQL cannot be extended by client input.
+    account = f"'{username}'@'localhost'"
+    return (
+        f"CREATE USER IF NOT EXISTS {account} IDENTIFIED BY '{password}';\n"
+        f"ALTER USER {account} IDENTIFIED BY '{password}';\n"
+        f"GRANT {MYSQL_DEV_PRIVILEGES} ON *.* TO {account};\n"
+        "FLUSH PRIVILEGES;\n"
+    )
+
+
+def _postgres_ensure_sql(username: str, password: str) -> str:
+    # The role name comes from the authenticated peer UID and is constrained by
+    # DATABASE_USERNAME_RE. Quote it as an identifier so valid Unix names such
+    # as ``dev-user`` remain valid PostgreSQL role names.
+    role = f'"{username}"'
+    return (
+        "DO $nativedev$\n"
+        "BEGIN\n"
+        f"  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{username}') THEN\n"
+        f"    CREATE ROLE {role} LOGIN PASSWORD '{password}';\n"
+        "  ELSE\n"
+        f"    ALTER ROLE {role} WITH LOGIN PASSWORD '{password}';\n"
+        "  END IF;\n"
+        "END\n"
+        "$nativedev$;\n"
+        f"ALTER ROLE {role} WITH LOGIN CREATEDB NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS;\n"
+    )
+
+
+def _execute_database_operation(request: dict, uid: int, timeout: int) -> subprocess.CompletedProcess:
+    family, verb, password, admin_password = _database_request_details(request)
+    username = _database_username_for_uid(uid)
+    env = dict(os.environ)
+    env["PATH"] = SAFE_PATH
+
+    if family == "mysql":
+        if verb == "status":
+            sql = (
+                "SELECT COUNT(*) FROM mysql.user "
+                f"WHERE User='{username}' AND Host='localhost';\n"
+            )
+            return _run_mysql_admin(sql, None, timeout, env)
+
+        # Default-user flow: first prove local root/no-password (including the
+        # common Debian unix_socket root setup). Only if that login itself fails
+        # do we tell the GUI to ask for the MariaDB/MySQL root password.
+        probe = _run_mysql_admin("SELECT 1;\n", admin_password, timeout, env)
+        if probe.returncode != 0:
+            if admin_password is None:
+                return subprocess.CompletedProcess(
+                    probe.args,
+                    77,
+                    probe.stdout,
+                    "NATIVEDEV_MYSQL_ROOT_PASSWORD_REQUIRED",
+                )
+            return probe
+
+        sql = _mysql_ensure_sql(username, password or "")
+        return _run_mysql_admin(sql, admin_password, timeout, env)
+
+    argv = _postgres_admin_argv()
+    if verb == "status":
+        sql = f"SELECT 1 FROM pg_roles WHERE rolname='{username}';\n"
+    else:
+        sql = _postgres_ensure_sql(username, password or "")
+    return subprocess.run(
+        argv,
+        input=sql,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        env=env,
+    )
+
 def command_for_operation(request: dict, uid: int) -> list[str]:
     """Validate one structured RPC and build the root-side argv internally."""
     if request.get("protocol") != PROTOCOL_VERSION:
         raise RuntimeError("NativeDev privileged protocol version mismatch")
 
     action = request.get("action")
+    if isinstance(action, str) and action.startswith("database."):
+        _database_request_details(request)
+        _database_username_for_uid(uid)
+        return []
+
     if action == "apt.update":
         return [_binary("apt-get"), "update"]
 
@@ -667,6 +907,10 @@ def validate_operation(request: dict, uid: int = 1000) -> tuple[bool, str]:
 
 def execute_operation(request: dict, uid: int, timeout: int) -> subprocess.CompletedProcess:
     action = request.get("action")
+
+    if isinstance(action, str) and action.startswith("database."):
+        command_for_operation(request, uid)
+        return _execute_database_operation(request, uid, timeout)
 
     if action == "php.extension_install":
         version, _extension, _package, modules = _php_extension_details(request)

@@ -20,6 +20,15 @@ class ComponentSpec:
 COMPONENTS: tuple[ComponentSpec, ...] = (
     ComponentSpec("nginx", "Nginx", ("nginx",), "nginx", "nginx"),
     ComponentSpec(
+        "mariadb",
+        "MariaDB / MySQL",
+        ("mariadb-server", "mariadb-client"),
+        "mariadb",
+        "mariadb",
+        "MySQL-compatible server; NativeDev installs MariaDB from Debian repositories.",
+    ),
+    ComponentSpec("postgresql", "PostgreSQL", ("postgresql", "postgresql-client"), "postgresql", "psql"),
+    ComponentSpec(
         "redis",
         "Redis",
         ("redis-server", "redis-tools"),
@@ -28,25 +37,15 @@ COMPONENTS: tuple[ComponentSpec, ...] = (
         "Redis Server and redis-cli are installed and removed together.",
     ),
     ComponentSpec("memcached", "Memcached", ("memcached",), "memcached", "memcached"),
-    ComponentSpec("mariadb", "MariaDB", ("mariadb-server", "mariadb-client"), "mariadb", "mariadb"),
-    ComponentSpec(
-        "mysql",
-        "MySQL",
-        ("mysql-server",),
-        "mysql",
-        "mysql",
-        "Availability depends on the configured Debian-family repositories.",
-    ),
-    ComponentSpec("postgresql", "PostgreSQL", ("postgresql", "postgresql-client"), "postgresql", "psql"),
     ComponentSpec("composer", "Composer", ("composer",), None, "composer", "CLI tool; no system service."),
     ComponentSpec("mkcert", "mkcert", ("mkcert",), None, "mkcert", "Local certificate tool; no system service."),
 )
 
 
 # Debian's PostgreSQL meta-packages and MariaDB top-level packages can be
-# removed while their actual version/core runtimes remain installed. NativeDev
-# treats those runtime packages as part of the component so Uninstall removes
-# the executable service/client too, without using apt purge or deleting data.
+# removed while their actual version/core runtimes remain installed. Include
+# those runtime packages so Uninstall removes the executable service/client,
+# but deliberately leave common/shared packages and database data alone.
 POSTGRESQL_RUNTIME_RE = re.compile(r"^postgresql(?:-client)?-\d+(?:\.\d+)*$")
 MARIADB_RUNTIME_RE = re.compile(r"^mariadb-(?:server|client)-core(?:-\d+(?:\.\d+)*)?$")
 
@@ -64,6 +63,7 @@ class ComponentState:
     uninstallable: bool
     uninstall_note: str
     binary_path: str | None
+    version: str | None
 
 
 class ServiceManager:
@@ -89,17 +89,7 @@ class ServiceManager:
         return packages
 
     def installed_component_packages(self, spec: ComponentSpec) -> list[str]:
-        """Return installed runtime packages NativeDev should remove as one component.
-
-        Most components are represented directly by ``spec.packages``. Debian's
-        PostgreSQL meta-packages are different: removing ``postgresql`` can leave
-        ``postgresql-17``/``postgresql-client-17`` installed. MariaDB can likewise
-        leave ``mariadb-*-core`` binaries behind. Include those runtime packages
-        so the corresponding server/client executable actually disappears.
-
-        Shared/common packages and database data are deliberately not swept up.
-        This is an APT *remove* operation, never purge/autoremove.
-        """
+        """Return installed packages that make a component present in the UI."""
         installed = self._installed_package_names()
         wanted = {package for package in spec.packages if package in installed}
 
@@ -135,6 +125,8 @@ class ServiceManager:
                 running = self.systemd.is_active(spec.service)
                 enabled = enabled_state in {"enabled", "enabled-runtime", "linked", "linked-runtime"}
 
+        version = self._component_version(spec, binary_path) if installed else None
+
         return ComponentState(
             spec=spec,
             installed=installed,
@@ -147,13 +139,10 @@ class ServiceManager:
             uninstallable=packages_installed,
             uninstall_note="",
             binary_path=binary_path,
+            version=version,
         )
 
     def install(self, spec: ComponentSpec) -> None:
-        if spec.key == "mysql" and self.apt.is_installed("mariadb-server"):
-            raise RuntimeError("MariaDB is installed. Remove or migrate it before installing MySQL.")
-        if spec.key == "mariadb" and self.apt.is_installed("mysql-server"):
-            raise RuntimeError("MySQL is installed. Remove or migrate it before installing MariaDB.")
         installable = [pkg for pkg in spec.packages if self.apt.candidate(pkg)]
         if not installable:
             raise RuntimeError(f"No installable APT package found for {spec.title}")
@@ -162,18 +151,34 @@ class ServiceManager:
             self.systemd.enable_now(spec.service)
 
     def uninstall(self, spec: ComponentSpec) -> None:
+        """Remove runtime packages without purge/autoremove or database-data deletion.
+
+        Database credential metadata is cleared by the controller after this
+        succeeds. Debian common/shared packages and on-disk database clusters
+        are intentionally preserved, matching NativeDev's original stable
+        uninstall behavior.
+        """
         installed = self.installed_component_packages(spec)
         if not installed:
             raise RuntimeError(f"{spec.title} is not installed through APT")
         if spec.service:
-            # Stop and disable before package removal when the unit still exists.
-            # A previously half-removed component may already have lost its unit;
-            # package cleanup should still proceed in that case.
             try:
                 self.systemd.disable_now(spec.service)
             except RuntimeError:
                 pass
         self.apt.remove(installed)
+
+    def _component_version(self, spec: ComponentSpec, binary_path: str | None) -> str | None:
+        if spec.key != "mariadb" or not binary_path:
+            return None
+        result = self.runner.run([binary_path, "--version"], timeout=15)
+        if not result.ok:
+            return None
+        match = re.search(r"\bDistrib\s+([^,\s]+)", result.output)
+        if match:
+            return match.group(1)
+        match = re.search(r"\b(\d+\.\d+(?:\.\d+)?(?:-MariaDB)?)\b", result.output)
+        return match.group(1) if match else None
 
     def start(self, spec: ComponentSpec) -> None:
         self._require_service(spec)

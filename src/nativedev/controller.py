@@ -8,6 +8,8 @@ from typing import Callable, TypeVar
 from .managers.localdev import LocalDevManager
 from .managers.php import PhpManager
 from .managers.php_ini import PhpIniManager
+from .managers.database_access import DatabaseAccessManager
+from .services import ComponentSpec, ServiceManager
 from .managers.node import NodeManager
 
 
@@ -26,11 +28,21 @@ class NativeDevController:
     non-GUI callers as well.
     """
 
-    def __init__(self, php: PhpManager, localdev: LocalDevManager, node: NodeManager | None = None, php_ini: PhpIniManager | None = None):
+    def __init__(
+        self,
+        php: PhpManager,
+        localdev: LocalDevManager,
+        node: NodeManager | None = None,
+        php_ini: PhpIniManager | None = None,
+        services: ServiceManager | None = None,
+        database_access: DatabaseAccessManager | None = None,
+    ):
         self.php = php
         self.localdev = localdev
         self.node = node
         self.php_ini = php_ini
+        self.services = services
+        self.database_access = database_access
         self._mutation_lock = threading.RLock()
 
     def run_mutation(self, fn: Callable[..., T], *args, **kwargs) -> T:
@@ -113,6 +125,55 @@ class NativeDevController:
                 raise RuntimeError(
                     f"Local Development settings could not be applied and were rolled back: {exc}"
                 ) from exc
+
+
+    def install_component(self, spec: ComponentSpec) -> None:
+        """Install a system component and provision local DB access when applicable."""
+        with self._mutation_lock:
+            if self.services is None:
+                raise RuntimeError("Service manager is not available")
+            self.services.install(spec)
+            if self.database_access is not None and self.database_access.supports(spec.key):
+                try:
+                    self.database_access.ensure_after_install(spec.key)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"{spec.title} was installed, but NativeDev local database access could not be configured: {exc}"
+                    ) from exc
+
+    def uninstall_component(self, spec: ComponentSpec) -> None:
+        """Uninstall runtime packages and forget NativeDev's saved DB credential."""
+        with self._mutation_lock:
+            if self.services is None:
+                raise RuntimeError("Service manager is not available")
+            self.services.uninstall(spec)
+            if spec.key in {"mariadb", "postgresql"} and self.database_access is not None:
+                self.database_access.forget(spec.key)
+
+    def use_existing_database_access(self, key: str, password: str):
+        with self._mutation_lock:
+            if self.database_access is None:
+                raise RuntimeError("Database access manager is not available")
+            return self.database_access.use_existing_account(key, password)
+
+    def create_database_access(self, key: str, admin_password: str | None = None):
+        with self._mutation_lock:
+            if self.database_access is None:
+                raise RuntimeError("Database access manager is not available")
+            return self.database_access.create_local_access(key, admin_password=admin_password)
+
+
+    def change_database_password(self, key: str, password: str):
+        with self._mutation_lock:
+            if self.database_access is None:
+                raise RuntimeError("Database access manager is not available")
+            return self.database_access.change_password(key, password)
+
+    def reset_database_password(self, key: str):
+        with self._mutation_lock:
+            if self.database_access is None:
+                raise RuntimeError("Database access manager is not available")
+            return self.database_access.reset_password(key)
 
     def set_default_php(self, version: str) -> None:
         with self._mutation_lock:

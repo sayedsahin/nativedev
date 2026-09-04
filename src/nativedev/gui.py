@@ -14,6 +14,7 @@ from gi.repository import Gdk, GLib, Gtk
 from . import __version__
 from .context import AppContext
 from .services import COMPONENTS, ComponentSpec
+from .managers.database_access import DatabaseAdminPasswordRequired, DatabaseAccessManager, DEFAULT_DATABASE_PASSWORD
 
 
 class Worker:
@@ -114,6 +115,176 @@ def confirm(parent: Gtk.Window, title: str, message: str, on_accept: Callable[[]
         dialog.destroy()
         if response_id == Gtk.ResponseType.OK:
             on_accept()
+
+    dialog.connect("response", response)
+    dialog.present()
+
+
+def confirm_database_uninstall(
+    parent: Gtk.Window,
+    title: str,
+    component_title: str,
+    on_accept: Callable[[], None],
+) -> None:
+    confirm(
+        parent,
+        title,
+        (
+            f"NativeDev will remove the installed {component_title} server/client runtime packages "
+            "and forget NativeDev's saved database credential. Database data, database users, "
+            "database passwords, and Debian common/shared packages are preserved."
+        ),
+        on_accept,
+    )
+
+
+def prompt_database_password(
+    parent: Gtk.Window,
+    title: str,
+    on_accept: Callable[[str], None],
+) -> None:
+    dialog = Gtk.Dialog(title=title, transient_for=parent, modal=True)
+    dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+    dialog.add_button("Change", Gtk.ResponseType.OK)
+    content = dialog.get_content_area()
+    content.set_spacing(8)
+    content.set_margin_top(12)
+    content.set_margin_bottom(12)
+    content.set_margin_start(12)
+    content.set_margin_end(12)
+
+    note = label(
+        "Use 1-128 characters: letters, numbers, or !@#$%^&*()_+-=.,:?/",
+        "muted",
+        wrap=True,
+    )
+    password_label = label("New password", "row-title")
+    password = Gtk.PasswordEntry()
+    password.set_show_peek_icon(True)
+    confirm_password_label = label("Confirm password", "row-title")
+    confirm_password = Gtk.PasswordEntry()
+    confirm_password.set_show_peek_icon(True)
+    error = label("", "error-text", wrap=True)
+    error.set_visible(False)
+    content.append(note)
+    content.append(password_label)
+    content.append(password)
+    content.append(confirm_password_label)
+    content.append(confirm_password)
+    content.append(error)
+
+    def response(_dialog, response_id):
+        if response_id != Gtk.ResponseType.OK:
+            dialog.destroy()
+            return
+        value = password.get_text()
+        if value != confirm_password.get_text():
+            error.set_text("Passwords do not match")
+            error.set_visible(True)
+            return
+        try:
+            DatabaseAccessManager.validate_password(value)
+        except Exception as exc:  # UI validation mirrors the manager/helper contract.
+            error.set_text(str(exc))
+            error.set_visible(True)
+            return
+        dialog.destroy()
+        on_accept(value)
+
+    dialog.connect("response", response)
+    dialog.present()
+
+
+def prompt_existing_database_password(
+    parent: Gtk.Window,
+    title: str,
+    username: str,
+    on_accept: Callable[[str], None],
+) -> None:
+    dialog = Gtk.Dialog(title=title, transient_for=parent, modal=True)
+    dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+    dialog.add_button("Use user", Gtk.ResponseType.OK)
+    content = dialog.get_content_area()
+    content.set_spacing(8)
+    content.set_margin_top(12)
+    content.set_margin_bottom(12)
+    content.set_margin_start(12)
+    content.set_margin_end(12)
+
+    content.append(label(
+        f'Enter the current database password for "{username}". NativeDev will verify it and save the credential without changing the account password. A wrong password changes nothing.',
+        "muted",
+        wrap=True,
+    ))
+    password_label = label("Current database password", "row-title")
+    password = Gtk.PasswordEntry()
+    password.set_show_peek_icon(True)
+    error = label("", "error-text", wrap=True)
+    error.set_visible(False)
+    content.append(password_label)
+    content.append(password)
+    content.append(error)
+
+    def response(_dialog, response_id):
+        if response_id != Gtk.ResponseType.OK:
+            dialog.destroy()
+            return
+        value = password.get_text()
+        try:
+            DatabaseAccessManager.validate_password(value)
+        except Exception as exc:
+            error.set_text(str(exc))
+            error.set_visible(True)
+            return
+        dialog.destroy()
+        on_accept(value)
+
+    dialog.connect("response", response)
+    dialog.present()
+
+
+def prompt_database_admin_password(
+    parent: Gtk.Window,
+    title: str,
+    on_accept: Callable[[str], None],
+) -> None:
+    dialog = Gtk.Dialog(title=title, transient_for=parent, modal=True)
+    dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+    dialog.add_button("Continue", Gtk.ResponseType.OK)
+    content = dialog.get_content_area()
+    content.set_spacing(8)
+    content.set_margin_top(12)
+    content.set_margin_bottom(12)
+    content.set_margin_start(12)
+    content.set_margin_end(12)
+
+    content.append(label(
+        "NativeDev could not authenticate the local MariaDB/MySQL root account without a password. "
+        "Enter the database root password for this one operation. It will not be saved.",
+        "muted",
+        wrap=True,
+    ))
+    content.append(label("MariaDB/MySQL root password", "row-title"))
+    password = Gtk.PasswordEntry()
+    password.set_show_peek_icon(True)
+    error = label("", "error-text", wrap=True)
+    error.set_visible(False)
+    content.append(password)
+    content.append(error)
+
+    def response(_dialog, response_id):
+        if response_id != Gtk.ResponseType.OK:
+            dialog.destroy()
+            return
+        value = password.get_text()
+        try:
+            DatabaseAccessManager.validate_admin_password(value)
+        except Exception as exc:
+            error.set_text(str(exc))
+            error.set_visible(True)
+            return
+        dialog.destroy()
+        on_accept(value)
 
     dialog.connect("response", response)
     dialog.present()
@@ -1352,17 +1523,29 @@ class ServicesPage(Page):
         self.list_box.append(label("Detecting installed components…", "muted"))
 
         def collect():
-            return [self.context.services.state(spec) for spec in COMPONENTS]
+            rows = []
+            for spec in COMPONENTS:
+                state = self.context.services.state(spec)
+                database = None
+                if state.installed and self.context.database_access.supports(spec.key):
+                    try:
+                        database = self.context.database_access.state(spec.key)
+                    except Exception as exc:
+                        database = exc
+                rows.append((state, database))
+            return rows
 
-        def done(states):
+        def done(rows):
             self._clear()
-            for state in states:
+            for state, database in rows:
                 spec = state.spec
                 box = card()
                 top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
                 copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
                 copy.set_hexpand(True)
                 copy.append(label(spec.title, "section-title"))
+                if spec.key == "mariadb" and state.version:
+                    copy.append(label(f"Version {state.version}", "muted"))
                 if spec.note:
                     copy.append(label(spec.note, "muted", wrap=True))
                 top.append(copy)
@@ -1386,8 +1569,8 @@ class ServicesPage(Page):
                         lambda _b, s=spec, btn=install: confirm(
                             self.window,
                             f"Install {s.title}?",
-                            "NativeDev will install the Debian-family system package(s). Services are enabled and started when applicable.",
-                            lambda: self.action(btn, lambda: self.context.services.install(s), success_message=f"{s.title} installed", after=self.refresh),
+                            "NativeDev will install the Debian-family system package(s). Database services also receive the local nativedev development account automatically. Services are enabled and started when applicable.",
+                            lambda: self.action(btn, lambda: self.context.controller.install_component(s), success_message=f"{s.title} installed", after=self.refresh),
                         ),
                     )
                     actions.append(install)
@@ -1418,24 +1601,262 @@ class ServicesPage(Page):
                     uninstall.set_sensitive(state.uninstallable)
                     uninstall.add_css_class("destructive-action")
                     if state.uninstallable:
-                        uninstall.connect(
-                            "clicked",
-                            lambda _b, s=spec, btn=uninstall: confirm(
-                                self.window,
-                                f"Uninstall {s.title}?",
-                                "NativeDev removes this component's server/client runtime packages. Configuration and database data are not purged.",
-                                lambda: self.action(btn, lambda: self.context.services.uninstall(s), success_message=f"{s.title} uninstalled", after=self.refresh),
-                            ),
-                        )
+                        if spec.key in {"mariadb", "postgresql"}:
+                            uninstall.connect(
+                                "clicked",
+                                lambda _b, s=spec, btn=uninstall: confirm_database_uninstall(
+                                    self.window,
+                                    f"Uninstall {s.title}?",
+                                    s.title,
+                                    lambda: self.action(
+                                        btn,
+                                        lambda: self.context.controller.uninstall_component(s),
+                                        success_message=f"{s.title} uninstalled",
+                                        after=self.refresh,
+                                    ),
+                                ),
+                            )
+                        else:
+                            uninstall.connect(
+                                "clicked",
+                                lambda _b, s=spec, btn=uninstall: confirm(
+                                    self.window,
+                                    f"Uninstall {s.title}?",
+                                    "NativeDev removes this component's installed runtime package(s).",
+                                    lambda: self.action(
+                                        btn,
+                                        lambda: self.context.controller.uninstall_component(s),
+                                        success_message=f"{s.title} uninstalled",
+                                        after=self.refresh,
+                                    ),
+                                ),
+                            )
                     actions.append(uninstall)
                     if state.uninstall_note:
                         box.append(label(state.uninstall_note, "muted", wrap=True))
                 if actions.get_first_child():
                     box.append(actions)
+
+                if state.installed and self.context.database_access.supports(spec.key):
+                    self._append_database_access(box, spec, database)
                 self.list_box.append(box)
             return False
 
         self.worker.submit(collect, done, lambda exc: self.window.set_activity(False, str(exc), error=True))
+
+    def _use_default_database_user(self, button: Gtk.Button, spec: ComponentSpec, username: str) -> None:
+        if spec.key in {"mariadb", "mysql"}:
+            message = (
+                f'NativeDev will first try the local MariaDB/MySQL root account without a password. '
+                f'If that login is unavailable, NativeDev will ask for the MariaDB/MySQL root password. '
+                f'It will then create or reset the database user "{username}" to password "nativedev" '
+                'and reconcile its development privileges. The root password is never saved.'
+            )
+        else:
+            message = (
+                f'NativeDev will create or reset the current database user "{username}" to password '
+                '"nativedev" and reconcile its non-superuser development privileges.'
+            )
+        confirm(
+            self.window,
+            f"Use NativeDev default {spec.title} user?",
+            message,
+            lambda: self._attempt_default_database_user(button, spec),
+        )
+
+    def _attempt_default_database_user(
+        self,
+        button: Gtk.Button,
+        spec: ComponentSpec,
+        admin_password: str | None = None,
+    ) -> None:
+        self.busy(button, True)
+        self.window.set_activity(True, "Working…")
+
+        def success(_value=None):
+            self.busy(button, False)
+            self.window.set_activity(False, f"{spec.title} now uses the NativeDev default database password")
+            self.refresh()
+            return False
+
+        def error(exc):
+            self.busy(button, False)
+            if isinstance(exc, DatabaseAdminPasswordRequired) and spec.key in {"mariadb", "mysql"}:
+                self.window.set_activity(False, "MariaDB/MySQL root password required")
+                prompt_database_admin_password(
+                    self.window,
+                    f"Authenticate {spec.title} root",
+                    lambda value: self._attempt_default_database_user(button, spec, value),
+                )
+                return False
+            self.window.set_activity(False, str(exc), error=True)
+            return False
+
+        self.worker.submit_mutation(
+            lambda: self.context.controller.run_mutation(
+                lambda: self.context.controller.create_database_access(
+                    spec.key,
+                    admin_password=admin_password,
+                )
+            ),
+            success,
+            error,
+        )
+
+    def _append_database_access(self, box: Gtk.Box, spec: ComponentSpec, database) -> None:
+        section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+        section.set_margin_top(4)
+        section.append(label("Local database access", "row-title"))
+
+        if isinstance(database, Exception):
+            section.append(label(str(database), "error-text", wrap=True))
+            box.append(section)
+            return
+
+        if database.managed:
+            grid = Gtk.Grid(column_spacing=10, row_spacing=5)
+            grid.attach(label("Server", "muted"), 0, 0, 1, 1)
+            grid.attach(label(f"{database.host}:{database.port}"), 1, 0, 1, 1)
+            row_index = 1
+            if database.database:
+                grid.attach(label("Database", "muted"), 0, row_index, 1, 1)
+                grid.attach(label(database.database), 1, row_index, 1, 1)
+                row_index += 1
+            grid.attach(label("Username", "muted"), 0, row_index, 1, 1)
+            grid.attach(label(database.username), 1, row_index, 1, 1)
+
+            username_copy = Gtk.Button(label="Copy")
+            username_copy.connect("clicked", lambda *_: self._copy(database.username, "Database username copied"))
+            grid.attach(username_copy, 2, row_index, 1, 1)
+
+            row_index += 1
+            grid.attach(label("Password", "muted"), 0, row_index, 1, 1)
+            password_label = label("•" * max(8, min(len(database.password), 20)))
+            password_label.set_hexpand(True)
+            grid.attach(password_label, 1, row_index, 1, 1)
+            reveal = Gtk.Button(label="Reveal")
+            revealed = {"value": False}
+
+            def toggle_password(*_):
+                revealed["value"] = not revealed["value"]
+                password_label.set_text(database.password if revealed["value"] else "•" * max(8, min(len(database.password), 20)))
+                reveal.set_label("Hide" if revealed["value"] else "Reveal")
+
+            reveal.connect("clicked", toggle_password)
+            grid.attach(reveal, 2, row_index, 1, 1)
+            password_copy = Gtk.Button(label="Copy")
+            password_copy.connect("clicked", lambda *_: self._copy(database.password, "Database password copied"))
+            grid.attach(password_copy, 3, row_index, 1, 1)
+            section.append(grid)
+
+            account_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            change = Gtk.Button(label="Change password")
+            change.connect(
+                "clicked",
+                lambda *_: prompt_database_password(
+                    self.window,
+                    f"Change {spec.title} database password",
+                    lambda value: self.action(
+                        change,
+                        lambda: self.context.controller.change_database_password(spec.key, value),
+                        success_message=f"{spec.title} database password changed",
+                        after=self.refresh,
+                    ),
+                ),
+            )
+            account_actions.append(change)
+
+            reset = Gtk.Button(label="Reset to default")
+            reset.set_sensitive(database.password != DEFAULT_DATABASE_PASSWORD)
+            reset.connect(
+                "clicked",
+                lambda *_: confirm(
+                    self.window,
+                    f"Reset {spec.title} database password?",
+                    'The NativeDev local account password will be changed back to "nativedev". Applications using the current password will need updating.',
+                    lambda: self.action(
+                        reset,
+                        lambda: self.context.controller.reset_database_password(spec.key),
+                        success_message=f"{spec.title} password reset to default",
+                        after=self.refresh,
+                    ),
+                ),
+            )
+            account_actions.append(reset)
+            section.append(account_actions)
+
+        elif database.conflict:
+            section.append(label(
+                f'An existing local database account for "{database.username}" was detected. NativeDev did not change its password or privileges.',
+                "muted",
+                wrap=True,
+            ))
+            account_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            use_existing = Gtk.Button(label="Use existing user")
+            use_existing.add_css_class("suggested-action")
+            use_existing.connect(
+                "clicked",
+                lambda *_: prompt_existing_database_password(
+                    self.window,
+                    f"Use existing {spec.title} user",
+                    database.username,
+                    lambda value: self.action(
+                        use_existing,
+                        lambda: self.context.controller.use_existing_database_access(spec.key, value),
+                        success_message=f"{spec.title} existing database user connected",
+                        after=self.refresh,
+                    ),
+                ),
+            )
+            account_actions.append(use_existing)
+            use_default = Gtk.Button(label="Use NativeDev default user")
+            use_default.connect(
+                "clicked",
+                lambda *_: self._use_default_database_user(use_default, spec, database.username),
+            )
+            account_actions.append(use_default)
+            section.append(account_actions)
+        else:
+            section.append(label(
+                f'No NativeDev credential is saved for the current database user "{database.username}". Use the existing-user flow when you know its current password, or use the NativeDev default-user flow to create/reset it to password "nativedev".',
+                "muted",
+                wrap=True,
+            ))
+            account_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            use_existing = Gtk.Button(label="Use existing user")
+            use_existing.add_css_class("suggested-action")
+            use_existing.connect(
+                "clicked",
+                lambda *_: prompt_existing_database_password(
+                    self.window,
+                    f"Use existing {spec.title} user",
+                    database.username,
+                    lambda value: self.action(
+                        use_existing,
+                        lambda: self.context.controller.use_existing_database_access(spec.key, value),
+                        success_message=f"{spec.title} existing database user connected",
+                        after=self.refresh,
+                    ),
+                ),
+            )
+            account_actions.append(use_existing)
+            provision = Gtk.Button(label="Use NativeDev default user")
+            provision.connect(
+                "clicked",
+                lambda *_: self._use_default_database_user(provision, spec, database.username),
+            )
+            account_actions.append(provision)
+            section.append(account_actions)
+
+        box.append(section)
+
+    def _copy(self, value: str, message: str) -> None:
+        display = Gdk.Display.get_default()
+        if not display:
+            self.window.set_activity(False, "Clipboard is not available", error=True)
+            return
+        display.get_clipboard().set(value)
+        self.window.set_activity(False, message)
 
     def _clear(self):
         while child := self.list_box.get_first_child():
@@ -1717,7 +2138,8 @@ class LocalDevPage(Page):
         self.settings_card.append(grid)
         self.settings_card.append(
             label(
-                "Projects use the system Default PHP-FPM automatically. Override PHP per site from Projects.",
+                "Projects use the system Default PHP-FPM automatically. Override PHP per site from Projects. "
+                "Changing the park directory or local TLD automatically reconciles existing NativeDev DNS/Nginx routing.",
                 "muted",
                 wrap=True,
             )
@@ -1732,15 +2154,10 @@ class LocalDevPage(Page):
                 return
             park_value = str(Path(park.get_text()).expanduser())
 
-            def apply_settings():
-                self.context.config.park_dir = park_value
-                self.context.config.domain = value
-                self.context.config.save()
-
             self.action(
                 save,
-                apply_settings,
-                success_message="Settings saved",
+                lambda: self.context.controller.update_localdev_settings(park_value, value),
+                success_message="Settings saved and local routing reconciled",
                 after=self.refresh,
             )
 

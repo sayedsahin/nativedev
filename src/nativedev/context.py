@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from .config import AppConfig
 from .controller import NativeDevController
-from .managers import Doctor, LocalDevManager, NodeManager, PhpExtensionManager, PhpIniManager, PhpManager
+from .managers import DatabaseAccessManager, Doctor, LocalDevManager, NodeManager, PhpExtensionManager, PhpIniManager, PhpManager
 from .services import ServiceManager
 from .system import AptManager, CommandRunner, DistroInfo, SystemdManager, read_os_release
 
@@ -20,6 +20,7 @@ class AppContext:
     php_extensions: PhpExtensionManager
     php_ini: PhpIniManager
     node: NodeManager
+    database_access: DatabaseAccessManager
     services: ServiceManager
     localdev: LocalDevManager
     doctor: Doctor
@@ -36,8 +37,9 @@ class AppContext:
         php_extensions = PhpExtensionManager(runner, apt, systemd, php)
         php_ini = PhpIniManager(runner, systemd, php)
         node = NodeManager(runner, apt)
+        database_access = DatabaseAccessManager(runner)
         services = ServiceManager(runner, apt, systemd)
         localdev = LocalDevManager(runner, apt, systemd, config, php)
         doctor = Doctor(distro, apt, systemd, php, node, services, localdev)
-        controller = NativeDevController(php, localdev, node, php_ini)
-        return cls(distro, config, runner, apt, systemd, php, php_extensions, php_ini, node, services, localdev, doctor, controller)
+        controller = NativeDevController(php, localdev, node, php_ini, services, database_access)
+        return cls(distro, config, runner, apt, systemd, php, php_extensions, php_ini, node, database_access, services, localdev, doctor, controller)

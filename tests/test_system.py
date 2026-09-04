@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -243,7 +244,7 @@ class PrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=uid)[0]
 
     def test_allows_structured_native_operations(self):
-        protocol = 9
+        protocol = 14
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "restart", "now": False, "service": "nginx"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "disable", "now": True, "service": "php8.4-fpm"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["redis-tools"]}))
@@ -265,7 +266,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/php/8.4/fpm/pool.d/nativedev-1001.conf"]}, uid=1000))
 
     def test_rejects_raw_commands_and_outside_packages(self):
-        protocol = 9
+        protocol = 14
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "run", "argv": ["bash", "-c", "id"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["openssh-server"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["/tmp/nativedev-test/debsuryorg-archive-keyring.deb"]}))
@@ -305,7 +306,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {
-            "protocol": 9,
+            "protocol": 14,
             "action": "php.install_packages",
             "packages": ["php8.4-cli", "php8.4-gd", "php8.4-opcache"],
         }
@@ -326,7 +327,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         from nativedev.system import CommandResult
 
-        request = {"protocol": 9, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
+        request = {"protocol": 14, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("nativedev.privileged_helper.subprocess.run") as run, \
              patch("nativedev.privileged_helper._run_extension_module_pair") as modules:
@@ -350,10 +351,17 @@ class ServiceCleanupTests(unittest.TestCase):
         from nativedev.system import CommandResult
 
         class Runner:
+            def __init__(self):
+                self.operations = []
             def run(self, argv, **kwargs):
                 if argv[:2] == ["dpkg-query", "-W"]:
                     return CommandResult(list(argv), 0, dpkg_output, "")
+                if argv[-1:] == ["--version"] and "mariadb" in argv[0]:
+                    return CommandResult(list(argv), 0, "mariadb  Ver 15.1 Distrib 11.8.3-MariaDB, for debian-linux-gnu", "")
                 return CommandResult(list(argv), 0, "", "")
+            def privileged_operation(self, action, **fields):
+                self.operations.append((action, fields))
+                return CommandResult([f"nativedev:{action}"], 0, "", "")
 
         class Apt:
             def __init__(self):
@@ -381,7 +389,8 @@ class ServiceCleanupTests(unittest.TestCase):
                 pass
 
         apt = Apt()
-        return ServiceManager(Runner(), apt, Systemd()), apt
+        runner = Runner()
+        return ServiceManager(runner, apt, Systemd()), apt, runner
 
     def test_redis_server_and_cli_are_one_component(self):
         from nativedev.services import COMPONENTS
@@ -389,71 +398,544 @@ class ServiceCleanupTests(unittest.TestCase):
         self.assertEqual(redis.packages, ("redis-server", "redis-tools"))
         self.assertFalse(any(spec.key == "redis-cli" for spec in COMPONENTS))
 
-    def test_postgresql_residual_versioned_runtime_remains_uninstallable(self):
-        from nativedev.services import COMPONENTS
-
-        output = (
-            "rc \tpostgresql\n"
-            "ii \tpostgresql-17\n"
-            "un \tpostgresql-client\n"
-            "ii \tpostgresql-client-17\n"
-            "ii \tpostgresql-client-common\n"
-            "ii \tpostgresql-common\n"
-            "ii \tpostgresql-common-dev\n"
-        )
-        manager, apt = self._manager(output)
-        spec = next(item for item in COMPONENTS if item.key == "postgresql")
-        state = manager.state(spec)
-        self.assertTrue(state.installed)
-        self.assertTrue(state.uninstallable)
-        self.assertEqual(
-            manager.installed_component_packages(spec),
-            ["postgresql-17", "postgresql-client-17"],
-        )
-        manager.uninstall(spec)
-        self.assertEqual(apt.removed[-1], ["postgresql-17", "postgresql-client-17"])
-        self.assertNotIn("postgresql-common", apt.removed[-1])
-        self.assertNotIn("postgresql-common-dev", apt.removed[-1])
-
-    def test_mariadb_cleanup_includes_server_and_client_core_but_not_common(self):
+    def test_database_components_use_original_apt_remove_behavior(self):
         from nativedev.services import COMPONENTS
 
         output = (
             "ii \tmariadb-server\n"
             "ii \tmariadb-client\n"
             "ii \tmariadb-server-core\n"
-            "ii \tmariadb-client-core\n"
             "ii \tmariadb-common\n"
-            "ii \tlibmariadb3\n"
+            "ii \tmysql-common\n"
+            "ii \tpostgresql\n"
+            "ii \tpostgresql-client\n"
+            "ii \tpostgresql-17\n"
+            "ii \tpostgresql-client-17\n"
+            "ii \tpostgresql-common\n"
         )
-        manager, apt = self._manager(output)
-        spec = next(item for item in COMPONENTS if item.key == "mariadb")
-        manager.uninstall(spec)
-        removed = apt.removed[-1]
-        self.assertIn("mariadb-server", removed)
-        self.assertIn("mariadb-client", removed)
-        self.assertIn("mariadb-server-core", removed)
-        self.assertIn("mariadb-client-core", removed)
-        self.assertNotIn("mariadb-common", removed)
-        self.assertNotIn("libmariadb3", removed)
+        manager, apt, runner = self._manager(output)
+        mariadb = next(item for item in COMPONENTS if item.key == "mariadb")
+        postgresql = next(item for item in COMPONENTS if item.key == "postgresql")
+
+        manager.uninstall(mariadb)
+        manager.uninstall(postgresql)
+
+        self.assertEqual(
+            apt.removed[0],
+            ["mariadb-client", "mariadb-server", "mariadb-server-core"],
+        )
+        self.assertEqual(
+            apt.removed[1],
+            ["postgresql", "postgresql-17", "postgresql-client", "postgresql-client-17"],
+        )
+        self.assertEqual(runner.operations, [])
+
+    def test_mariadb_mysql_is_one_debian_mariadb_component_in_requested_order(self):
+        from nativedev.services import COMPONENTS
+
+        self.assertEqual(
+            [spec.key for spec in COMPONENTS],
+            ["nginx", "mariadb", "postgresql", "redis", "memcached", "composer", "mkcert"],
+        )
+        mariadb = next(spec for spec in COMPONENTS if spec.key == "mariadb")
+        self.assertEqual(mariadb.title, "MariaDB / MySQL")
+        self.assertEqual(mariadb.packages, ("mariadb-server", "mariadb-client"))
+        self.assertFalse(any(spec.key == "mysql" for spec in COMPONENTS))
+
+    def test_mariadb_version_is_detected_for_ui(self):
+        from unittest.mock import patch
+        from nativedev.services import COMPONENTS
+
+        output = "ii \tmariadb-server\nii \tmariadb-client\n"
+        manager, _apt, _runner = self._manager(output)
+        mariadb = next(spec for spec in COMPONENTS if spec.key == "mariadb")
+        with patch("nativedev.services.shutil.which", return_value="/usr/bin/mariadb"):
+            state = manager.state(mariadb)
+        self.assertEqual(state.version, "11.8.3-MariaDB")
 
     def test_redis_uninstall_removes_server_and_cli_package_together(self):
         from nativedev.services import COMPONENTS
 
         output = "ii \tredis-server\nii \tredis-tools\n"
-        manager, apt = self._manager(output)
+        manager, apt, _runner = self._manager(output)
         spec = next(item for item in COMPONENTS if item.key == "redis")
         manager.uninstall(spec)
         self.assertEqual(apt.removed[-1], ["redis-server", "redis-tools"])
 
-    def test_helper_allows_runtime_cleanup_only_for_remove(self):
+    def test_helper_rejects_removed_destructive_database_cleanup_operations(self):
         from unittest.mock import patch
         from nativedev.privileged_helper import validate_operation
 
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
-            for package in ("postgresql-17", "postgresql-client-17", "mariadb-server-core", "mariadb-client-core"):
-                self.assertTrue(validate_operation({"protocol": 9, "action": "apt.remove", "packages": [package]})[0])
-                self.assertFalse(validate_operation({"protocol": 9, "action": "apt.install", "packages": [package]})[0])
+            self.assertFalse(validate_operation({"protocol": 14, "action": "database.cleanup_component", "key": "mariadb", "delete_data": False})[0])
+            self.assertFalse(validate_operation({"protocol": 14, "action": "database.repair_data_ownership", "key": "postgresql"})[0])
+
+
+class ManagerPackageExportTests(unittest.TestCase):
+    def test_database_access_manager_is_exported_from_managers_package(self):
+        from nativedev.managers import DatabaseAccessManager
+        from nativedev.managers.database_access import DatabaseAccessManager as DirectDatabaseAccessManager
+
+        self.assertIs(DatabaseAccessManager, DirectDatabaseAccessManager)
+
+
+class DatabaseAccessManagerTests(unittest.TestCase):
+    def _manager(self, root: Path, status="0"):
+        from nativedev.managers.database_access import DatabaseAccessManager
+        from nativedev.system import CommandResult
+
+        class Runner:
+            def __init__(self):
+                self.operations = []
+                self.runs = []
+                self.status = status
+            def privileged_operation(self, action, **fields):
+                self.operations.append((action, dict(fields)))
+                stdout = self.status if action.endswith("account_status") else ""
+                return CommandResult([f"nativedev:{action}"], 0, stdout, "")
+            def run(self, argv, **fields):
+                self.runs.append((list(argv), dict(fields)))
+                sql = fields.get("input_text") or ""
+                if sql.startswith("SELECT CURRENT_USER"):
+                    stdout = "sayed@localhost\n"
+                elif sql.startswith("SELECT current_user"):
+                    stdout = "sayed\n"
+                else:
+                    stdout = ""
+                return CommandResult(list(argv), 0, stdout, "")
+
+        runner = Runner()
+        manager = DatabaseAccessManager(runner, root / "database-credentials.json", developer_username="sayed")
+        return manager, runner
+
+    def test_fresh_database_install_creates_default_managed_account_and_0600_store(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            manager, runner = self._manager(Path(td), status="0")
+            with patch("nativedev.managers.database_access.shutil.which", side_effect=lambda name: "/usr/bin/mariadb" if name == "mariadb" else None):
+                state = manager.ensure_after_install("mariadb")
+            self.assertTrue(state.managed)
+            self.assertFalse(state.conflict)
+            self.assertEqual(state.username, "sayed")
+            self.assertEqual(state.password, "nativedev")
+            self.assertEqual(state.host, "localhost")
+            self.assertEqual(state.port, 3306)
+            self.assertEqual(runner.operations[0][0], "database.mysql.account_status")
+            self.assertEqual(runner.operations[1][0], "database.mysql.ensure_dev_account")
+            self.assertEqual(runner.operations[1][1]["password"], "nativedev")
+            self.assertEqual(manager.credential_file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(manager.credential_file.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_forget_removes_saved_database_credential_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager, _runner = self._manager(Path(td), status="0")
+            manager._save_managed("mariadb", "Existing123!", transport="tcp")
+            self.assertTrue(manager.credential_file.exists())
+            manager.forget("mariadb")
+            self.assertFalse(manager.credential_file.exists())
+            self.assertFalse(manager.state("mariadb").managed)
+
+    def test_legacy_fixed_username_metadata_is_not_reused_for_current_user(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            credential = root / "database-credentials.json"
+            credential.write_text(json.dumps({
+                "version": 1,
+                "databases": {
+                    "postgresql": {
+                        "managed": True,
+                        "conflict": False,
+                        "username": "nativedev",
+                        "password": "OldPass123!",
+                    }
+                },
+            }))
+            manager, runner = self._manager(root, status="0")
+            with patch("nativedev.managers.database_access.shutil.which", return_value="/usr/bin/psql"):
+                state = manager.ensure_after_install("postgresql")
+            self.assertEqual(state.username, "sayed")
+            self.assertEqual(state.password, "nativedev")
+            self.assertEqual([action for action, _ in runner.operations], [
+                "database.postgresql.account_status",
+                "database.postgresql.ensure_dev_account",
+            ])
+
+    def test_postgresql_uses_tcp_loopback_for_password_authentication(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            manager, _runner = self._manager(Path(td), status="0")
+            with patch("nativedev.managers.database_access.shutil.which", return_value="/usr/bin/psql"):
+                state = manager.ensure_after_install("postgresql")
+            self.assertEqual(state.host, "localhost")
+            self.assertEqual(state.port, 5432)
+            self.assertEqual(state.database, "postgres")
+
+    def test_existing_unmanaged_current_user_account_is_not_overwritten_automatically(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager, runner = self._manager(Path(td), status="1")
+            state = manager.ensure_after_install("postgresql")
+            self.assertFalse(state.managed)
+            self.assertTrue(state.conflict)
+            self.assertEqual([action for action, _ in runner.operations], ["database.postgresql.account_status"])
+
+    def test_use_existing_mariadb_user_verifies_then_stores_without_changing_password(self):
+        from unittest.mock import patch
+        from nativedev.system import CommandResult
+
+        with tempfile.TemporaryDirectory() as td:
+            manager, runner = self._manager(Path(td), status="0")
+            sql_seen = []
+
+            def mysql_sql(password, sql, *, transport="tcp"):
+                sql_seen.append((password, sql, transport))
+                self.assertEqual(transport, "tcp")
+                if sql.startswith("SELECT CURRENT_USER") and password == "Existing123!":
+                    return CommandResult(["mariadb"], 0, "sayed@localhost\n", "")
+                return CommandResult(["mariadb"], 1, "", "ERROR 1045 access denied")
+
+            with patch.object(manager, "_mysql_user_sql", side_effect=mysql_sql):
+                state = manager.use_existing_account("mariadb", "Existing123!")
+            self.assertTrue(state.managed)
+            self.assertEqual(state.username, "sayed")
+            self.assertEqual(state.password, "Existing123!")
+            self.assertEqual(state.host, "localhost")
+            self.assertEqual(runner.operations, [])
+            self.assertEqual(len(sql_seen), 1)
+            self.assertTrue(sql_seen[0][1].startswith("SELECT CURRENT_USER"))
+
+    def test_use_existing_mariadb_user_wrong_password_changes_nothing(self):
+        from unittest.mock import patch
+        from nativedev.system import CommandResult
+
+        with tempfile.TemporaryDirectory() as td:
+            manager, runner = self._manager(Path(td), status="0")
+
+            def mysql_sql(password, sql, *, transport="tcp"):
+                self.assertEqual(transport, "tcp")
+                return CommandResult(["mariadb"], 1, "", "ERROR 1045 access denied")
+
+            with patch.object(manager, "_mysql_user_sql", side_effect=mysql_sql):
+                with self.assertRaisesRegex(RuntimeError, "1045|authenticate"):
+                    manager.use_existing_account("mariadb", "Wrong123!")
+            self.assertFalse(manager.state("mariadb").managed)
+            self.assertEqual(runner.operations, [])
+
+
+    def test_change_and_reset_password_are_self_service_after_credential_is_known(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            manager, runner = self._manager(Path(td), status="0")
+            with patch("nativedev.managers.database_access.shutil.which", return_value="/usr/bin/psql"):
+                manager.ensure_after_install("postgresql")
+                runner.operations.clear()
+                changed = manager.change_password("postgresql", "LocalDev123!")
+                self.assertEqual(changed.password, "LocalDev123!")
+                reset = manager.reset_password("postgresql")
+            self.assertEqual(reset.password, "nativedev")
+            self.assertEqual(runner.operations, [])
+            sqls = [fields.get("input_text", "") for _argv, fields in runner.runs]
+            self.assertTrue(any("ALTER ROLE CURRENT_USER PASSWORD 'LocalDev123!'" in sql for sql in sqls))
+            self.assertTrue(any("ALTER ROLE CURRENT_USER PASSWORD 'nativedev'" in sql for sql in sqls))
+
+    def test_password_validation_rejects_sql_and_control_characters(self):
+        from nativedev.managers.database_access import DatabaseAccessManager
+        for value in ("", "has space", "quote'", 'double"', "slash\\", "line\nbreak", "nul\0byte"):
+            with self.assertRaises(RuntimeError, msg=repr(value)):
+                DatabaseAccessManager.validate_password(value)
+        self.assertEqual(DatabaseAccessManager.validate_password("Dev-123!"), "Dev-123!")
+
+    def test_mariadb_default_account_uses_privileged_admin_path_and_verifies_default_password(self):
+        from unittest.mock import patch
+        from nativedev.system import CommandResult
+
+        with tempfile.TemporaryDirectory() as td:
+            manager, runner = self._manager(Path(td), status="0")
+
+            def mysql_sql(password, sql, *, transport="tcp"):
+                self.assertEqual(transport, "tcp")
+                if sql.startswith("SELECT CURRENT_USER") and password == "nativedev":
+                    return CommandResult(["mariadb"], 0, "sayed@localhost\n", "")
+                return CommandResult(["mariadb"], 1, "", "ERROR 1045 access denied")
+
+            with patch.object(manager, "_mysql_user_sql", side_effect=mysql_sql):
+                state = manager.create_local_access("mariadb")
+            self.assertTrue(state.managed)
+            self.assertEqual(state.password, "nativedev")
+            self.assertEqual(state.host, "localhost")
+            self.assertEqual([action for action, _ in runner.operations], ["database.mysql.ensure_dev_account"])
+            self.assertEqual(runner.operations[0][1]["password"], "nativedev")
+            self.assertNotIn("admin_password", runner.operations[0][1])
+
+    def test_mariadb_default_account_prompts_for_root_password_then_retries(self):
+        from unittest.mock import patch
+        from nativedev.managers.database_access import DatabaseAdminPasswordRequired
+        from nativedev.system import CommandResult
+
+        with tempfile.TemporaryDirectory() as td:
+            manager, runner = self._manager(Path(td), status="0")
+
+            def privileged_operation(action, **fields):
+                runner.operations.append((action, dict(fields)))
+                if action == "database.mysql.ensure_dev_account" and "admin_password" not in fields:
+                    return CommandResult(
+                        ["nativedev:database.mysql.ensure_dev_account"],
+                        77,
+                        "",
+                        "NATIVEDEV_MYSQL_ROOT_PASSWORD_REQUIRED",
+                    )
+                return CommandResult([f"nativedev:{action}"], 0, "", "")
+
+            runner.privileged_operation = privileged_operation
+            with self.assertRaises(DatabaseAdminPasswordRequired):
+                manager.create_local_access("mariadb")
+            self.assertFalse(manager.state("mariadb").managed)
+
+            def mysql_sql(password, sql, *, transport="tcp"):
+                if sql.startswith("SELECT CURRENT_USER") and password == "nativedev":
+                    return CommandResult(["mariadb"], 0, "sayed@localhost\n", "")
+                return CommandResult(["mariadb"], 1, "", "ERROR 1045 access denied")
+
+            with patch.object(manager, "_mysql_user_sql", side_effect=mysql_sql):
+                state = manager.create_local_access("mariadb", admin_password="Root secret! with spaces")
+            self.assertTrue(state.managed)
+            self.assertEqual(state.password, "nativedev")
+            self.assertEqual(runner.operations[-1][1]["admin_password"], "Root secret! with spaces")
+
+    def test_mysql_password_verification_never_falls_back_to_socket_auth(self):
+        from unittest.mock import patch
+        from nativedev.system import CommandResult
+
+        with tempfile.TemporaryDirectory() as td:
+            manager, _runner = self._manager(Path(td), status="0")
+            transports = []
+
+            def mysql_sql(password, sql, *, transport="tcp"):
+                transports.append(transport)
+                if transport == "socket":
+                    return CommandResult(["mariadb"], 0, "sayed@localhost\n", "")
+                return CommandResult(["mariadb"], 1, "", "ERROR 1045 access denied")
+
+            with patch.object(manager, "_mysql_user_sql", side_effect=mysql_sql):
+                with self.assertRaisesRegex(RuntimeError, "1045|authenticate"):
+                    manager._verify_mysql_login("Wrong123!", preferred_transport="socket")
+            self.assertEqual(transports, ["tcp"])
+
+
+    def test_mariadb_password_change_is_not_saved_until_new_login_is_verified(self):
+        from unittest.mock import patch
+        from nativedev.system import CommandResult
+
+        with tempfile.TemporaryDirectory() as td:
+            manager, _runner = self._manager(Path(td), status="0")
+            manager._save_managed("mariadb", "Existing123!", transport="tcp")
+
+            def mysql_sql(password, sql, *, transport="tcp"):
+                if sql.startswith("SELECT CURRENT_USER"):
+                    if password == "Existing123!":
+                        return CommandResult(["mariadb"], 0, "sayed@localhost\n", "")
+                    return CommandResult(["mariadb"], 1, "", "ERROR 1045 access denied")
+                if sql.startswith("SELECT VERSION"):
+                    return CommandResult(["mariadb"], 0, "11.8.3-MariaDB\n", "")
+                if sql.startswith("SET PASSWORD"):
+                    # Simulate the exact reported failure mode: SQL exits zero but
+                    # the requested password is not actually usable afterward.
+                    return CommandResult(["mariadb"], 0, "", "")
+                return CommandResult(["mariadb"], 1, "", "unexpected SQL")
+
+            with patch.object(manager, "_mysql_user_sql", side_effect=mysql_sql):
+                with self.assertRaisesRegex(RuntimeError, "1045|authenticate"):
+                    manager.reset_password("mariadb")
+            # NativeDev must retain the last verified credential and must not
+            # report/save the unverified default password.
+            self.assertEqual(manager.state("mariadb").password, "Existing123!")
+
+    def test_mariadb_self_service_password_change_uses_mariadb_set_password_and_updates_store(self):
+        from unittest.mock import patch
+        from nativedev.system import CommandResult
+
+        with tempfile.TemporaryDirectory() as td:
+            manager, _runner = self._manager(Path(td), status="0")
+            manager._save_managed("mariadb", "Existing123!", transport="tcp")
+            valid_passwords = {"Existing123!"}
+            sql_seen = []
+
+            def mysql_sql(password, sql, *, transport="tcp"):
+                sql_seen.append(sql)
+                if sql.startswith("SELECT CURRENT_USER"):
+                    if password not in valid_passwords:
+                        return CommandResult(["mariadb"], 1, "", "ERROR 1045 access denied")
+                    return CommandResult(["mariadb"], 0, "sayed@localhost\n", "")
+                if sql.startswith("SELECT VERSION"):
+                    return CommandResult(["mariadb"], 0, "11.8.3-MariaDB\n", "")
+                if sql.startswith("SET PASSWORD"):
+                    valid_passwords.clear()
+                    valid_passwords.add("NewPass123!")
+                    return CommandResult(["mariadb"], 0, "", "")
+                return CommandResult(["mariadb"], 1, "", "unexpected SQL")
+
+            with patch.object(manager, "_mysql_user_sql", side_effect=mysql_sql):
+                state = manager.change_password("mariadb", "NewPass123!")
+            self.assertEqual(state.password, "NewPass123!")
+            self.assertTrue(any(sql.startswith("SET PASSWORD = PASSWORD('NewPass123!')") for sql in sql_seen))
+
+
+
+class DatabasePrivilegedHelperTests(unittest.TestCase):
+    def operation_ok(self, request):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import validate_operation
+        with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
+            return validate_operation(request, uid=1000)[0]
+
+    def test_database_rpc_derives_username_from_peer_and_rejects_client_user_or_sql_selectors(self):
+        protocol = 14
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.account_status"}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "nativedev", "admin_password": "root secret !@#"}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.postgresql.account_status"}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.postgresql.ensure_dev_account", "password": "Dev-123!"}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "x", "user": "root"}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "x", "sql": "GRANT ALL"}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "bad'quote"}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "database.postgresql.ensure_dev_account", "password": "nativedev", "admin_password": "rootpass"}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "nativedev", "admin_password": "line\nbreak"}))
+
+    def test_mysql_helper_grants_dev_capabilities_without_grant_option(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import execute_operation
+        import subprocess
+
+        request = {"protocol": 14, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
+        calls = []
+
+        def run_admin(sql, admin_password, timeout, env):
+            calls.append((sql, admin_password))
+            return subprocess.CompletedProcess(["/usr/bin/mariadb"], 0, "", "")
+
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+             patch("nativedev.privileged_helper._run_mysql_admin", side_effect=run_admin):
+            execute_operation(request, uid=1000, timeout=30)
+
+        self.assertEqual(calls[0], ("SELECT 1;\n", None))
+        sql = calls[1][0]
+        self.assertIn("'sayed'@'localhost'", sql)
+        grant_line = next(line for line in sql.splitlines() if line.startswith("GRANT "))
+        self.assertIn("CREATE", grant_line)
+        self.assertIn("CREATE ROUTINE", grant_line)
+        self.assertNotIn("GRANT OPTION", grant_line)
+        self.assertNotIn("CREATE USER", grant_line)
+
+    def test_mysql_helper_requests_root_password_only_after_no_password_login_fails(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import execute_operation
+        import subprocess
+
+        request = {"protocol": 14, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+             patch("nativedev.privileged_helper._run_mysql_admin") as run_admin:
+            run_admin.return_value = subprocess.CompletedProcess(["mariadb"], 1, "", "ERROR 1045")
+            result = execute_operation(request, uid=1000, timeout=30)
+        self.assertEqual(result.returncode, 77)
+        self.assertEqual(result.stderr, "NATIVEDEV_MYSQL_ROOT_PASSWORD_REQUIRED")
+        run_admin.assert_called_once()
+
+    def test_mysql_helper_retries_with_one_shot_root_password(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import execute_operation
+        import subprocess
+
+        request = {
+            "protocol": 14,
+            "action": "database.mysql.ensure_dev_account",
+            "password": "nativedev",
+            "admin_password": "Root secret !@#",
+        }
+        calls = []
+
+        def run_admin(sql, admin_password, timeout, env):
+            calls.append((sql, admin_password))
+            return subprocess.CompletedProcess(["mariadb"], 0, "", "")
+
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+             patch("nativedev.privileged_helper._run_mysql_admin", side_effect=run_admin):
+            result = execute_operation(request, uid=1000, timeout=30)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(calls[0], ("SELECT 1;\n", "Root secret !@#"))
+        self.assertEqual(calls[1][1], "Root secret !@#")
+
+    def test_mysql_root_password_stays_out_of_process_argv_and_temp_file_is_removed(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import _run_mysql_admin
+        import subprocess
+
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            config_arg = next(item for item in argv if item.startswith("--defaults-extra-file="))
+            config_path = Path(config_arg.split("=", 1)[1])
+            seen["path"] = config_path
+            seen["mode"] = config_path.stat().st_mode & 0o777
+            seen["contents"] = config_path.read_text()
+            seen["argv"] = list(argv)
+            return subprocess.CompletedProcess(list(argv), 0, "1\n", "")
+
+        with patch("nativedev.privileged_helper._binary", return_value="/usr/bin/mariadb"), \
+             patch("nativedev.privileged_helper.subprocess.run", side_effect=fake_run):
+            result = _run_mysql_admin("SELECT 1;\n", 'Root "secret" \\ value', 30, {"PATH": "/usr/bin"})
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(seen["mode"], 0o600)
+        self.assertFalse(seen["path"].exists())
+        self.assertFalse(any("Root" in item for item in seen["argv"]))
+        self.assertIn('password="Root \\"secret\\" \\\\ value"', seen["contents"])
+
+    def test_postgresql_helper_role_is_createdb_but_not_superuser_or_createrole(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import execute_operation
+        import subprocess
+
+        request = {"protocol": 14, "action": "database.postgresql.ensure_dev_account", "password": "nativedev"}
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+             patch("nativedev.privileged_helper._postgres_admin_argv", return_value=["/usr/bin/runuser", "psql"]), \
+             patch("nativedev.privileged_helper.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["psql"], 0, "", "")
+            execute_operation(request, uid=1000, timeout=30)
+        sql = run.call_args.kwargs["input"]
+        self.assertIn('ROLE "sayed"', sql)
+        self.assertIn("CREATEDB", sql)
+        self.assertIn("NOSUPERUSER", sql)
+        self.assertIn("NOCREATEROLE", sql)
+        self.assertIn("NOREPLICATION", sql)
+        self.assertIn("NOBYPASSRLS", sql)
+
+
+class DatabaseAccessUiTests(unittest.TestCase):
+    def test_services_page_uses_controller_install_and_shows_database_credentials_controls(self):
+        gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
+        services = gui[gui.index("class ServicesPage"):gui.index("class ProjectsPage")]
+        self.assertIn("self.context.controller.install_component(s)", services)
+        self.assertIn('label("Local database access", "row-title")', services)
+        self.assertIn('Gtk.Button(label="Reveal")', services)
+        self.assertIn('Gtk.Button(label="Change password")', services)
+        self.assertIn('Gtk.Button(label="Reset to default")', services)
+        self.assertIn('Gtk.Button(label="Use existing user")', services)
+        self.assertIn('Gtk.Button(label="Use NativeDev default user")', services)
+        self.assertNotIn('Gtk.Button(label="Take over account")', services)
+        self.assertNotIn("prompt_default_database_account", gui)
+        self.assertIn("create_database_access(", services)
+        self.assertIn("admin_password=admin_password", services)
+        self.assertIn("use_existing_database_access", services)
+        self.assertIn('label("Current database password", "row-title")', gui)
+        self.assertIn('label("MariaDB/MySQL root password", "row-title")', gui)
+        self.assertIn("DatabaseAdminPasswordRequired", gui)
+        self.assertNotIn('Gtk.CheckButton(label="Also delete database data")', gui)
+        self.assertNotIn("delete_database_data", services)
+        self.assertIn("database users", gui)
+        self.assertIn("database passwords", gui)
+        self.assertIn('label(f"Version {state.version}", "muted")', services)
+        self.assertNotIn('password.set_placeholder_text', gui)
+
 
 
 class ControllerTests(unittest.TestCase):
@@ -638,6 +1120,21 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "apt failed"):
             controller.uninstall_php("8.4")
         self.assertEqual(events, [("detach_ini", "8.4"), ("uninstall", "8.4"), ("restore_ini", "8.4")])
+
+
+    def test_database_component_install_auto_provisions_local_access(self):
+        from nativedev.controller import NativeDevController
+        from nativedev.services import ComponentSpec
+
+        events = []
+        class Services:
+            def install(self, spec): events.append(("install", spec.key))
+        class Db:
+            def supports(self, key): return key == "postgresql"
+            def ensure_after_install(self, key): events.append(("access", key))
+        controller = NativeDevController(object(), object(), services=Services(), database_access=Db())
+        controller.install_component(ComponentSpec("postgresql", "PostgreSQL", ("postgresql",)))
+        self.assertEqual(events, [("install", "postgresql"), ("access", "postgresql")])
 
     def test_mutations_are_globally_serialized(self):
         import threading

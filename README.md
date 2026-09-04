@@ -57,16 +57,21 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 
 ### Native services and tools
 - Nginx
+- MariaDB / MySQL (NativeDev installs Debian MariaDB and shows the detected MariaDB version)
+- PostgreSQL
 - Redis Server + `redis-cli` as one component (`redis-server` + `redis-tools`)
 - Memcached
-- MariaDB
-- MySQL when the configured APT repositories actually provide `mysql-server`
-- PostgreSQL
 - Composer
 - mkcert
-- Install/uninstall system packages; PostgreSQL/MariaDB uninstall also removes their concrete server/client runtime packages without purging database data or configuration
 - systemd start/stop/restart and enable/disable controls when the unit supports them
-- MariaDB/MySQL conflict guard
+- Database connection cards show the conventional local endpoints `localhost:3306` and `localhost:5432`; NativeDev still uses explicit TCP internally when proving password authentication
+- Database uninstall uses the original conservative APT-remove model: NativeDev stops/disables the service, removes the installed server/client runtime package family, and forgets NativeDev's saved database credential. It does not purge/autoremove common/shared packages and does not delete database data, database users/passwords, logs, package service users/groups, or APT cache.
+- After NativeDev installs MariaDB or PostgreSQL, automatically provision a database account named after the logged-in Unix developer (for example `sayed`) with default database password `nativedev`; no second confirmation/setup step is required
+- Show the NativeDev-managed database server/port/current-user username/password in Services with Reveal/Copy controls, plus Change password and Reset to default actions (`Reset` restores only the database password to `nativedev`)
+- Store NativeDev database credential metadata in `~/.config/nativedev/database-credentials.json` with mode `0600`; a full database uninstall removes that saved credential
+- Never silently overwrite a pre-existing unmanaged database account matching the current Unix username during discovery/install reconciliation; legacy database roles named `nativedev` from the earlier model are left untouched
+- **Use existing user** requires the current DB password to match. NativeDev verifies it and stores the credential without changing the account password; future Change/Reset operations are self-service and need no database-admin access. A mismatch changes nothing. **Use NativeDev default account** never asks for the old user password; it uses the privileged database-admin path to create/reset the current-user DB account to password `nativedev`, then verifies that password before saving.
+- MySQL/MariaDB local access receives development capabilities (database/schema/table/view/routine/trigger CRUD) without `GRANT OPTION` or user administration; PostgreSQL uses `LOGIN CREATEDB` with `NOSUPERUSER NOCREATEROLE NOREPLICATION NOBYPASSRLS`
 
 ### Projects / local development
 - Park one projects directory (default `~/Code`)
@@ -93,7 +98,7 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 - A normal `./install.sh` installation places the privileged helper at `/usr/lib/nativedev/privileged_helper.py` as a root-owned, non-user-writable file
 - The first privileged action launches that restricted helper through a dedicated installed Polkit action; authorization is reused for the rest of the app session. `./run.sh` explicitly opts into the source-tree helper for development only.
 - The privileged helper accepts **structured NativeDev operations**, not client-supplied command argv. Package/service/file targets are validated again on the root side; it is not an arbitrary root shell.
-- GUI and helper use privileged RPC protocol **9** in this release; `install.sh` installs the matching root-owned helper so stale protocol versions fail closed instead of executing an incompatible privileged request.
+- GUI and helper use privileged RPC protocol **10** in this release; `install.sh` installs the matching root-owned helper so stale protocol versions fail closed instead of executing an incompatible privileged request.
 - `subprocess` calls use argv lists; no generic `shell=True`
 - NVM is the only shell-sourced integration, with shell-quoted arguments
 - NativeDev writes distinct, named configuration files instead of editing unrelated user configs
@@ -190,6 +195,7 @@ User state:
 
 ```text
 ~/.config/nativedev/config.json
+~/.config/nativedev/database-credentials.json
 ~/.local/share/nativedev/
 /usr/lib/nativedev/privileged_helper.py
 ```
@@ -205,7 +211,7 @@ NVM shell integration is enclosed by:
 ## Important alpha limitations
 
 - Automatic wildcard DNS is intentionally limited to NetworkManager. Other resolver layouts are detected as unsupported instead of rewriting resolver configuration. NativeDev reloads only NetworkManager configuration/DNS state; it does not intentionally restart the whole NetworkManager service.
-- Generic Redis/MariaDB/PostgreSQL configuration editors are not implemented yet; v0.1 installs, detects and controls their native services. Nginx/local DNS/HTTPS configuration is implemented.
+- Generic Redis/MariaDB/PostgreSQL configuration editors are not implemented yet; v0.1 installs/detects/controls their native services and manages a local database login matching the current Unix developer user, but does not yet expose server tuning forms. Nginx/local DNS/HTTPS configuration is implemented.
 - Site scanning is refresh-based, not a persistent filesystem daemon.
 - PHP requests for `*.test` run as the logged-in developer, which avoids CLI-vs-FPM ownership conflicts for cache/uploads/rate-limit directories. Nginx still needs read/traverse permission to serve static files directly under the project's document root; NativeDev grants that automatically via a read-only ACL scoped to the document root only, and never broadens permissions on the rest of the project or the home directory.
 - Project ACL management assumes normal development projects are owned by the desktop user; files owned by another account may require ownership repair outside NativeDev.
@@ -222,6 +228,7 @@ GTK4 GUI / future CLI
           |        |
           |        +-- PhpManager ------ APT / systemd / Sury
           |        +-- LocalDevManager - NetworkManager / Nginx / mkcert
+          |        +-- DatabaseAccessManager - local DB account / credentials
           |
           +-- NodeManager -------- NVM (per user)
           +-- ServiceManager ----- APT / systemd

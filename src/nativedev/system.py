@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 
-PRIVILEGE_PROTOCOL_VERSION = 9
+PRIVILEGE_PROTOCOL_VERSION = 14
 PHP_FPM_COMMAND_RE = re.compile(r"^php-fpm(?P<version>\d+\.\d+)$")
 PHP_BINARY_PATH_RE = re.compile(r"^/usr/bin/php(?P<version>\d+\.\d+)$")
 
@@ -300,10 +300,13 @@ class CommandRunner:
         privileged: bool = False,
         check: bool = False,
         env: Mapping[str, str] | None = None,
+        input_text: str | None = None,
         timeout: int | None = 120,
     ) -> CommandResult:
         command = [str(item) for item in argv]
         effective_timeout = timeout or 120
+        if privileged and input_text is not None:
+            raise RuntimeError("Privileged argv operations do not accept stdin payloads")
         if privileged and os.geteuid() != 0:
             result = self.privilege.run(command, timeout=effective_timeout)
             if check and not result.ok:
@@ -315,6 +318,7 @@ class CommandRunner:
                 command,
                 text=True,
                 capture_output=True,
+                input=input_text,
                 env=dict(os.environ, **(env or {})),
                 timeout=timeout,
             )

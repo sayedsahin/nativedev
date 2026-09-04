@@ -2,6 +2,9 @@
 
 ## 0.1.9 - 2026-09-03
 
+- Fixed Local Development settings reconciliation. Changing the local TLD now refreshes NativeDev NetworkManager wildcard DNS and existing wildcard Nginx routing automatically; changing the park directory rebuilds existing wildcard routing and applies the new park ACL automatically. HTTPS-enabled TLD changes also regenerate the NativeDev wildcard certificate.
+- Local Development settings changes are transactional: if DNS/Nginx/HTTPS reconciliation fails, NativeDev restores the previous park/TLD and attempts to restore the previous managed infrastructure. Wildcard Nginx readiness now includes a current park+TLD signature so stale routing is never reported as ready.
+- Expanded regression coverage to 81 tests, including TLD/park reconciliation, rollback, HTTPS regeneration and stale wildcard-router detection.
 - Simplified PHP navigation: **PHP Extensions** and **PHP Settings** are now contextual subpages opened from PHP instead of separate sidebar destinations. Both subpages keep PHP selected in the sidebar and provide a direct `← PHP` back action.
 - Added a dedicated **PHP Settings** page for per-version custom INI overrides. NativeDev never edits distro/Sury `php.ini`; it owns only `mods-available/nativedev.ini` and matching `99-nativedev.ini` links for CLI and FPM.
 - Added strict root-side INI injection validation: directive names must match `^[a-zA-Z][a-zA-Z0-9_.]*$`, and values containing newline, carriage return or NUL are rejected with an explicit single-line error. Extension-loading directives are blocked because PHP Extensions remains the sole extension enable/disable manager.

@@ -134,6 +134,33 @@ class NginxRenderTests(unittest.TestCase):
             self.assertNotIn("fastcgi_pass", rendered)
             self.assertNotIn("server {", rendered)
 
+    def test_nginx_ready_requires_current_domain_and_park_signature(self):
+        from unittest.mock import patch
+        from nativedev.config import AppConfig
+        from nativedev.managers.localdev import LocalDevManager
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            park = base / "Code"
+            park.mkdir()
+            site = base / "nativedev-sites.conf"
+            enabled = base / "nativedev-enabled.conf"
+            config = AppConfig(park_dir=str(park), domain="test")
+            manager = LocalDevManager(None, None, None, config, StubPhp())
+            site.write_text(manager.render_nginx(), encoding="utf-8")
+            enabled.touch()
+            with patch("nativedev.managers.localdev.NGINX_SITE", site), patch(
+                "nativedev.managers.localdev.NGINX_ENABLED", enabled
+            ):
+                self.assertTrue(manager.nginx_ready())
+                config.domain = "tests"
+                self.assertFalse(manager.nginx_ready())
+                config.domain = "test"
+                new_park = base / "Work"
+                new_park.mkdir()
+                config.park_dir = str(new_park)
+                self.assertFalse(manager.nginx_ready())
+
     def test_wildcard_setup_adds_inheritable_park_acl(self):
         localdev = (
             Path(__file__).resolve().parents[1] / "src" / "nativedev" / "managers" / "localdev.py"
@@ -459,6 +486,114 @@ class ControllerTests(unittest.TestCase):
             controller.set_default_php("8.3")
         self.assertEqual(php.current, "8.3")
         self.assertEqual(localdev.reconciles, 1)
+
+    def test_localdev_domain_change_reconciles_dns_and_existing_nginx(self):
+        from nativedev.controller import NativeDevController
+
+        events = []
+
+        class Config:
+            park_dir = "/home/dev/Code"
+            domain = "test"
+            https_enabled = False
+            def save(self): events.append(("save", self.park_dir, self.domain))
+
+        class LocalDev:
+            def __init__(self): self.config = Config()
+            def nginx_managed(self): return True
+            def dns_strategy(self): return "networkmanager"
+            def configure_dns(self): events.append(("dns", self.config.domain))
+            def configure_nginx_sites(self): events.append(("nginx", self.config.park_dir, self.config.domain))
+
+        localdev = LocalDev()
+        controller = NativeDevController(object(), localdev)
+        controller.update_localdev_settings("/home/dev/Code", "tests")
+        self.assertEqual(localdev.config.domain, "tests")
+        self.assertIn(("dns", "tests"), events)
+        self.assertIn(("nginx", "/home/dev/Code", "tests"), events)
+
+    def test_localdev_park_change_rebuilds_nginx_without_touching_dns(self):
+        from nativedev.controller import NativeDevController
+
+        events = []
+
+        class Config:
+            park_dir = "/home/dev/Code"
+            domain = "test"
+            https_enabled = False
+            def save(self): events.append(("save", self.park_dir, self.domain))
+
+        class LocalDev:
+            def __init__(self): self.config = Config()
+            def nginx_managed(self): return True
+            def dns_strategy(self): events.append(("dns_strategy",)); return "networkmanager"
+            def configure_dns(self): events.append(("dns", self.config.domain))
+            def configure_nginx_sites(self): events.append(("nginx", self.config.park_dir, self.config.domain))
+
+        localdev = LocalDev()
+        controller = NativeDevController(object(), localdev)
+        controller.update_localdev_settings("/home/dev/Work", "test")
+        self.assertEqual(localdev.config.park_dir, "/home/dev/Work")
+        self.assertIn(("nginx", "/home/dev/Work", "test"), events)
+        self.assertFalse(any(event[0].startswith("dns") for event in events))
+
+    def test_localdev_reconcile_failure_rolls_config_and_router_back(self):
+        from nativedev.controller import NativeDevController
+
+        events = []
+
+        class Config:
+            park_dir = "/home/dev/Code"
+            domain = "test"
+            https_enabled = False
+            def save(self): events.append(("save", self.park_dir, self.domain))
+
+        class LocalDev:
+            def __init__(self):
+                self.config = Config()
+                self.nginx_calls = 0
+            def nginx_managed(self): return True
+            def dns_strategy(self): return "networkmanager"
+            def configure_dns(self): events.append(("dns", self.config.domain))
+            def configure_nginx_sites(self):
+                self.nginx_calls += 1
+                events.append(("nginx", self.config.park_dir, self.config.domain))
+                if self.nginx_calls == 1:
+                    raise RuntimeError("nginx failed")
+
+        localdev = LocalDev()
+        controller = NativeDevController(object(), localdev)
+        with self.assertRaisesRegex(RuntimeError, "rolled back"):
+            controller.update_localdev_settings("/home/dev/Work", "tests")
+        self.assertEqual(localdev.config.park_dir, "/home/dev/Code")
+        self.assertEqual(localdev.config.domain, "test")
+        self.assertIn(("dns", "tests"), events)
+        self.assertIn(("dns", "test"), events)
+        self.assertIn(("nginx", "/home/dev/Code", "test"), events)
+
+    def test_localdev_domain_change_regenerates_https_instead_of_plain_nginx_rebuild(self):
+        from nativedev.controller import NativeDevController
+
+        events = []
+
+        class Config:
+            park_dir = "/home/dev/Code"
+            domain = "test"
+            https_enabled = True
+            def save(self): events.append(("save", self.domain))
+
+        class LocalDev:
+            def __init__(self): self.config = Config()
+            def nginx_managed(self): return True
+            def dns_strategy(self): return "networkmanager"
+            def configure_dns(self): events.append(("dns", self.config.domain))
+            def enable_https(self): events.append(("https", self.config.domain))
+            def configure_nginx_sites(self): events.append(("nginx", self.config.domain))
+
+        localdev = LocalDev()
+        NativeDevController(object(), localdev).update_localdev_settings("/home/dev/Code", "tests")
+        self.assertEqual(events[-2:], [("dns", "tests"), ("https", "tests")])
+        self.assertFalse(any(event[0] == "nginx" for event in events))
 
     def test_php_uninstall_detaches_nativedev_ini_and_preserves_profile(self):
         from nativedev.controller import NativeDevController
@@ -1340,3 +1475,12 @@ class PhpIniManagerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LocalDevSettingsUiTests(unittest.TestCase):
+    def test_save_settings_uses_controller_reconciliation(self):
+        gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
+        local = gui[gui.index("class LocalDevPage"):gui.index("class DoctorPage")]
+        self.assertIn("self.context.controller.update_localdev_settings(park_value, value)", local)
+        self.assertNotIn("self.context.config.park_dir = park_value", local)
+

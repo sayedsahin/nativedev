@@ -72,6 +72,7 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 - Park one projects directory (default `~/Code`)
 - Scan first-level project directories and expose a dedicated **Projects** page
 - Configure one persistent wildcard Nginx router: after one-time setup, creating a lowercase DNS-safe folder such as `~/Code/my-app` makes `my-app.test` available immediately without reopening NativeDev or regenerating Nginx
+- Changing **Park directory** or **Local TLD** from Local development → Save settings automatically reconciles existing NativeDev routing. TLD changes update NetworkManager wildcard DNS, existing Nginx routing, and an enabled NativeDev HTTPS certificate; park changes rebuild the wildcard router/ACL for the new location. Failed reconciliation rolls back the saved settings.
 - Resolve the project directory dynamically from the hostname and use `public/` automatically when present, otherwise project root
 - Use the system default PHP-FPM automatically; no global PHP-FPM field is required
 - Per-project PHP dropdown: `Default (X.Y)` plus installed PHP-FPM versions

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import pwd
 import re
@@ -22,6 +23,7 @@ NGINX_CERT_DIR = Path("/etc/nginx/nativedev")
 NGINX_CERT = NGINX_CERT_DIR / "nativedev.pem"
 NGINX_KEY = NGINX_CERT_DIR / "nativedev-key.pem"
 NGINX_WILDCARD_MARKER = "# NativeDev wildcard router v1"
+NGINX_ROUTING_SIGNATURE_PREFIX = "# NativeDev routing signature: "
 WEB_USER = "www-data"
 PHP_DEFAULT = "default"
 
@@ -310,13 +312,26 @@ class LocalDevManager:
 
     # ---- Nginx ---------------------------------------------------------------
 
+    def _routing_signature(self) -> str:
+        """Fingerprint the settings embedded in the persistent wildcard router.
+
+        Readiness must be tied to the *current* TLD and park directory. Merely
+        finding NativeDev's marker would otherwise report a stale router as
+        ready immediately after either setting changes. A hash keeps arbitrary
+        filesystem characters out of an Nginx comment line.
+        """
+        payload = f"{self.config.domain}\0{self.park_dir}".encode("utf-8", errors="surrogateescape")
+        return hashlib.sha256(payload).hexdigest()
+
     def nginx_ready(self) -> bool:
         if not (NGINX_SITE.exists() and NGINX_ENABLED.exists()):
             return False
         try:
-            return NGINX_WILDCARD_MARKER in NGINX_SITE.read_text(encoding="utf-8", errors="ignore")
+            text = NGINX_SITE.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             return False
+        expected_signature = NGINX_ROUTING_SIGNATURE_PREFIX + self._routing_signature()
+        return NGINX_WILDCARD_MARKER in text and expected_signature in text
 
     def nginx_managed(self) -> bool:
         """Return whether NativeDev has already created any Nginx site state."""
@@ -373,6 +388,7 @@ class LocalDevManager:
         if not default_version:
             return (
                 f"{NGINX_WILDCARD_MARKER}\n"
+                f"{NGINX_ROUTING_SIGNATURE_PREFIX}{self._routing_signature()}\n"
                 "# Managed by NativeDev. Manual edits may be replaced.\n"
                 "# No PHP-FPM runtime is currently available.\n"
             )
@@ -457,6 +473,7 @@ class LocalDevManager:
         return "\n".join(
             [
                 NGINX_WILDCARD_MARKER,
+                NGINX_ROUTING_SIGNATURE_PREFIX + self._routing_signature(),
                 "# Managed by NativeDev. Manual edits may be replaced.",
                 f"# PHP-FPM workers run as local developer: {self.php.developer_user}",
                 "# New lowercase project directories under the park are routable without regeneration.",

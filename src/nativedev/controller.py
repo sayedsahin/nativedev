@@ -42,6 +42,78 @@ class NativeDevController:
         if self.localdev.nginx_managed() and shutil.which("nginx"):
             self.localdev.configure_nginx_sites()
 
+    def update_localdev_settings(self, park_dir: str, domain: str) -> None:
+        """Persist Local Development settings and reconcile derived infrastructure.
+
+        TLD changes update NativeDev's NetworkManager wildcard DNS when that
+        integration is supported. Existing wildcard Nginx state is rebuilt for
+        either TLD or park changes, including the new park ACL. When HTTPS is
+        enabled, its wildcard certificate is regenerated for the new TLD.
+
+        If any required reconciliation fails, restore both the previous config
+        and the previous NativeDev-managed infrastructure as best as possible.
+        """
+        with self._mutation_lock:
+            config = self.localdev.config
+            previous_park = config.park_dir
+            previous_domain = config.domain
+            park_changed = previous_park != park_dir
+            domain_changed = previous_domain != domain
+            if not park_changed and not domain_changed:
+                return
+
+            nginx_managed = self.localdev.nginx_managed()
+            https_enabled = bool(config.https_enabled)
+            dns_strategy = self.localdev.dns_strategy() if domain_changed else ""
+
+            config.park_dir = park_dir
+            config.domain = domain
+            try:
+                config.save()
+            except Exception:
+                config.park_dir = previous_park
+                config.domain = previous_domain
+                raise
+
+            try:
+                if domain_changed and dns_strategy == "networkmanager":
+                    self.localdev.configure_dns()
+
+                # HTTPS certificates contain the TLD, so a domain change must
+                # regenerate the NativeDev wildcard certificate as well.
+                if domain_changed and https_enabled:
+                    self.localdev.enable_https()
+                elif nginx_managed and (park_changed or domain_changed):
+                    self.localdev.configure_nginx_sites()
+            except Exception as exc:
+                config.park_dir = previous_park
+                config.domain = previous_domain
+                config.save()
+
+                rollback_errors: list[str] = []
+                if domain_changed and dns_strategy == "networkmanager":
+                    try:
+                        self.localdev.configure_dns()
+                    except Exception as rollback_exc:
+                        rollback_errors.append(f"DNS rollback failed: {rollback_exc}")
+
+                try:
+                    if domain_changed and https_enabled:
+                        self.localdev.enable_https()
+                    elif nginx_managed and (park_changed or domain_changed):
+                        self.localdev.configure_nginx_sites()
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"Nginx/HTTPS rollback failed: {rollback_exc}")
+
+                if rollback_errors:
+                    raise RuntimeError(
+                        f"Local Development settings could not be applied ({exc}); "
+                        + "; ".join(rollback_errors)
+                    ) from exc
+                raise RuntimeError(
+                    f"Local Development settings could not be applied and were rolled back: {exc}"
+                ) from exc
+
     def set_default_php(self, version: str) -> None:
         with self._mutation_lock:
             previous = self.php.cli_version()

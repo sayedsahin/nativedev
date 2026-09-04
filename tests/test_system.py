@@ -1102,12 +1102,22 @@ class PhpExtensionManagerTests(unittest.TestCase):
             )
             self.assertEqual(manager.removal_impact("8.4", "gd"), ["composer-plugin"])
 
-    def test_gui_places_php_extensions_immediately_after_php(self):
+    def test_gui_keeps_php_extensions_as_contextual_php_subpage(self):
         gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
-        pages = gui[gui.index("PAGES = ("):gui.index("def __init__", gui.index("PAGES = ("))]
-        self.assertLess(pages.index('("php", "PHP", PhpPage)'), pages.index('("extensions", "PHP Extensions", PhpExtensionsPage)'))
-        self.assertLess(pages.index('("extensions", "PHP Extensions", PhpExtensionsPage)'), pages.index('("node", "Node.js", NodePage)'))
+        pages = gui[gui.index("PAGES = ("):gui.index("PHP_SUBPAGES = (", gui.index("PAGES = ("))]
+        self.assertIn('("php", "PHP", PhpPage)', pages)
+        self.assertIn('("node", "Node.js", NodePage)', pages)
+        self.assertNotIn('PHP Extensions', pages)
+        self.assertNotIn('PHP Settings', pages)
+        subpages = gui[gui.index("PHP_SUBPAGES = ("):gui.index("def __init__", gui.index("PHP_SUBPAGES = ("))]
+        self.assertLess(subpages.index('("extensions", PhpExtensionsPage)'), subpages.index('("php_ini", PhpIniPage)'))
+        php_page = gui[gui.index("class PhpPage"):gui.index("class PhpExtensionsPage")]
+        self.assertIn('Gtk.Button(label="Extensions")', php_page)
+        self.assertIn('Gtk.Button(label="Settings")', php_page)
+        self.assertIn('open_php_subpage("extensions")', php_page)
+        self.assertIn('open_php_subpage("php_ini")', php_page)
         extension_page = gui[gui.index("class PhpExtensionsPage"):gui.index("class NodePage")]
+        self.assertIn("back=self.window.open_php_page", extension_page)
         self.assertIn("CLI and FPM are always changed together", extension_page)
         self.assertIn("Runtime / Core", extension_page)
         self.assertIn("Default PHP", extension_page)
@@ -1280,12 +1290,16 @@ class PhpIniManagerTests(unittest.TestCase):
                 self.assertFalse(cli.is_symlink())
                 self.assertFalse(fpm.is_symlink())
 
-    def test_gui_places_php_settings_after_extensions_and_before_node(self):
+    def test_gui_keeps_php_settings_as_contextual_php_subpage(self):
         gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
-        pages = gui[gui.index("PAGES = ("):gui.index("def __init__", gui.index("PAGES = ("))]
-        self.assertLess(pages.index('(\"extensions\", \"PHP Extensions\", PhpExtensionsPage)'), pages.index('(\"php_ini\", \"PHP Settings\", PhpIniPage)'))
-        self.assertLess(pages.index('(\"php_ini\", \"PHP Settings\", PhpIniPage)'), pages.index('(\"node\", \"Node.js\", NodePage)'))
+        pages = gui[gui.index("PAGES = ("):gui.index("PHP_SUBPAGES = (", gui.index("PAGES = ("))]
+        self.assertNotIn('PHP Extensions', pages)
+        self.assertNotIn('PHP Settings', pages)
+        subpages = gui[gui.index("PHP_SUBPAGES = ("):gui.index("def __init__", gui.index("PHP_SUBPAGES = ("))]
+        self.assertIn('("extensions", PhpExtensionsPage)', subpages)
+        self.assertIn('("php_ini", PhpIniPage)', subpages)
         php_ini_page = gui[gui.index("class PhpIniPage"):gui.index("class NodePage")]
+        self.assertIn("back=self.window.open_php_page", php_ini_page)
         self.assertIn("99-nativedev.ini", php_ini_page)
         self.assertIn("Extension loading is managed on PHP Extensions", php_ini_page)
         self.assertIn("newline, carriage-return and NUL", php_ini_page)
@@ -1309,6 +1323,19 @@ class PhpIniManagerTests(unittest.TestCase):
         self.assertIn("apply({}) performs reset", php_ini_page)
         self.assertNotIn("reset.set_sensitive", php_ini_page)
 
+
+    def test_main_window_registers_php_subpages_without_sidebar_rows(self):
+        gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
+        main = gui[gui.index("class MainWindow"):gui.index("class NativeDevApplication")]
+        self.assertIn("for key, klass in self.PHP_SUBPAGES:", main)
+        self.assertIn("self.stack.add_named(page, key)", main)
+        self.assertIn("def open_php_subpage(self, key: str)", main)
+        self.assertIn('self.stack.set_visible_child_name("php")', main)
+        # Sidebar rows are created only by the top-level PAGES loop.
+        sidebar_loop = main[main.index("for key, title_text, klass in self.PAGES:"):main.index("for key, klass in self.PHP_SUBPAGES:")]
+        self.assertIn("self.sidebar.append(row)", sidebar_loop)
+        subpage_loop = main[main.index("for key, klass in self.PHP_SUBPAGES:"):main.index("self.sidebar.connect", main.index("for key, klass in self.PHP_SUBPAGES:"))]
+        self.assertNotIn("self.sidebar.append", subpage_loop)
 
 
 if __name__ == "__main__":

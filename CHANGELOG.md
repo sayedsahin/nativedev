@@ -2,6 +2,13 @@
 
 ## 0.1.9 - 2026-09-03
 
+- Simplified PHP navigation: **PHP Extensions** and **PHP Settings** are now contextual subpages opened from PHP instead of separate sidebar destinations. Both subpages keep PHP selected in the sidebar and provide a direct `← PHP` back action.
+- Added a dedicated **PHP Settings** page for per-version custom INI overrides. NativeDev never edits distro/Sury `php.ini`; it owns only `mods-available/nativedev.ini` and matching `99-nativedev.ini` links for CLI and FPM.
+- Added strict root-side INI injection validation: directive names must match `^[a-zA-Z][a-zA-Z0-9_.]*$`, and values containing newline, carriage return or NUL are rejected with an explicit single-line error. Extension-loading directives are blocked because PHP Extensions remains the sole extension enable/disable manager.
+- INI changes are atomic and transactional: CLI/FPM configuration is validated, a running FPM is reloaded (restart fallback), and NativeDev-owned files/links are restored if validation or reload fails. FPM is never started merely because settings were saved.
+- Added user-owned per-version INI profile backups under `~/.config/nativedev/php/`; PHP uninstall detaches the active NativeDev INI layer while retaining the profile for explicit restore after reinstall.
+- Privileged RPC advanced to protocol 9 for semantic `php.ini.apply` / `php.ini.reset` operations; no client-supplied root path, raw INI content or SAPI selector is accepted.
+- Expanded regression coverage to 75 tests, including INI injection rejection, fixed NativeDev paths/CLI+FPM links, saved profiles, PHP-uninstall INI orchestration, and contextual PHP subpage navigation.
 - Simplified PHP Extensions rows: normal states no longer show redundant `Available` / `Installed · Enabled` / `Installed · Disabled` pills. The far-right action buttons communicate those states; only read-only **Built-in** and **Unavailable** rows retain a status pill.
 - Added runtime-driven PHP pre-release detection. Alpha/beta/RC/dev runtimes show a compact **Pre-release** indicator in the PHP Extensions version header.
 - Replaced the mutation-time `Working…` status text with a GTK spinner in the status bar; success and error messages still appear when the operation finishes.
@@ -27,8 +34,8 @@
 - Fixed installed-but-disabled/missing PHP modules after reinstall. The explicit PHP Install flow restores missing UCF-managed `mods-available/*.ini` definitions with `UCF_FORCE_CONFFMISS=1`, then enables the baseline for both CLI and FPM. User module choices made later are not changed by normal refresh/service operations.
 - PHP uninstall now discovers and removes every installed package scoped to that PHP version, including extensions installed after the original NativeDev install.
 - PHP and Node version lists now render installed versions before available versions. PHP FPM Disable now means **Disable & Stop**, while CLI PHP remains independent.
-- Privileged RPC is now protocol 8. Protocol 5 introduced restricted PHP package/module operations and Debian Node migration; protocol 6 added removal-only PostgreSQL/MariaDB runtime cleanup; protocol 7 added curated PHP-extension operations; protocol 8 expands the root-side extension allowlist and keeps client/helper catalogs synchronized. Client/helper mismatches fail closed.
-- Expanded regression coverage to 63 tests, including one-way provider semantics, migration safeguards, wildcard routing, service-runtime cleanup, installed-first ordering, UCF module restoration, per-version PHP extension management, catalog/helper consistency, and privileged protocol operations.
+- Privileged RPC is now protocol 9. Protocol 5 introduced restricted PHP package/module operations and Debian Node migration; protocol 6 added removal-only PostgreSQL/MariaDB runtime cleanup; protocol 7 added curated PHP-extension operations; protocol 8 expanded the extension allowlist; protocol 9 adds semantic NativeDev-owned PHP INI apply/reset. Client/helper mismatches fail closed.
+- Regression coverage includes one-way provider semantics, migration safeguards, wildcard routing, service-runtime cleanup, installed-first ordering, UCF module restoration, per-version PHP extension/INI management, catalog/helper consistency, and privileged protocol operations.
 
 ## 0.1.8 - 2026-09-02
 

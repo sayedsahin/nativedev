@@ -39,6 +39,10 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 - Keep package presence separate from enabled state: an installed-but-disabled extension remains installed until explicitly uninstalled, and ordinary refresh never overrides that choice. Normal rows use their far-right action buttons as the state cue; only **Built-in** and **Unavailable** rows show a status pill
 - Detect alpha/beta/RC/dev PHP runtimes from the selected runtime itself and mark them **Pre-release** on the Extensions page
 - Run an APT removal simulation before extension uninstall and block when another manually installed package would be removed; PHP configuration is not purged
+- Manage per-version custom PHP configuration from a dedicated **PHP Settings** page without editing Debian/Sury `php.ini`. NativeDev owns only `/etc/php/X.Y/mods-available/nativedev.ini` plus `cli/fpm/conf.d/99-nativedev.ini`, so CLI and FPM receive the same override layer
+- Validate INI directives at both the application and root-helper boundary with `^[a-zA-Z][a-zA-Z0-9_.]*$`; values containing newline, carriage return or NUL are rejected rather than stripped, preventing one value from injecting another directive line
+- Keep extension loading on **PHP Extensions**: `extension`, `zend_extension` and `extension_dir` are rejected by PHP Settings. INI apply/reset validates PHP CLI + FPM, reloads FPM only when already running, and rolls back the NativeDev-owned files if validation/reload fails
+- Save each applied NativeDev INI profile under `~/.config/nativedev/php/X.Y.json` (mode `0600`). PHP uninstall removes the active `/etc/php/X.Y` NativeDev layer but retains the saved profile for an explicit restore after reinstall
 
 ### Node.js
 - Detect and manage an existing Debian `nodejs`/`npm` installation without replacing it merely because NativeDev starts
@@ -88,7 +92,7 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 - A normal `./install.sh` installation places the privileged helper at `/usr/lib/nativedev/privileged_helper.py` as a root-owned, non-user-writable file
 - The first privileged action launches that restricted helper through a dedicated installed Polkit action; authorization is reused for the rest of the app session. `./run.sh` explicitly opts into the source-tree helper for development only.
 - The privileged helper accepts **structured NativeDev operations**, not client-supplied command argv. Package/service/file targets are validated again on the root side; it is not an arbitrary root shell.
-- GUI and helper use privileged RPC protocol **7** in this release; `install.sh` installs the matching root-owned helper so stale protocol versions fail closed instead of executing an incompatible privileged request.
+- GUI and helper use privileged RPC protocol **9** in this release; `install.sh` installs the matching root-owned helper so stale protocol versions fail closed instead of executing an incompatible privileged request.
 - `subprocess` calls use argv lists; no generic `shell=True`
 - NVM is the only shell-sourced integration, with shell-quoted arguments
 - NativeDev writes distinct, named configuration files instead of editing unrelated user configs
@@ -97,16 +101,17 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 
 ## Screens
 
-The GTK4 UI has eight deliberately small pages:
+The GTK4 UI has seven top-level sidebar destinations:
 
 1. Dashboard
 2. Local development
 3. Services & tools
 4. PHP
-5. PHP Extensions
-6. Node.js
-7. Projects
-8. Doctor
+5. Node.js
+6. Projects
+7. Doctor
+
+**PHP Extensions** and **PHP Settings** are contextual subpages opened from PHP rather than separate sidebar destinations. Each subpage provides a direct back action to PHP.
 
 It uses GTK CSS only; no libadwaita, WebView, Node/Electron, Qt, database, or extra Python UI framework.
 

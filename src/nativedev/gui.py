@@ -58,9 +58,20 @@ def label(text: str = "", css: str | None = None, *, wrap: bool = False) -> Gtk.
     return widget
 
 
-def page_header(title: str, subtitle: str, refresh: Callable | None = None) -> Gtk.Widget:
+def page_header(
+    title: str,
+    subtitle: str,
+    refresh: Callable | None = None,
+    *,
+    back: Callable | None = None,
+) -> Gtk.Widget:
     box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
     box.set_margin_bottom(18)
+    if back:
+        back_button = Gtk.Button(label="← PHP")
+        back_button.set_valign(Gtk.Align.CENTER)
+        back_button.connect("clicked", lambda *_: back())
+        box.append(back_button)
     copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
     copy.set_hexpand(True)
     copy.append(label(title, "page-title"))
@@ -216,6 +227,18 @@ class PhpPage(Page):
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
         self.body.append(page_header("PHP", "One active PHP provider: Debian system PHP or Sury multi-version PHP.", self.refresh))
+        tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        tools.append(label("Manage", "section-title"))
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        tools.append(spacer)
+        extensions = Gtk.Button(label="Extensions")
+        extensions.connect("clicked", lambda *_: self.window.open_php_subpage("extensions"))
+        tools.append(extensions)
+        settings = Gtk.Button(label="Settings")
+        settings.connect("clicked", lambda *_: self.window.open_php_subpage("php_ini"))
+        tools.append(settings)
+        self.body.append(tools)
         self.repo_card = card()
         self.versions_card = card()
         self.body.append(self.repo_card)
@@ -508,6 +531,7 @@ class PhpExtensionsPage(Page):
                 "PHP Extensions",
                 "Install, remove, enable or disable extensions for one PHP version. CLI and FPM are always changed together.",
                 self.refresh,
+                back=self.window.open_php_page,
             )
         )
         self.version_card = card()
@@ -758,6 +782,7 @@ class PhpIniPage(Page):
                 "PHP Settings",
                 "Per-version NativeDev INI overrides. Debian/Sury php.ini files are never edited; CLI and FPM use the same override layer.",
                 self.refresh,
+                back=self.window.open_php_page,
             )
         )
         self.version_card = card()
@@ -1755,16 +1780,20 @@ class DoctorPage(Page):
 
 
 class MainWindow(Gtk.ApplicationWindow):
+    # Only top-level destinations belong in the sidebar. PHP Extensions and PHP
+    # Settings are contextual subpages opened from the PHP page.
     PAGES = (
         ("dashboard", "Dashboard", DashboardPage),
         ("local", "Local development", LocalDevPage),
         ("services", "Services & tools", ServicesPage),
         ("php", "PHP", PhpPage),
-        ("extensions", "PHP Extensions", PhpExtensionsPage),
-        ("php_ini", "PHP Settings", PhpIniPage),
         ("node", "Node.js", NodePage),
         ("projects", "Projects", ProjectsPage),
         ("doctor", "Doctor", DoctorPage),
+    )
+    PHP_SUBPAGES = (
+        ("extensions", PhpExtensionsPage),
+        ("php_ini", PhpIniPage),
     )
 
     def __init__(self, application: Gtk.Application, context: AppContext):
@@ -1812,6 +1841,7 @@ class MainWindow(Gtk.ApplicationWindow):
         root.append(self.statusbar)
         self.set_child(root)
 
+        self.pages: dict[str, Page] = {}
         for key, title_text, klass in self.PAGES:
             row = Gtk.ListBoxRow()
             row.set_name(key)
@@ -1822,7 +1852,14 @@ class MainWindow(Gtk.ApplicationWindow):
             nav_label.set_margin_end(14)
             row.set_child(nav_label)
             self.sidebar.append(row)
-            self.stack.add_named(klass(self), key)
+            page = klass(self)
+            self.pages[key] = page
+            self.stack.add_named(page, key)
+
+        for key, klass in self.PHP_SUBPAGES:
+            page = klass(self)
+            self.pages[key] = page
+            self.stack.add_named(page, key)
 
         self.sidebar.connect("row-selected", self._on_row_selected)
         self.sidebar.select_row(self.sidebar.get_row_at_index(0))
@@ -1834,6 +1871,18 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_row_selected(self, _listbox, row):
         if row:
             self.stack.set_visible_child_name(row.get_name())
+
+    def open_php_subpage(self, key: str) -> None:
+        if key not in {name for name, _klass in self.PHP_SUBPAGES}:
+            raise RuntimeError(f"Unknown PHP subpage: {key}")
+        page = self.pages[key]
+        page.refresh()
+        self.stack.set_visible_child_name(key)
+
+    def open_php_page(self) -> None:
+        page = self.pages["php"]
+        page.refresh()
+        self.stack.set_visible_child_name("php")
 
     def set_activity(self, active: bool, message: str, *, error: bool = False):
         self.status.remove_css_class("error-text")

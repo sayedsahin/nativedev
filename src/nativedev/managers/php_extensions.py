@@ -170,6 +170,21 @@ class PhpExtensionManager:
             for module in item.modules
         )
 
+    def runtime_version(self, version: str) -> str:
+        """Return the selected runtime's full PHP_VERSION string when available."""
+        if version not in self.php.installed_versions():
+            return ""
+        binary = Path(f"/usr/bin/php{version}")
+        if not binary.is_file():
+            return ""
+        result = self.runner.run([str(binary), "-r", "echo PHP_VERSION;"], timeout=20)
+        return result.stdout.strip() if result.ok else ""
+
+    def is_prerelease(self, version: str) -> bool:
+        """Detect alpha/beta/RC/dev runtimes from PHP's own version string."""
+        runtime = self.runtime_version(version)
+        return bool(re.search(r"(?:alpha|beta|rc|dev)", runtime, re.IGNORECASE))
+
     def runtime_modules(self, version: str) -> list[str]:
         """Return PHP runtime/common modules that are not separate extension packages.
 

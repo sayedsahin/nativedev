@@ -2,6 +2,9 @@
 
 ## 0.1.9 - 2026-09-03
 
+- Simplified PHP Extensions rows: normal states no longer show redundant `Available` / `Installed · Enabled` / `Installed · Disabled` pills. The far-right action buttons communicate those states; only read-only **Built-in** and **Unavailable** rows retain a status pill.
+- Added runtime-driven PHP pre-release detection. Alpha/beta/RC/dev runtimes show a compact **Pre-release** indicator in the PHP Extensions version header.
+- Replaced the mutation-time `Working…` status text with a GTK spinner in the status bar; success and error messages still appear when the operation finishes.
 - Fixed PHP Extensions refresh after changing the global default PHP: an explicit page Refresh now reselects the current `/usr/bin/php` default, while dropdown changes and extension actions preserve the version being edited.
 - Reworked extension rows so the versioned package name and action buttons stay together on the left, with the compact state pill aligned at the far right. Preserved the app-wide compact `button { min-height: 15px; }` sizing.
 - PHP Extensions now shows the selected runtime's non-package core/common modules (for example JSON, OpenSSL and PDO) as read-only **Built-in** rows with no action buttons. Runtime inventory is detected from `phpX.Y -n -m` plus `phpX.Y-common`, not hard-coded per PHP release.
@@ -25,7 +28,7 @@
 - PHP uninstall now discovers and removes every installed package scoped to that PHP version, including extensions installed after the original NativeDev install.
 - PHP and Node version lists now render installed versions before available versions. PHP FPM Disable now means **Disable & Stop**, while CLI PHP remains independent.
 - Privileged RPC is now protocol 8. Protocol 5 introduced restricted PHP package/module operations and Debian Node migration; protocol 6 added removal-only PostgreSQL/MariaDB runtime cleanup; protocol 7 added curated PHP-extension operations; protocol 8 expands the root-side extension allowlist and keeps client/helper catalogs synchronized. Client/helper mismatches fail closed.
-- Expanded regression coverage to 62 tests, including one-way provider semantics, migration safeguards, wildcard routing, service-runtime cleanup, installed-first ordering, UCF module restoration, per-version PHP extension management, catalog/helper consistency, and privileged protocol operations.
+- Expanded regression coverage to 63 tests, including one-way provider semantics, migration safeguards, wildcard routing, service-runtime cleanup, installed-first ordering, UCF module restoration, per-version PHP extension management, catalog/helper consistency, and privileged protocol operations.
 
 ## 0.1.8 - 2026-09-02
 

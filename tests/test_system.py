@@ -890,7 +890,7 @@ class MissingExecutableRegressionTests(unittest.TestCase):
 
 
 class PhpExtensionManagerTests(unittest.TestCase):
-    def _manager(self, root, *, installed=None, apt_simulation="", manual="", runtime_modules="", common_files=""):
+    def _manager(self, root, *, installed=None, apt_simulation="", manual="", runtime_modules="", runtime_version="", common_files=""):
         from nativedev.managers.php_extensions import PhpExtensionManager
         from nativedev.system import CommandResult
 
@@ -910,6 +910,8 @@ class PhpExtensionManagerTests(unittest.TestCase):
                     return CommandResult(list(argv), 0, manual, "")
                 if len(argv) >= 3 and str(argv[0]).endswith("php8.4") and argv[1:] == ["-n", "-m"]:
                     return CommandResult(list(argv), 0, runtime_modules, "")
+                if len(argv) >= 3 and str(argv[0]).endswith("php8.4") and argv[1:] == ["-r", "echo PHP_VERSION;"]:
+                    return CommandResult(list(argv), 0, runtime_version, "")
                 if argv[:3] == ["dpkg-query", "-L", "php8.4-common"]:
                     return CommandResult(list(argv), 0, common_files, "")
                 return CommandResult(list(argv), 0, "", "")
@@ -1017,6 +1019,16 @@ class PhpExtensionManagerTests(unittest.TestCase):
             self.assertIn("fileinfo", modules)
             self.assertNotIn("Core", modules)
 
+    def test_prerelease_detection_uses_runtime_php_version(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            manager, _runner, _apt, _systemd = self._manager(td, runtime_version="8.4.0RC2")
+            with patch("nativedev.managers.php_extensions.Path.is_file", return_value=True):
+                self.assertTrue(manager.is_prerelease("8.4"))
+            manager, _runner, _apt, _systemd = self._manager(td, runtime_version="8.4.3")
+            with patch("nativedev.managers.php_extensions.Path.is_file", return_value=True):
+                self.assertFalse(manager.is_prerelease("8.4"))
+
     def test_optional_catalog_includes_common_debian_sury_suggestions(self):
         from nativedev.managers.php_extensions import EXTENSIONS_BY_KEY
         for key in ("apcu", "bz2", "odbc", "snmp", "tidy", "mongodb", "ssh2", "yaml", "pcov"):
@@ -1051,16 +1063,26 @@ class PhpExtensionManagerTests(unittest.TestCase):
         self.assertIn("def refresh_selected(self):", extension_page)
         self.assertIn("self._refresh(prefer_default=False)", extension_page)
         self.assertIn("if prefer_default and cli in versions:", extension_page)
-        # Package name and actions stay together on the left; a flexible spacer
-        # pushes the compact status pill to the far right of each extension row.
+        # Normal extension states are communicated entirely by the far-right
+        # action buttons; only Built-in and Unavailable retain a status pill.
         package_rows = extension_page[extension_page.index("row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)"):]
+        self.assertIn("name.set_hexpand(True)", package_rows)
         self.assertLess(package_rows.index("row.append(name)"), package_rows.index("row.append(actions)"))
-        self.assertLess(package_rows.index("row.append(actions)"), package_rows.index("spacer.set_hexpand(True)"))
-        self.assertLess(package_rows.index("spacer.set_hexpand(True)"), package_rows.index("row.append(status)"))
+        self.assertNotIn('status_pill("Installed · Enabled"', package_rows)
+        self.assertNotIn('status_pill("Installed · Disabled"', package_rows)
+        self.assertNotIn('status_pill("Available"', package_rows)
+        self.assertIn('status_pill("Unavailable", False)', package_rows)
+        self.assertIn('status_pill("Pre-release", False)', extension_page)
+        self.assertIn('self.context.php_extensions.is_prerelease(selected)', extension_page)
         style = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "style.css").read_text()
         self.assertIn(".extension-status", style)
         self.assertIn("padding: 1px 6px", style)
         self.assertIn("button {\n  min-height: 15px;", style)
+        main_window = gui[gui.index("class MainWindow"):gui.index("class NativeDevApplication")]
+        self.assertIn("self.activity_spinner = Gtk.Spinner()", main_window)
+        self.assertIn("self.activity_spinner.start()", main_window)
+        self.assertIn("self.activity_spinner.stop()", main_window)
+        self.assertIn('self.status.set_text("")', main_window)
 
 
 if __name__ == "__main__":

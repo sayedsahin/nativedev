@@ -556,6 +556,7 @@ class PhpExtensionsPage(Page):
                 "default": cli if cli in versions else "",
                 "states": states,
                 "runtime_modules": runtime_modules,
+                "prerelease": self.context.php_extensions.is_prerelease(selected) if selected else False,
             }
 
         def done(data):
@@ -588,6 +589,10 @@ class PhpExtensionsPage(Page):
         row.append(status_pill(provider_name, data["provider"] in {"debian", "sury"}))
         if default_version:
             row.append(status_pill(f"Default PHP {default_version}", True))
+        if data.get("prerelease"):
+            prerelease = status_pill("Pre-release", False)
+            prerelease.add_css_class("extension-status")
+            row.append(prerelease)
         children.append(row)
         children.append(label(
             "Every action applies to CLI and FPM together. Refresh only reads state; it never re-enables an extension you disabled.",
@@ -648,6 +653,7 @@ class PhpExtensionsPage(Page):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
             row.add_css_class("service-row")
             name = label(state.package, "row-title")
+            name.set_hexpand(True)
             tooltip = spec.title
             if spec.note:
                 tooltip += f" — {spec.note}"
@@ -655,7 +661,6 @@ class PhpExtensionsPage(Page):
             row.append(name)
 
             actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            actions.set_margin_start(8)
 
             if not state.installed and state.installable:
                 install = Gtk.Button(label="Install")
@@ -722,21 +727,10 @@ class PhpExtensionsPage(Page):
 
             if actions.get_first_child():
                 row.append(actions)
-
-            spacer = Gtk.Box()
-            spacer.set_hexpand(True)
-            row.append(spacer)
-
-            if state.installed and state.enabled:
-                status = status_pill("Installed · Enabled", True)
-            elif state.installed:
-                status = status_pill("Installed · Disabled", None)
-            elif state.installable:
-                status = status_pill("Available", None)
-            else:
+            elif not state.installable:
                 status = status_pill("Unavailable", False)
-            status.add_css_class("extension-status")
-            row.append(status)
+                status.add_css_class("extension-status")
+                row.append(status)
 
             children.append(row)
 
@@ -1515,12 +1509,19 @@ class MainWindow(Gtk.ApplicationWindow):
         self.stack.set_vexpand(True)
         content.append(self.stack)
 
-        self.status = label("Ready", "statusbar")
-        self.status.set_margin_start(14)
-        self.status.set_margin_end(14)
-        self.status.set_margin_top(7)
-        self.status.set_margin_bottom(7)
-        root.append(self.status)
+        self.statusbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.statusbar.add_css_class("statusbar")
+        self.statusbar.set_margin_start(14)
+        self.statusbar.set_margin_end(14)
+        self.statusbar.set_margin_top(7)
+        self.statusbar.set_margin_bottom(7)
+        self.activity_spinner = Gtk.Spinner()
+        self.activity_spinner.set_visible(False)
+        self.statusbar.append(self.activity_spinner)
+        self.status = label("Ready")
+        self.status.set_hexpand(True)
+        self.statusbar.append(self.status)
+        root.append(self.statusbar)
         self.set_child(root)
 
         for key, title_text, klass in self.PAGES:
@@ -1547,13 +1548,20 @@ class MainWindow(Gtk.ApplicationWindow):
             self.stack.set_visible_child_name(row.get_name())
 
     def set_activity(self, active: bool, message: str, *, error: bool = False):
-        self.status.set_text(message)
         self.status.remove_css_class("error-text")
         self.status.remove_css_class("muted")
+        if active:
+            self.activity_spinner.set_visible(True)
+            self.activity_spinner.start()
+            self.status.set_text("")
+            self.status.add_css_class("muted")
+            return
+
+        self.activity_spinner.stop()
+        self.activity_spinner.set_visible(False)
+        self.status.set_text(message)
         if error:
             self.status.add_css_class("error-text")
-        elif active:
-            self.status.add_css_class("muted")
 
     def _on_close(self, *_):
         self.worker.shutdown()

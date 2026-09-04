@@ -33,6 +33,12 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 - Uninstall a PHP version together with all currently installed `phpX.Y` / `phpX.Y-*` packages for that version
 - Select the default `/usr/bin/php` with `update-alternatives`; the current Default button is disabled
 - Create a NativeDev-owned per-user PHP-FPM pool for each version used by `*.test`; PHP workers run as the logged-in developer while Debian/Sury's `www` pool stays untouched
+- Manage extensions from a dedicated **PHP Extensions** page with an installed-PHP version selector; the current CLI default is preselected and explicitly marked. Install/Uninstall/Enable/Disable always apply to CLI and FPM together, never as separate SAPI controls
+- Show selected-version runtime/core modules such as JSON, OpenSSL, PDO and php-common modules as read-only **Built-in** inventory with no package actions
+- Curated extension catalog includes database/common packages plus APCu, BZip2, DBA, Enchant, GMP, IMAP, LDAP, ODBC, Pspell, SNMP, SOAP, Tidy, Redis, Memcached, Imagick, AMQP, MongoDB, SSH2, SMB Client, YAML, Igbinary, MessagePack, PCOV and Xdebug; unavailable packages are shown but cannot be installed
+- Keep package presence separate from enabled state: an installed-but-disabled extension remains installed until explicitly uninstalled, and ordinary refresh never overrides that choice. Normal rows use their far-right action buttons as the state cue; only **Built-in** and **Unavailable** rows show a status pill
+- Detect alpha/beta/RC/dev PHP runtimes from the selected runtime itself and mark them **Pre-release** on the Extensions page
+- Run an APT removal simulation before extension uninstall and block when another manually installed package would be removed; PHP configuration is not purged
 
 ### Node.js
 - Detect and manage an existing Debian `nodejs`/`npm` installation without replacing it merely because NativeDev starts
@@ -82,24 +88,25 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 - A normal `./install.sh` installation places the privileged helper at `/usr/lib/nativedev/privileged_helper.py` as a root-owned, non-user-writable file
 - The first privileged action launches that restricted helper through a dedicated installed Polkit action; authorization is reused for the rest of the app session. `./run.sh` explicitly opts into the source-tree helper for development only.
 - The privileged helper accepts **structured NativeDev operations**, not client-supplied command argv. Package/service/file targets are validated again on the root side; it is not an arbitrary root shell.
-- GUI and helper use privileged RPC protocol **5** in this release; `install.sh` installs the matching root-owned helper so stale protocol versions fail closed instead of executing an incompatible privileged request.
+- GUI and helper use privileged RPC protocol **7** in this release; `install.sh` installs the matching root-owned helper so stale protocol versions fail closed instead of executing an incompatible privileged request.
 - `subprocess` calls use argv lists; no generic `shell=True`
 - NVM is the only shell-sourced integration, with shell-quoted arguments
 - NativeDev writes distinct, named configuration files instead of editing unrelated user configs
 - The GUI confirms system-changing operations
-- Long-running operations run off the GTK main thread; read-only probes may run concurrently, while all mutations are serialized through one global queue/lock.
+- Long-running operations run off the GTK main thread; read-only probes may run concurrently, while all mutations are serialized through one global queue/lock. Mutations show a GTK spinner instead of a `Working…` message, then surface the final success/error text.
 
 ## Screens
 
-The GTK4 UI has seven deliberately small pages:
+The GTK4 UI has eight deliberately small pages:
 
 1. Dashboard
 2. Local development
 3. Services & tools
 4. PHP
-5. Node.js
-6. Projects
-7. Doctor
+5. PHP Extensions
+6. Node.js
+7. Projects
+8. Doctor
 
 It uses GTK CSS only; no libadwaita, WebView, Node/Electron, Qt, database, or extra Python UI framework.
 

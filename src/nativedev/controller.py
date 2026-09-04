@@ -7,6 +7,7 @@ from typing import Callable, TypeVar
 
 from .managers.localdev import LocalDevManager
 from .managers.php import PhpManager
+from .managers.php_ini import PhpIniManager
 from .managers.node import NodeManager
 
 
@@ -25,10 +26,11 @@ class NativeDevController:
     non-GUI callers as well.
     """
 
-    def __init__(self, php: PhpManager, localdev: LocalDevManager, node: NodeManager | None = None):
+    def __init__(self, php: PhpManager, localdev: LocalDevManager, node: NodeManager | None = None, php_ini: PhpIniManager | None = None):
         self.php = php
         self.localdev = localdev
         self.node = node
+        self.php_ini = php_ini
         self._mutation_lock = threading.RLock()
 
     def run_mutation(self, fn: Callable[..., T], *args, **kwargs) -> T:
@@ -86,7 +88,21 @@ class NativeDevController:
 
     def uninstall_php(self, version: str) -> None:
         with self._mutation_lock:
-            self.php.uninstall_version(version)
+            detached_ini = False
+            if self.php_ini is not None and self.php_ini.has_active_override(version):
+                self.php_ini.detach_runtime(version)
+                detached_ini = True
+            try:
+                self.php.uninstall_version(version)
+            except Exception as exc:
+                if detached_ini:
+                    try:
+                        self.php_ini.restore_profile(version)
+                    except Exception as rollback_exc:
+                        raise RuntimeError(
+                            f"PHP {version} uninstall failed ({exc}); NativeDev INI rollback also failed ({rollback_exc})"
+                        ) from exc
+                raise
             # Project preferences automatically fall back to Default when a
             # pinned FPM version disappears; regenerate any managed site file.
             try:

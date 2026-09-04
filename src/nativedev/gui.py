@@ -744,6 +744,286 @@ class PhpExtensionsPage(Page):
             container.append(child)
 
 
+
+class PhpIniPage(Page):
+    def __init__(self, window: "MainWindow"):
+        super().__init__(window)
+        self.selected_version: str | None = None
+        self.pending_settings: dict[str, str] = {}
+        self.applied_settings: dict[str, str] = {}
+        self.effective_settings: dict[str, str] = {}
+        self.saved_profile: dict[str, str] = {}
+        self.body.append(
+            page_header(
+                "PHP Settings",
+                "Per-version NativeDev INI overrides. Debian/Sury php.ini files are never edited; CLI and FPM use the same override layer.",
+                self.refresh,
+            )
+        )
+        self.version_card = card()
+        self.settings_card = card()
+        self.body.append(self.version_card)
+        self.body.append(self.settings_card)
+        self.refresh()
+
+    def refresh(self):
+        self._refresh(prefer_default=True)
+
+    def refresh_selected(self):
+        self._refresh(prefer_default=False)
+
+    def _refresh(self, *, prefer_default: bool):
+        self._replace(self.version_card, [label("Loading PHP versions…", "muted")])
+        self._replace(self.settings_card, [label("Loading PHP settings…", "muted")])
+
+        def collect():
+            versions = sorted(
+                self.context.php_ini.installed_versions(),
+                key=self.context.php._version_key,
+                reverse=True,
+            )
+            cli = self.context.php.cli_version()
+            selected = ""
+            if prefer_default and cli in versions:
+                selected = cli
+            elif self.selected_version in versions:
+                selected = self.selected_version or ""
+            elif cli in versions:
+                selected = cli
+            elif versions:
+                selected = versions[0]
+
+            settings = self.context.php_ini.settings(selected) if selected else {}
+            effective = self.context.php_ini.effective_settings(selected, tuple(settings)) if settings else {}
+            profile = self.context.php_ini.saved_profile(selected) if selected else {}
+            return {
+                "provider": self.context.php.provider(),
+                "versions": versions,
+                "selected": selected,
+                "default": cli if cli in versions else "",
+                "settings": settings,
+                "effective": effective,
+                "profile": profile,
+            }
+
+        def done(data):
+            self.selected_version = data["selected"] or None
+            self.pending_settings = dict(data["settings"])
+            self.applied_settings = dict(data["settings"])
+            self.effective_settings = dict(data["effective"])
+            self.saved_profile = dict(data["profile"])
+            self._build_version_selector(data)
+            self._render_settings_card()
+            return False
+
+        self.worker.submit(collect, done, lambda exc: self.window.set_activity(False, str(exc), error=True))
+
+    def _build_version_selector(self, data):
+        children = [label("PHP version", "section-title")]
+        versions = data["versions"]
+        if not versions:
+            children.append(label("Install a PHP runtime before managing PHP settings.", "muted", wrap=True))
+            self._replace(self.version_card, children)
+            return
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        default_version = data.get("default", "")
+        version_labels = [
+            f"PHP {version} · Default" if version == default_version else f"PHP {version}"
+            for version in versions
+        ]
+        dropdown = Gtk.DropDown.new_from_strings(version_labels)
+        dropdown.set_selected(versions.index(data["selected"]))
+        row.append(dropdown)
+        provider_name = {"debian": "Debian", "sury": "Sury"}.get(data["provider"], data["provider"].title())
+        row.append(status_pill(provider_name, data["provider"] in {"debian", "sury"}))
+        if default_version:
+            row.append(status_pill(f"Default PHP {default_version}", True))
+        children.append(row)
+        children.append(
+            label(
+                "NativeDev writes only 99-nativedev.ini for CLI and FPM. Extension loading is managed on PHP Extensions; extension/zend_extension directives are rejected here.",
+                "muted",
+                wrap=True,
+            )
+        )
+
+        def changed(widget, _param):
+            index = widget.get_selected()
+            if index < 0 or index >= len(versions):
+                return
+            version = versions[index]
+            if version == self.selected_version:
+                return
+            self.selected_version = version
+            self.refresh_selected()
+
+        dropdown.connect("notify::selected", changed)
+        self._replace(self.version_card, children)
+
+    def _render_settings_card(self):
+        version = self.selected_version
+        children: list[Gtk.Widget] = [label("NativeDev overrides", "section-title")]
+        if not version:
+            children.append(label("No PHP version selected.", "muted"))
+            self._replace(self.settings_card, children)
+            return
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        save = Gtk.Button(label="Save")
+        save.add_css_class("suggested-action")
+        save.connect(
+            "clicked",
+            lambda *_: self.action(
+                save,
+                lambda: self.context.php_ini.apply(version, dict(self.pending_settings)),
+                success_message=f"PHP {version} settings saved",
+                after=self.refresh_selected,
+            ),
+        )
+        actions.append(save)
+
+        reset = Gtk.Button(label="Reset")
+        reset.set_sensitive(bool(self.applied_settings or self.saved_profile))
+        if reset.get_sensitive():
+            reset.connect(
+                "clicked",
+                lambda *_: confirm(
+                    self.window,
+                    f"Reset PHP {version} NativeDev settings?",
+                    "Only NativeDev's per-version override file and CLI/FPM links will be removed. Debian/Sury php.ini files and PHP extension configuration are not changed.",
+                    lambda: self.action(
+                        reset,
+                        lambda: self.context.php_ini.reset(version),
+                        success_message=f"PHP {version} NativeDev settings reset",
+                        after=self.refresh_selected,
+                    ),
+                ),
+            )
+        actions.append(reset)
+        children.append(actions)
+
+        if self.saved_profile and not self.applied_settings:
+            restore_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            restore_note = label(
+                f"Saved NativeDev settings were found for PHP {version}, but they are not currently active.",
+                "muted",
+                wrap=True,
+            )
+            restore_note.set_hexpand(True)
+            restore_box.append(restore_note)
+            restore = Gtk.Button(label="Restore saved settings")
+            restore.add_css_class("suggested-action")
+            restore.connect(
+                "clicked",
+                lambda *_: confirm(
+                    self.window,
+                    f"Restore PHP {version} settings?",
+                    "NativeDev will restore the saved per-version override profile for CLI and FPM, validate both runtimes, and reload FPM only if it is already running.",
+                    lambda: self.action(
+                        restore,
+                        lambda: self.context.php_ini.restore_profile(version),
+                        success_message=f"PHP {version} settings restored",
+                        after=self.refresh_selected,
+                    ),
+                ),
+            )
+            restore_box.append(restore)
+            children.append(restore_box)
+
+        if self.pending_settings:
+            for directive in sorted(self.pending_settings, key=str.casefold):
+                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+                row.add_css_class("service-row")
+                name = label(directive, "row-title")
+                name.set_size_request(220, -1)
+                row.append(name)
+
+                value = Gtk.Entry()
+                value.set_text(self.pending_settings[directive])
+                value.set_hexpand(True)
+                value.connect(
+                    "changed",
+                    lambda entry, key=directive: self.pending_settings.__setitem__(key, entry.get_text()),
+                )
+                row.append(value)
+
+                if directive in self.effective_settings:
+                    effective = label(f"Current effective: {self.effective_settings[directive]}", "muted")
+                    effective.set_tooltip_text("Effective value reported by the selected PHP CLI before any unsaved edits")
+                    row.append(effective)
+
+                remove = Gtk.Button(label="Remove")
+                remove.connect("clicked", lambda _b, key=directive: self._remove_pending(key))
+                row.append(remove)
+                children.append(row)
+        else:
+            children.append(label("No NativeDev overrides are active for this PHP version.", "muted"))
+
+        add_heading = label("Add / update setting", "section-title")
+        add_heading.set_margin_top(8)
+        children.append(add_heading)
+
+        add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        suggestions = ("Suggested directive…", *self.context.php_ini.suggested_directives())
+        suggestion = Gtk.DropDown.new_from_strings(list(suggestions))
+        directive = Gtk.Entry()
+        directive.set_placeholder_text("Directive, e.g. memory_limit")
+        directive.set_hexpand(True)
+        value = Gtk.Entry()
+        value.set_placeholder_text("Value, e.g. 512M")
+        value.set_hexpand(True)
+        add = Gtk.Button(label="Add")
+        add.add_css_class("suggested-action")
+
+        def suggestion_changed(widget, _param):
+            index = widget.get_selected()
+            if index <= 0 or index >= len(suggestions):
+                return
+            directive.set_text(suggestions[index])
+
+        def add_setting(*_):
+            key = directive.get_text().strip()
+            raw_value = value.get_text()
+            try:
+                self.context.php_ini.validate_setting(key, raw_value)
+            except RuntimeError as exc:
+                self.window.set_activity(False, str(exc), error=True)
+                return
+            self.pending_settings[key] = raw_value
+            self._render_settings_card()
+
+        suggestion.connect("notify::selected", suggestion_changed)
+        add.connect("clicked", add_setting)
+        value.connect("activate", add_setting)
+        add_row.append(suggestion)
+        add_row.append(directive)
+        add_row.append(value)
+        add_row.append(add)
+        children.append(add_row)
+
+        children.append(
+            label(
+                "Values are stored as one INI line. NativeDev rejects newline, carriage-return and NUL characters instead of silently stripping them.",
+                "muted",
+                wrap=True,
+            )
+        )
+
+        self._replace(self.settings_card, children)
+
+    def _remove_pending(self, directive: str):
+        self.pending_settings.pop(directive, None)
+        self._render_settings_card()
+
+    @staticmethod
+    def _replace(container: Gtk.Box, children: list[Gtk.Widget]):
+        while child := container.get_first_child():
+            container.remove(child)
+        for child in children:
+            container.append(child)
+
+
 class NodePage(Page):
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
@@ -1474,6 +1754,7 @@ class MainWindow(Gtk.ApplicationWindow):
         ("services", "Services & tools", ServicesPage),
         ("php", "PHP", PhpPage),
         ("extensions", "PHP Extensions", PhpExtensionsPage),
+        ("php_ini", "PHP Settings", PhpIniPage),
         ("node", "Node.js", NodePage),
         ("projects", "Projects", ProjectsPage),
         ("doctor", "Doctor", DoctorPage),

@@ -216,7 +216,7 @@ class PrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=uid)[0]
 
     def test_allows_structured_native_operations(self):
-        protocol = 8
+        protocol = 9
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "restart", "now": False, "service": "nginx"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "disable", "now": True, "service": "php8.4-fpm"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["redis-tools"]}))
@@ -230,13 +230,15 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "php.extension_enable", "version": "8.4", "extension": "redis"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "php.extension_disable", "version": "8.4", "extension": "xdebug"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "php.extension_remove", "version": "8.4", "extension": "imagick"}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"memory_limit": "512M", "opcache.enable": "1"}}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "php.ini.reset", "version": "8.4"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "networkmanager.reload", "scope": "conf"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.install", "mode": "0644", "source": "/tmp/nativedev-fpm-test/pool.conf", "destination": "/etc/php/8.4/fpm/pool.d/nativedev-1000.conf"}, uid=1000))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/php/8.4/fpm/pool.d/nativedev-1000.conf"]}, uid=1000))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/php/8.4/fpm/pool.d/nativedev-1001.conf"]}, uid=1000))
 
     def test_rejects_raw_commands_and_outside_packages(self):
-        protocol = 8
+        protocol = 9
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "run", "argv": ["bash", "-c", "id"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["openssh-server"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["/tmp/nativedev-test/debsuryorg-archive-keyring.deb"]}))
@@ -252,6 +254,16 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.extension_install", "version": "8.5", "extension": "opcache"}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.extension_enable", "version": "8.4", "extension": "gd", "sapi": "cli"}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.extension_install", "version": "8.4", "extension": "gd", "package": "php8.4-xdebug"}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"memory_limit": "512M\nauto_prepend_file=/tmp/x.php"}}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"memory_limit": "512M\rdisplay_errors=1"}}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"memory_limit": "512M\0x"}}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"bad name": "1"}}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"[section]": "1"}}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"foo=bar": "1"}}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"extension": "redis.so"}}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"zend_extension": "xdebug.so"}}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"memory_limit": "512M"}, "path": "/etc/php/8.4/php.ini"}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.reset", "version": "8.4", "settings": {"memory_limit": "512M"}}))
 
     def test_client_translates_to_semantic_rpc_without_argv(self):
         from nativedev.system import privileged_operation_for_command
@@ -266,7 +278,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {
-            "protocol": 8,
+            "protocol": 9,
             "action": "php.install_packages",
             "packages": ["php8.4-cli", "php8.4-gd", "php8.4-opcache"],
         }
@@ -287,7 +299,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         from nativedev.system import CommandResult
 
-        request = {"protocol": 8, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
+        request = {"protocol": 9, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("nativedev.privileged_helper.subprocess.run") as run, \
              patch("nativedev.privileged_helper._run_extension_module_pair") as modules:
@@ -413,8 +425,8 @@ class ServiceCleanupTests(unittest.TestCase):
 
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
             for package in ("postgresql-17", "postgresql-client-17", "mariadb-server-core", "mariadb-client-core"):
-                self.assertTrue(validate_operation({"protocol": 8, "action": "apt.remove", "packages": [package]})[0])
-                self.assertFalse(validate_operation({"protocol": 8, "action": "apt.install", "packages": [package]})[0])
+                self.assertTrue(validate_operation({"protocol": 9, "action": "apt.remove", "packages": [package]})[0])
+                self.assertFalse(validate_operation({"protocol": 9, "action": "apt.install", "packages": [package]})[0])
 
 
 class ControllerTests(unittest.TestCase):
@@ -447,6 +459,50 @@ class ControllerTests(unittest.TestCase):
             controller.set_default_php("8.3")
         self.assertEqual(php.current, "8.3")
         self.assertEqual(localdev.reconciles, 1)
+
+    def test_php_uninstall_detaches_nativedev_ini_and_preserves_profile(self):
+        from nativedev.controller import NativeDevController
+
+        events = []
+
+        class Php:
+            def uninstall_version(self, version): events.append(("uninstall", version))
+
+        class LocalDev:
+            def nginx_managed(self): return False
+
+        class Ini:
+            def has_active_override(self, version): return True
+            def detach_runtime(self, version): events.append(("detach_ini", version))
+            def restore_profile(self, version): events.append(("restore_ini", version))
+
+        controller = NativeDevController(Php(), LocalDev(), php_ini=Ini())
+        controller.uninstall_php("8.4")
+        self.assertEqual(events[:2], [("detach_ini", "8.4"), ("uninstall", "8.4")])
+        self.assertNotIn(("restore_ini", "8.4"), events)
+
+    def test_php_uninstall_failure_restores_saved_ini_profile(self):
+        from nativedev.controller import NativeDevController
+
+        events = []
+
+        class Php:
+            def uninstall_version(self, version):
+                events.append(("uninstall", version))
+                raise RuntimeError("apt failed")
+
+        class LocalDev:
+            def nginx_managed(self): return False
+
+        class Ini:
+            def has_active_override(self, version): return True
+            def detach_runtime(self, version): events.append(("detach_ini", version))
+            def restore_profile(self, version): events.append(("restore_ini", version))
+
+        controller = NativeDevController(Php(), LocalDev(), php_ini=Ini())
+        with self.assertRaisesRegex(RuntimeError, "apt failed"):
+            controller.uninstall_php("8.4")
+        self.assertEqual(events, [("detach_ini", "8.4"), ("uninstall", "8.4"), ("restore_ini", "8.4")])
 
     def test_mutations_are_globally_serialized(self):
         import threading
@@ -1083,6 +1139,157 @@ class PhpExtensionManagerTests(unittest.TestCase):
         self.assertIn("self.activity_spinner.start()", main_window)
         self.assertIn("self.activity_spinner.stop()", main_window)
         self.assertIn('self.status.set_text("")', main_window)
+
+
+class PhpIniManagerTests(unittest.TestCase):
+    def _manager(self, root: Path):
+        from nativedev.managers.php_ini import PhpIniManager
+        from nativedev.system import CommandResult
+
+        class Php:
+            def installed_versions(self): return ["8.4", "8.3"]
+            def fpm_config_ready(self, version): return version in {"8.4", "8.3"}
+
+        class Runner:
+            def __init__(self): self.operations = []; self.commands = []
+            def run(self, argv, **kwargs):
+                self.commands.append((list(argv), kwargs))
+                if len(argv) >= 2 and str(argv[0]).endswith("php8.4") and argv[1] == "-r":
+                    return CommandResult(list(argv), 0, '{"memory_limit":"512M","display_errors":"1"}', "")
+                return CommandResult(list(argv), 0, "{}", "")
+            def privileged_operation(self, action, **fields):
+                self.operations.append((action, fields))
+                return CommandResult([f"nativedev:{action}"], 0, "", "")
+
+        class Systemd:
+            pass
+
+        runner = Runner()
+        manager = PhpIniManager(
+            runner,
+            Systemd(),
+            Php(),
+            config_root=root / "etc-php",
+            profile_root=root / "profiles",
+        )
+        return manager, runner
+
+    def test_root_helper_ini_validation_contract_matches_manager(self):
+        from nativedev.managers import php_ini as manager
+        from nativedev import privileged_helper as helper
+
+        self.assertEqual(manager.DIRECTIVE_RE.pattern, helper.PHP_INI_DIRECTIVE_RE.pattern)
+        self.assertEqual(manager.BLOCKED_DIRECTIVES, helper.PHP_INI_BLOCKED_DIRECTIVES)
+        self.assertEqual(manager.MAX_SETTINGS, helper.PHP_INI_MAX_SETTINGS)
+        self.assertEqual(manager.MAX_DIRECTIVE_LENGTH, helper.PHP_INI_MAX_DIRECTIVE_LENGTH)
+        self.assertEqual(manager.MAX_VALUE_LENGTH, helper.PHP_INI_MAX_VALUE_LENGTH)
+
+    def test_directive_and_value_validation_is_injection_safe(self):
+        from nativedev.managers.php_ini import PhpIniManager
+
+        for directive in ("memory_limit", "opcache.enable", "date.timezone", "A1_b.c"):
+            PhpIniManager.validate_setting(directive, "512M")
+        for directive in ("_bad", "bad-name", "bad name", "foo=bar", "[section]", ";comment"):
+            with self.assertRaises(RuntimeError, msg=directive):
+                PhpIniManager.validate_setting(directive, "1")
+        for value in ("512M\nfoo=bar", "512M\rfoo=bar", "512M\0foo"):
+            with self.assertRaisesRegex(RuntimeError, "single line"):
+                PhpIniManager.validate_setting("memory_limit", value)
+        for directive in ("extension", "zend_extension", "extension_dir"):
+            with self.assertRaisesRegex(RuntimeError, "PHP Extensions"):
+                PhpIniManager.validate_setting(directive, "anything")
+
+    def test_reads_only_nativedev_owned_override_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manager, _runner = self._manager(root)
+            target = root / "etc-php" / "8.4" / "mods-available" / "nativedev.ini"
+            target.parent.mkdir(parents=True)
+            target.write_text(
+                "; Managed by NativeDev\nmemory_limit = 512M\ndate.timezone = Asia/Dhaka\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                manager.settings("8.4"),
+                {"memory_limit": "512M", "date.timezone": "Asia/Dhaka"},
+            )
+
+    def test_apply_uses_semantic_rpc_and_keeps_user_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manager, runner = self._manager(root)
+            manager.apply("8.4", {"memory_limit": "512M", "display_errors": "On"})
+            self.assertEqual(runner.operations[0][0], "php.ini.apply")
+            fields = runner.operations[0][1]
+            self.assertEqual(fields["version"], "8.4")
+            self.assertEqual(fields["settings"]["memory_limit"], "512M")
+            self.assertNotIn("path", fields)
+            self.assertNotIn("content", fields)
+            self.assertNotIn("sapi", fields)
+            profile = manager.profile_file("8.4")
+            self.assertTrue(profile.is_file())
+            self.assertEqual(profile.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(manager.saved_profile("8.4")["display_errors"], "On")
+
+    def test_reset_removes_only_saved_profile_client_side(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manager, runner = self._manager(root)
+            manager._write_profile("8.4", {"memory_limit": "512M"})
+            manager.reset("8.4")
+            self.assertEqual(runner.operations[-1][0], "php.ini.reset")
+            self.assertFalse(manager.profile_file("8.4").exists())
+
+    def test_effective_values_are_read_in_one_php_process(self):
+        with tempfile.TemporaryDirectory() as td:
+            manager, runner = self._manager(Path(td))
+            values = manager.effective_settings("8.4", ("memory_limit", "display_errors"))
+            self.assertEqual(values, {"memory_limit": "512M", "display_errors": "1"})
+            php_calls = [call for call in runner.commands if str(call[0][0]).endswith("php8.4")]
+            self.assertEqual(len(php_calls), 1)
+            self.assertIn("NATIVEDEV_INI_KEYS", php_calls[0][1]["env"])
+
+    def test_root_helper_uses_fixed_nativedev_file_and_both_sapi_links(self):
+        from unittest.mock import patch
+        from nativedev import privileged_helper as helper
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for path in (
+                root / "8.4" / "mods-available",
+                root / "8.4" / "cli" / "conf.d",
+                root / "8.4" / "fpm" / "conf.d",
+            ):
+                path.mkdir(parents=True)
+            with patch.object(helper, "PHP_CONFIG_ROOT", root), \
+                 patch.object(helper, "_php_ini_runtime_ready"), \
+                 patch.object(helper, "_validate_php_ini_runtime"), \
+                 patch.object(helper, "_fpm_is_active", return_value=False):
+                helper._execute_php_ini_change("8.4", {"memory_limit": "512M"}, 30)
+                managed = root / "8.4" / "mods-available" / "nativedev.ini"
+                cli = root / "8.4" / "cli" / "conf.d" / "99-nativedev.ini"
+                fpm = root / "8.4" / "fpm" / "conf.d" / "99-nativedev.ini"
+                self.assertIn("memory_limit = 512M", managed.read_text())
+                self.assertTrue(cli.is_symlink())
+                self.assertTrue(fpm.is_symlink())
+                self.assertEqual(cli.readlink(), Path("../../mods-available/nativedev.ini"))
+                self.assertEqual(fpm.readlink(), Path("../../mods-available/nativedev.ini"))
+
+                helper._execute_php_ini_change("8.4", None, 30)
+                self.assertFalse(managed.exists())
+                self.assertFalse(cli.is_symlink())
+                self.assertFalse(fpm.is_symlink())
+
+    def test_gui_places_php_settings_after_extensions_and_before_node(self):
+        gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
+        pages = gui[gui.index("PAGES = ("):gui.index("def __init__", gui.index("PAGES = ("))]
+        self.assertLess(pages.index('(\"extensions\", \"PHP Extensions\", PhpExtensionsPage)'), pages.index('(\"php_ini\", \"PHP Settings\", PhpIniPage)'))
+        self.assertLess(pages.index('(\"php_ini\", \"PHP Settings\", PhpIniPage)'), pages.index('(\"node\", \"Node.js\", NodePage)'))
+        php_ini_page = gui[gui.index("class PhpIniPage"):gui.index("class NodePage")]
+        self.assertIn("99-nativedev.ini", php_ini_page)
+        self.assertIn("Extension loading is managed on PHP Extensions", php_ini_page)
+        self.assertIn("newline, carriage-return and NUL", php_ini_page)
+
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-PROTOCOL_VERSION = 8
+PROTOCOL_VERSION = 9
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 MANAGED_FILES = {
@@ -37,6 +37,12 @@ SERVICE_RE = re.compile(
 PHP_PACKAGE_RE = re.compile(r"^php\d+\.\d+(?:-[A-Za-z0-9][A-Za-z0-9.+~_-]*)?$")
 PHP_FPM_PACKAGE_RE = re.compile(r"^php\d+\.\d+-fpm$")
 VERSION_RE = re.compile(r"^\d+\.\d+$")
+PHP_INI_DIRECTIVE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_.]*$")
+PHP_INI_BLOCKED_DIRECTIVES = frozenset({"extension", "zend_extension", "extension_dir"})
+PHP_INI_MAX_SETTINGS = 128
+PHP_INI_MAX_DIRECTIVE_LENGTH = 128
+PHP_INI_MAX_VALUE_LENGTH = 4096
+PHP_CONFIG_ROOT = Path("/etc/php")
 PHP_MODULE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 POSTGRESQL_RUNTIME_PACKAGE_RE = re.compile(r"^postgresql(?:-client)?-\d+(?:\.\d+)*$")
 MARIADB_RUNTIME_PACKAGE_RE = re.compile(r"^mariadb-(?:server|client)-core(?:-\d+(?:\.\d+)*)?$")
@@ -252,6 +258,236 @@ def _run_extension_module_pair(version: str, modules: tuple[str, ...], enable: b
     )
 
 
+
+def _php_ini_request_details(request: dict, *, apply: bool) -> tuple[str, dict[str, str]]:
+    allowed_fields = {"protocol", "action", "version", "timeout"}
+    if apply:
+        allowed_fields.add("settings")
+    unexpected = set(request).difference(allowed_fields)
+    if unexpected:
+        raise RuntimeError("PHP INI operations do not accept client-supplied paths, content, SAPI or other selectors")
+
+    version = request.get("version")
+    if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+        raise RuntimeError("Invalid PHP INI version")
+
+    if not apply:
+        if "settings" in request:
+            raise RuntimeError("PHP INI reset does not accept settings")
+        return version, {}
+
+    settings = request.get("settings")
+    if not isinstance(settings, dict) or not settings:
+        raise RuntimeError("PHP INI apply requires at least one directive")
+    if len(settings) > PHP_INI_MAX_SETTINGS:
+        raise RuntimeError(f"Too many PHP INI overrides (maximum {PHP_INI_MAX_SETTINGS})")
+
+    validated: dict[str, str] = {}
+    for directive, value in settings.items():
+        if not isinstance(directive, str) or not directive:
+            raise RuntimeError("PHP INI directive name is required")
+        if len(directive) > PHP_INI_MAX_DIRECTIVE_LENGTH or not PHP_INI_DIRECTIVE_RE.fullmatch(directive):
+            raise RuntimeError("Invalid PHP INI directive name")
+        if directive.casefold() in PHP_INI_BLOCKED_DIRECTIVES:
+            raise RuntimeError(f"{directive} is managed by PHP Extensions, not PHP Settings")
+        if not isinstance(value, str):
+            raise RuntimeError("PHP INI value must be text")
+        # Non-negotiable injection boundary: never strip or normalize these.
+        # Any of them could turn one semantic value into another INI line or
+        # truncate the root-side rendered file unexpectedly.
+        if "\n" in value or "\r" in value or "\0" in value:
+            raise RuntimeError("PHP INI value must be a single line (newline, carriage return and NUL are not allowed)")
+        if len(value) > PHP_INI_MAX_VALUE_LENGTH:
+            raise RuntimeError(f"PHP INI value is too long (maximum {PHP_INI_MAX_VALUE_LENGTH} characters)")
+        validated[directive] = value
+    return version, validated
+
+
+def _php_ini_paths(version: str) -> tuple[Path, Path, Path]:
+    root = PHP_CONFIG_ROOT / version
+    managed = root / "mods-available" / "nativedev.ini"
+    cli_link = root / "cli" / "conf.d" / "99-nativedev.ini"
+    fpm_link = root / "fpm" / "conf.d" / "99-nativedev.ini"
+    return managed, cli_link, fpm_link
+
+
+def _snapshot_path(path: Path):
+    if path.is_symlink():
+        return ("symlink", os.readlink(path))
+    if path.exists():
+        if not path.is_file():
+            raise RuntimeError(f"NativeDev PHP INI path is not a regular file: {path}")
+        return ("file", path.read_bytes(), path.stat().st_mode & 0o777)
+    return ("missing",)
+
+
+def _unlink_if_present(path: Path) -> None:
+    if path.is_symlink() or path.exists():
+        path.unlink()
+
+
+def _atomic_write_bytes(path: Path, data: bytes, mode: int = 0o644) -> None:
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.nativedev-", dir=path.parent)
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp, mode)
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _atomic_symlink(path: Path, target: str) -> None:
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.nativedev-link-", dir=path.parent)
+    os.close(fd)
+    temp = Path(temp_name)
+    temp.unlink(missing_ok=True)
+    try:
+        os.symlink(target, temp)
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _restore_path(path: Path, snapshot) -> None:
+    _unlink_if_present(path)
+    kind = snapshot[0]
+    if kind == "missing":
+        return
+    if kind == "symlink":
+        os.symlink(snapshot[1], path)
+        return
+    if kind == "file":
+        _atomic_write_bytes(path, snapshot[1], snapshot[2])
+        return
+    raise RuntimeError(f"Unknown NativeDev rollback snapshot for {path}")
+
+
+def _render_php_ini(version: str, settings: dict[str, str]) -> bytes:
+    lines = [
+        "; Managed by NativeDev for local development.",
+        f"; PHP {version}; loaded by CLI and FPM through 99-nativedev.ini.",
+        "; Extension loading is managed separately on the PHP Extensions page.",
+    ]
+    for directive in sorted(settings, key=str.casefold):
+        lines.append(f"{directive} = {settings[directive]}")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _php_ini_runtime_ready(version: str) -> None:
+    php_binary = Path(f"/usr/bin/php{version}")
+    managed, cli_link, fpm_link = _php_ini_paths(version)
+    required_dirs = (managed.parent, cli_link.parent, fpm_link.parent)
+    if not php_binary.is_file():
+        raise RuntimeError(f"PHP {version} CLI runtime is not installed")
+    missing = [str(path) for path in required_dirs if not path.is_dir()]
+    if missing:
+        raise RuntimeError("PHP CLI/FPM configuration directories are missing: " + ", ".join(missing))
+    if not (PHP_CONFIG_ROOT / version / "fpm" / "php-fpm.conf").is_file():
+        raise RuntimeError(f"PHP {version} FPM configuration is not ready")
+
+
+def _validate_php_ini_runtime(version: str, timeout: int) -> None:
+    php_binary = f"/usr/bin/php{version}"
+    cli = subprocess.run(
+        [php_binary, "-r", "exit(0);"],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+    cli_text = (cli.stdout + "\n" + cli.stderr).lower()
+    if cli.returncode != 0 or "syntax error" in cli_text or "failed to parse" in cli_text:
+        raise RuntimeError(cli.stderr.strip() or cli.stdout.strip() or f"PHP {version} CLI rejected the INI override")
+
+    fpm = subprocess.run(
+        [_binary(f"php-fpm{version}"), "-tt"],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+    if fpm.returncode != 0:
+        raise RuntimeError(fpm.stderr.strip() or fpm.stdout.strip() or f"PHP {version} FPM rejected the INI override")
+
+
+def _fpm_is_active(version: str, timeout: int) -> bool:
+    proc = subprocess.run(
+        [_binary("systemctl"), "is-active", "--quiet", f"php{version}-fpm"],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+    return proc.returncode == 0
+
+
+def _reload_fpm(version: str, timeout: int) -> None:
+    service = f"php{version}-fpm"
+    reload_proc = subprocess.run(
+        [_binary("systemctl"), "reload", service],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+    if reload_proc.returncode == 0:
+        return
+    restart = subprocess.run(
+        [_binary("systemctl"), "restart", service],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+    if restart.returncode != 0:
+        error = restart.stderr.strip() or restart.stdout.strip() or reload_proc.stderr.strip() or reload_proc.stdout.strip()
+        raise RuntimeError(error or f"Could not reload PHP {version} FPM")
+
+
+def _execute_php_ini_change(version: str, settings: dict[str, str] | None, timeout: int) -> subprocess.CompletedProcess:
+    _php_ini_runtime_ready(version)
+    managed, cli_link, fpm_link = _php_ini_paths(version)
+    snapshots = {
+        managed: _snapshot_path(managed),
+        cli_link: _snapshot_path(cli_link),
+        fpm_link: _snapshot_path(fpm_link),
+    }
+    was_active = _fpm_is_active(version, timeout)
+
+    try:
+        if settings is None:
+            _unlink_if_present(cli_link)
+            _unlink_if_present(fpm_link)
+            _unlink_if_present(managed)
+        else:
+            _atomic_write_bytes(managed, _render_php_ini(version, settings), 0o644)
+            relative_target = "../../mods-available/nativedev.ini"
+            _atomic_symlink(cli_link, relative_target)
+            _atomic_symlink(fpm_link, relative_target)
+
+        _validate_php_ini_runtime(version, timeout)
+        if was_active:
+            _reload_fpm(version, timeout)
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        for path in (managed, cli_link, fpm_link):
+            try:
+                _restore_path(path, snapshots[path])
+            except Exception as rollback_exc:
+                rollback_errors.append(f"restore {path}: {rollback_exc}")
+        try:
+            _validate_php_ini_runtime(version, timeout)
+            if was_active:
+                _reload_fpm(version, timeout)
+        except Exception as rollback_exc:
+            rollback_errors.append(f"runtime rollback: {rollback_exc}")
+        if rollback_errors:
+            raise RuntimeError(f"PHP {version} INI change failed ({exc}); rollback also failed: " + "; ".join(rollback_errors)) from exc
+        raise RuntimeError(f"PHP {version} INI change failed and was rolled back: {exc}") from exc
+
+    action = "apply" if settings is not None else "reset"
+    return subprocess.CompletedProcess([f"nativedev:php.ini.{action}"], 0, "", "")
+
+
 def _binary(name: str) -> str:
     value = shutil.which(name, path=SAFE_PATH)
     if not value:
@@ -388,6 +624,14 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
         # execute_operation(); no SAPI selector crosses the privilege boundary.
         return []
 
+    if action == "php.ini.apply":
+        _php_ini_request_details(request, apply=True)
+        return []
+
+    if action == "php.ini.reset":
+        _php_ini_request_details(request, apply=False)
+        return []
+
     if action == "php.enable_modules":
         version = request.get("version")
         sapi = request.get("sapi")
@@ -450,6 +694,16 @@ def execute_operation(request: dict, uid: int, timeout: int) -> subprocess.Compl
         version, _extension, _package, modules = _php_extension_details(request)
         command_for_operation(request, uid)
         return _run_extension_module_pair(version, modules, action == "php.extension_enable", timeout)
+
+    if action == "php.ini.apply":
+        version, settings = _php_ini_request_details(request, apply=True)
+        command_for_operation(request, uid)
+        return _execute_php_ini_change(version, settings, timeout)
+
+    if action == "php.ini.reset":
+        version, _settings = _php_ini_request_details(request, apply=False)
+        command_for_operation(request, uid)
+        return _execute_php_ini_change(version, None, timeout)
 
     if action == "php.install_packages":
         # PHP's mods-available/*.ini files are UCF-managed. UCF intentionally

@@ -212,7 +212,7 @@ class DatabaseAccessManager:
 
         MariaDB/MySQL first tries local ``root`` access without a supplied password.
         If that login is unavailable, the caller may retry with the MariaDB/MySQL
-        root password. The helper then creates the current Debian-user account when
+        root password. The helper then creates the current Unix-user account when
         missing, or resets the existing account to ``nativedev`` when present.
         PostgreSQL continues to use its local ``postgres`` administrator context.
         """

@@ -15,7 +15,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-PROTOCOL_VERSION = 14
+PROTOCOL_VERSION = 15
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 MANAGED_FILES = {
@@ -110,7 +110,10 @@ FPM_POOL_RE = re.compile(r"^/etc/php/(?P<version>\d+\.\d+)/fpm/pool\.d/nativedev
 TEMP_SOURCE_RE = re.compile(r"^/tmp/nativedev-[^/]+/.+$")
 SURY_KEYRING_URL = "https://packages.sury.org/debsuryorg-archive-keyring.deb"
 SURY_SOURCE_FILE = Path("/etc/apt/sources.list.d/nativedev-sury-php.sources")
-SURY_SUPPORTED_CODENAMES = {"bullseye", "bookworm", "trixie", "jammy", "noble", "resolute"}
+SURY_SUPPORTED_CODENAMES = {"bullseye", "bookworm", "trixie"}
+ONDREJ_PPA = "ppa:ondrej/php"
+ONDREJ_PPA_URI = "https://ppa.launchpadcontent.net/ondrej/php/ubuntu"
+ONDREJ_SUPPORTED_CODENAMES = {"jammy", "noble"}
 
 
 # Only packages NativeDev actually exposes as native stack components. PHP is
@@ -130,6 +133,48 @@ COMPONENT_PACKAGES = {
     "nodejs",
     "npm",
 }
+
+
+def _read_os_release(path: Path = Path("/etc/os-release")) -> dict[str, str]:
+    data: dict[str, str] = {}
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            data[key] = value.strip().strip('"')
+    except OSError:
+        pass
+    return data
+
+
+def _php_multi_repo_target() -> tuple[str, str]:
+    """Resolve the fixed multi-PHP backend from the actual root-side distro."""
+    data = _read_os_release()
+    distro_id = data.get("ID", "").lower()
+    id_like = set(data.get("ID_LIKE", "").lower().split())
+    ubuntu_codename = data.get("UBUNTU_CODENAME", "").lower()
+    if ubuntu_codename or distro_id == "ubuntu" or "ubuntu" in id_like:
+        codename = ubuntu_codename or data.get("VERSION_CODENAME", "").lower()
+        return "ondrej", codename
+    if distro_id == "debian" or "debian" in id_like:
+        codename = (data.get("DEBIAN_CODENAME") or data.get("VERSION_CODENAME") or "").lower()
+        return "sury", codename
+    return "", ""
+
+
+def _validate_php_multi_repo_request(request: dict) -> tuple[str, str]:
+    backend = request.get("backend")
+    codename = request.get("codename")
+    actual_backend, actual_codename = _php_multi_repo_target()
+    if backend != actual_backend or codename != actual_codename:
+        raise RuntimeError("Multi-PHP repository request does not match the detected system")
+    if backend == "sury" and codename in SURY_SUPPORTED_CODENAMES:
+        return backend, codename
+    if backend == "ondrej" and codename in ONDREJ_SUPPORTED_CODENAMES:
+        return backend, codename
+    raise RuntimeError("Unsupported multi-PHP repository suite")
 
 
 def _safe_temp_source(value: str) -> bool:
@@ -152,7 +197,7 @@ def _managed_file(value: str, uid: int | None = None) -> bool:
 
 def _installable_file(value: str, uid: int | None = None) -> bool:
     # The Nginx enablement path is a symlink managed only by nginx.enable_site,
-    # and the Sury source is written only by the semantic sury.configure action.
+    # and the Sury source is written only by the semantic php.multi_repo.configure action.
     if value in {
         "/etc/NetworkManager/conf.d/nativedev-dns.conf",
         "/etc/NetworkManager/dnsmasq.d/nativedev-test.conf",
@@ -886,12 +931,10 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
         # it is retained for the fixed install-time baseline only.
         return [_binary("phpenmod"), "-v", version, "-s", sapi, *modules]
 
-    # This operation is intentionally executed by execute_operation(): both
-    # the HTTPS keyring URL and DEB822 source template are root-side constants.
-    if action == "sury.configure":
-        codename = request.get("codename")
-        if codename not in SURY_SUPPORTED_CODENAMES:
-            raise RuntimeError("Unsupported Sury repository suite")
+    # Repository URLs/PPA names are root-side constants. The request can select
+    # only the backend/codename that matches /etc/os-release on this host.
+    if action in {"php.multi_repo.configure", "php.multi_repo.remove"}:
+        _validate_php_multi_repo_request(request)
         return []
 
     raise RuntimeError(f"Privileged operation is not allowed: {action}")
@@ -966,59 +1009,97 @@ def execute_operation(request: dict, uid: int, timeout: int) -> subprocess.Compl
             env=env,
         )
 
-    if action == "sury.configure":
-        # Validate protocol/codename through the same operation validator first.
+    if action in {"php.multi_repo.configure", "php.multi_repo.remove"}:
+        backend, codename = _validate_php_multi_repo_request(request)
         command_for_operation(request, uid)
-        codename = request["codename"]
-        previous = None
-        if SURY_SOURCE_FILE.exists():
-            previous = SURY_SOURCE_FILE.read_bytes()
-        try:
-            with tempfile.TemporaryDirectory(prefix="nativedev-root-sury-", dir="/tmp") as temp_dir:
-                temp = Path(temp_dir)
-                package = temp / "debsuryorg-archive-keyring.deb"
-                urllib.request.urlretrieve(SURY_KEYRING_URL, package)
-                proc = subprocess.run(
-                    [_binary("apt-get"), "install", "-y", str(package)],
-                    text=True,
-                    capture_output=True,
-                    timeout=timeout,
-                )
-                if proc.returncode != 0:
-                    return proc
 
-                source = (
-                    "Types: deb\n"
-                    "URIs: https://packages.sury.org/php/\n"
-                    f"Suites: {codename}\n"
-                    "Components: main\n"
-                    "Signed-By: /usr/share/keyrings/debsuryorg-archive-keyring.gpg\n"
-                )
-                source_tmp = temp / "nativedev-sury-php.sources"
-                source_tmp.write_text(source, encoding="utf-8")
-                install_proc = subprocess.run(
-                    [_binary("install"), "-m", "0644", str(source_tmp), str(SURY_SOURCE_FILE)],
-                    text=True,
-                    capture_output=True,
-                    timeout=timeout,
-                )
-                if install_proc.returncode != 0:
-                    if previous is None:
-                        SURY_SOURCE_FILE.unlink(missing_ok=True)
-                    else:
-                        SURY_SOURCE_FILE.write_bytes(previous)
-                        os.chmod(SURY_SOURCE_FILE, 0o644)
-                return install_proc
-        except Exception:
-            # Restore only NativeDev's own source file if the repository action
-            # itself fails after touching it. The keyring package is harmless to
-            # retain and may be shared with a user-managed Sury source.
-            if previous is None:
-                SURY_SOURCE_FILE.unlink(missing_ok=True)
-            else:
-                SURY_SOURCE_FILE.write_bytes(previous)
-                os.chmod(SURY_SOURCE_FILE, 0o644)
-            raise
+        if backend == "sury":
+            if action == "php.multi_repo.remove":
+                try:
+                    SURY_SOURCE_FILE.unlink(missing_ok=True)
+                    return subprocess.CompletedProcess([], 0, "", "")
+                except OSError as exc:
+                    return subprocess.CompletedProcess([], 1, "", str(exc))
+
+            previous = SURY_SOURCE_FILE.read_bytes() if SURY_SOURCE_FILE.exists() else None
+            try:
+                with tempfile.TemporaryDirectory(prefix="nativedev-root-sury-", dir="/tmp") as temp_dir:
+                    temp = Path(temp_dir)
+                    package = temp / "debsuryorg-archive-keyring.deb"
+                    urllib.request.urlretrieve(SURY_KEYRING_URL, package)
+                    proc = subprocess.run(
+                        [_binary("apt-get"), "install", "-y", str(package)],
+                        text=True,
+                        capture_output=True,
+                        timeout=timeout,
+                    )
+                    if proc.returncode != 0:
+                        return proc
+
+                    source = (
+                        "Types: deb\n"
+                        "URIs: https://packages.sury.org/php/\n"
+                        f"Suites: {codename}\n"
+                        "Components: main\n"
+                        "Signed-By: /usr/share/keyrings/debsuryorg-archive-keyring.gpg\n"
+                    )
+                    source_tmp = temp / "nativedev-sury-php.sources"
+                    source_tmp.write_text(source, encoding="utf-8")
+                    install_proc = subprocess.run(
+                        [_binary("install"), "-m", "0644", str(source_tmp), str(SURY_SOURCE_FILE)],
+                        text=True,
+                        capture_output=True,
+                        timeout=timeout,
+                    )
+                    if install_proc.returncode != 0:
+                        if previous is None:
+                            SURY_SOURCE_FILE.unlink(missing_ok=True)
+                        else:
+                            SURY_SOURCE_FILE.write_bytes(previous)
+                            os.chmod(SURY_SOURCE_FILE, 0o644)
+                    return install_proc
+            except Exception:
+                if previous is None:
+                    SURY_SOURCE_FILE.unlink(missing_ok=True)
+                else:
+                    SURY_SOURCE_FILE.write_bytes(previous)
+                    os.chmod(SURY_SOURCE_FILE, 0o644)
+                raise
+
+        # Ubuntu/Ubuntu-derivative path. Use the official PPA helper so Launchpad
+        # key management stays with Ubuntu's software-properties implementation.
+        add_repo = shutil.which("add-apt-repository", path=SAFE_PATH)
+        if not add_repo:
+            install_tool = subprocess.run(
+                [_binary("apt-get"), "install", "-y", "software-properties-common"],
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+            )
+            if install_tool.returncode != 0:
+                return install_tool
+            add_repo = shutil.which("add-apt-repository", path=SAFE_PATH)
+        if not add_repo:
+            return subprocess.CompletedProcess([], 127, "", "add-apt-repository is unavailable")
+
+        # Use an explicit source line with the root-side resolved Ubuntu base
+        # suite. This is important on derivatives whose own VERSION_CODENAME
+        # (for example a Mint codename) is not a Launchpad distro series.
+        source_line = f"deb {ONDREJ_PPA_URI} {codename} main"
+        argv = [add_repo, "-y"]
+        if action == "php.multi_repo.remove":
+            argv.append("--remove")
+        argv.extend(["--sourceslist", source_line])
+        env = dict(os.environ)
+        env["PATH"] = SAFE_PATH
+        env["LC_ALL"] = "C.UTF-8"
+        return subprocess.run(
+            argv,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+        )
 
     argv = command_for_operation(request, uid)
     return subprocess.run(argv, text=True, capture_output=True, timeout=timeout)

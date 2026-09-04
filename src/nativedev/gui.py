@@ -132,7 +132,7 @@ def confirm_database_uninstall(
         (
             f"NativeDev will remove the installed {component_title} server/client runtime packages "
             "and forget NativeDev's saved database credential. Database data, database users, "
-            "database passwords, and Debian common/shared packages are preserved."
+            "database passwords, and distribution common/shared packages are preserved."
         ),
         on_accept,
     )
@@ -331,7 +331,7 @@ class Page(Gtk.ScrolledWindow):
 class DashboardPage(Page):
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
-        self.body.append(page_header("Dashboard", "Native Debian development services at a glance.", self.refresh))
+        self.body.append(page_header("Dashboard", "Native system development services at a glance.", self.refresh))
         self.system_card = card()
         self.environment_card = card()
         self.body.append(self.system_card)
@@ -397,7 +397,7 @@ class DashboardPage(Page):
 class PhpPage(Page):
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
-        self.body.append(page_header("PHP", "One active PHP provider: Debian system PHP or Sury multi-version PHP.", self.refresh))
+        self.body.append(page_header("PHP", "One active PHP provider: System PHP or distro-appropriate Multi-PHP.", self.refresh))
         tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         tools.append(label("Manage", "section-title"))
         spacer = Gtk.Box()
@@ -421,10 +421,9 @@ class PhpPage(Page):
         self._clear(self.versions_card, "Loading PHP versions…")
 
         def collect():
-            sury = self.context.php.sury_configured()
             provider = self.context.php.provider()
             installed = self.context.php.installed_versions()
-            available = self.context.php.available_versions() if provider == "sury" else []
+            available = self.context.php.available_versions() if provider == "multi" else []
             installed_sorted = sorted(installed, key=self.context.php._version_key, reverse=True)
             available_sorted = sorted(
                 set(available).difference(installed),
@@ -444,10 +443,11 @@ class PhpPage(Page):
                     "developer_pool": self.context.php.developer_pool_configured(version) if config_ready else False,
                 }
             return {
-                "sury": sury,
                 "provider": provider,
-                "sury_migration_needed": self.context.php.sury_migration_needed() if provider == "sury" else False,
-                "sury_supported": self.context.php.sury_supported,
+                "multi_backend": self.context.php.multi_php_backend(),
+                "multi_name": self.context.php.multi_php_repository_name,
+                "multi_migration_needed": self.context.php.multi_php_migration_needed() if provider == "multi" else False,
+                "multi_supported": self.context.php.multi_php_supported,
                 "codename": self.context.distro.codename,
                 "installed": installed,
                 "available": available,
@@ -468,82 +468,82 @@ class PhpPage(Page):
         self._remove_all(self.repo_card)
         self.repo_card.append(label("PHP provider", "section-title"))
         provider = data["provider"]
-        names = {"debian": "Debian", "sury": "Sury", "none": "Not configured"}
+        provider_name = "System" if provider == "system" else (data["multi_name"] if provider == "multi" else "Not configured")
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        row.append(status_pill(names.get(provider, provider.title()), provider in {"debian", "sury"}))
+        row.append(status_pill(provider_name, provider in {"system", "multi"}))
         if data["cli"]:
             row.append(label(f"Default PHP {data['cli']}", "muted"))
         row.set_hexpand(True)
         self.repo_card.append(row)
 
-        if provider == "debian":
+        if provider == "system":
             self.repo_card.append(label(
-                "NativeDev is using Debian's system PHP. Existing PHP can serve *.test through NativeDev's per-user FPM pool.",
+                "NativeDev is using the distribution's system PHP. Existing PHP can serve *.test through NativeDev's per-user FPM pool.",
                 "muted", wrap=True,
             ))
-            button = Gtk.Button(label="Enable Sury Multi-PHP")
-            button.set_sensitive(data["sury_supported"] and self.context.distro.is_debian_family)
+            button = Gtk.Button(label="Enable Multi-PHP")
+            button.set_sensitive(data["multi_supported"] and self.context.distro.is_debian_family)
             button.add_css_class("suggested-action")
-            installed_text = ", ".join(f"PHP {v}" for v in data["installed"]) or "the current Debian PHP runtime"
+            installed_text = ", ".join(f"PHP {v}" for v in data["installed"]) or "the current System PHP runtime"
             button.connect(
                 "clicked",
                 lambda *_: confirm(
                     self.window,
-                    "Enable Sury multi-PHP?",
-                    f"NativeDev will migrate {installed_text} from Debian's PHP provider to Sury, enable multi-version PHP, keep the current default where possible, and reconcile *.test. Once Sury is active NativeDev will no longer offer Debian PHP as another provider.",
-                    lambda: self.action(button, self.context.controller.enable_sury_multi_php, success_message="Sury multi-PHP enabled", after=self.refresh),
+                    "Enable Multi-PHP?",
+                    f"NativeDev will configure {data['multi_name']}, migrate {installed_text} from the system PHP provider in place, keep the current default where possible, and reconcile *.test. Once Multi-PHP is active NativeDev will no longer offer System PHP as another provider.",
+                    lambda: self.action(button, self.context.controller.enable_multi_php, success_message="Multi-PHP enabled", after=self.refresh),
                 ),
             )
             self.repo_card.append(button)
-        elif provider == "sury":
+        elif provider == "multi":
             self.repo_card.append(label(
-                "Sury multi-version PHP is active. NativeDev manages PHP versions only through Sury while this repository is configured.",
+                f"{data['multi_name']} multi-version PHP is active. NativeDev manages PHP versions through this repository while it remains configured.",
                 "muted", wrap=True,
             ))
-            if data["sury_migration_needed"]:
+            if data["multi_migration_needed"]:
                 self.repo_card.append(label(
-                    "Some installed PHP packages still appear to come from the previous system provider. Complete the one-way migration to normalize them to Sury.",
+                    "Some installed PHP packages still appear to come from the previous system provider. Complete the one-way migration to normalize them to Multi-PHP.",
                     "error-text", wrap=True,
                 ))
-                migrate = Gtk.Button(label="Complete Sury migration")
+                migrate = Gtk.Button(label="Complete Multi-PHP migration")
                 migrate.add_css_class("suggested-action")
                 migrate.connect(
                     "clicked",
                     lambda *_: confirm(
                         self.window,
-                        "Complete Sury PHP migration?",
-                        "NativeDev will reinstall the currently installed PHP runtimes from Sury candidates, preserve the current default where possible, and reconcile *.test. Debian PHP will not be offered as a second provider.",
-                        lambda: self.action(migrate, self.context.controller.enable_sury_multi_php, success_message="Sury PHP migration completed", after=self.refresh),
+                        "Complete Multi-PHP migration?",
+                        f"NativeDev will reinstall the currently installed PHP runtimes from {data['multi_name']} candidates, preserve the current default where possible, and reconcile *.test. System PHP will not be offered as a second provider.",
+                        lambda: self.action(migrate, self.context.controller.enable_multi_php, success_message="Multi-PHP migration completed", after=self.refresh),
                     ),
                 )
                 self.repo_card.append(migrate)
         else:
-            self.repo_card.append(label("No PHP runtime is installed. You can install Debian system PHP or enable Sury multi-version PHP.", "muted", wrap=True))
+            self.repo_card.append(label("No PHP runtime is installed. You can install System PHP or enable Multi-PHP.", "muted", wrap=True))
             actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            debian = Gtk.Button(label="Install Debian PHP")
-            debian.connect(
+            system = Gtk.Button(label="Install System PHP")
+            system.connect(
                 "clicked",
                 lambda *_: confirm(
                     self.window,
-                    "Install Debian PHP?",
-                    "NativeDev will install Debian's default PHP CLI/FPM and the standard local-development extension baseline, then configure its *.test FPM pool.",
-                    lambda: self.action(debian, self.context.controller.install_debian_php, success_message="Debian PHP installed", after=self.refresh),
+                    "Install System PHP?",
+                    "NativeDev will install the distribution's default PHP CLI/FPM and the standard local-development extension baseline, then configure its *.test FPM pool.",
+                    lambda: self.action(system, self.context.controller.install_system_php, success_message="System PHP installed", after=self.refresh),
                 ),
             )
-            actions.append(debian)
-            sury = Gtk.Button(label="Enable Sury Multi-PHP")
-            sury.set_sensitive(data["sury_supported"] and self.context.distro.is_debian_family)
-            sury.add_css_class("suggested-action")
-            sury.connect(
+            actions.append(system)
+            multi = Gtk.Button(label="Enable Multi-PHP")
+            multi.set_sensitive(data["multi_supported"] and self.context.distro.is_debian_family)
+            multi.add_css_class("suggested-action")
+            multi.connect(
                 "clicked",
                 lambda *_: confirm(
                     self.window,
-                    "Enable Sury and install PHP?",
-                    "NativeDev will configure Sury and install its newest available PHP runtime with the standard local-development extension baseline. While Sury is active, Debian PHP will not be offered as another provider.",
-                    lambda: self.action(sury, self.context.controller.enable_sury_multi_php, success_message="Sury multi-PHP enabled", after=self.refresh),
+                    "Enable Multi-PHP and install PHP?",
+                    f"NativeDev will configure {data['multi_name']} and install its newest available PHP runtime with the standard local-development extension baseline. While Multi-PHP is active, System PHP will not be offered as another provider.",
+                    lambda: self.action(multi, self.context.controller.enable_multi_php, success_message="Multi-PHP enabled", after=self.refresh),
                 ),
             )
-            actions.append(sury)
+            actions.append(multi)
             self.repo_card.append(actions)
 
     def _build_versions(self, data):
@@ -628,7 +628,7 @@ class PhpPage(Page):
                                 lambda _b, v=version, btn=pool: confirm(
                                     self.window,
                                     f"Configure PHP {v} for *.test?",
-                                    f"NativeDev will create its own PHP-FPM pool running as {data['developer_user']}. Debian/Sury's www pool is not modified.",
+                                    f"NativeDev will create its own PHP-FPM pool running as {data['developer_user']}. The system/multi-PHP www pool is not modified.",
                                     lambda: self.action(btn, lambda: self.context.php.ensure_developer_pool(v), success_message=f"PHP {v} NativeDev pool configured", after=self.refresh),
                                 ),
                             )
@@ -780,8 +780,8 @@ class PhpExtensionsPage(Page):
         selected_index = versions.index(data["selected"])
         dropdown.set_selected(selected_index)
         row.append(dropdown)
-        provider_name = {"debian": "Debian", "sury": "Sury"}.get(data["provider"], data["provider"].title())
-        row.append(status_pill(provider_name, data["provider"] in {"debian", "sury"}))
+        provider_name = {"system": "System", "multi": "Multi-PHP"}.get(data["provider"], data["provider"].title())
+        row.append(status_pill(provider_name, data["provider"] in {"system", "multi"}))
         if default_version:
             row.append(status_pill(f"Default PHP {default_version}", True))
         if data.get("prerelease"):
@@ -951,7 +951,7 @@ class PhpIniPage(Page):
         self.body.append(
             page_header(
                 "PHP Settings",
-                "Per-version NativeDev INI overrides. Debian/Sury php.ini files are never edited; CLI and FPM use the same override layer.",
+                "Per-version NativeDev INI overrides. System/multi-PHP php.ini files are never edited; CLI and FPM use the same override layer.",
                 self.refresh,
                 back=self.window.open_php_page,
             )
@@ -1031,8 +1031,8 @@ class PhpIniPage(Page):
         dropdown = Gtk.DropDown.new_from_strings(version_labels)
         dropdown.set_selected(versions.index(data["selected"]))
         row.append(dropdown)
-        provider_name = {"debian": "Debian", "sury": "Sury"}.get(data["provider"], data["provider"].title())
-        row.append(status_pill(provider_name, data["provider"] in {"debian", "sury"}))
+        provider_name = {"system": "System", "multi": "Multi-PHP"}.get(data["provider"], data["provider"].title())
+        row.append(status_pill(provider_name, data["provider"] in {"system", "multi"}))
         if default_version:
             row.append(status_pill(f"Default PHP {default_version}", True))
         children.append(row)
@@ -1151,7 +1151,7 @@ class PhpIniPage(Page):
                 lambda *_: confirm(
                     self.window,
                     f"Reset PHP {version} NativeDev settings?",
-                    "Only NativeDev's per-version override file and CLI/FPM links will be removed. Debian/Sury php.ini files and PHP extension configuration are not changed.",
+                    "Only NativeDev's per-version override file and CLI/FPM links will be removed. System/multi-PHP php.ini files and PHP extension configuration are not changed.",
                     lambda: self.action(
                         reset,
                         lambda: self.context.php_ini.reset(version),
@@ -1230,7 +1230,7 @@ class PhpIniPage(Page):
 class NodePage(Page):
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
-        self.body.append(page_header("Node.js", "One active Node provider: Debian system Node or NVM multi-version Node.", self.refresh))
+        self.body.append(page_header("Node.js", "One active Node provider: System Node or NVM multi-version Node.", self.refresh))
         self.nvm_card = card()
         self.node_card = card()
         self.body.append(self.nvm_card)
@@ -1282,19 +1282,19 @@ class NodePage(Page):
 
     def _build_provider(self, data):
         provider = data["provider"]
-        names = {"debian": "Debian", "nvm": "NVM", "none": "Not configured"}
+        names = {"system": "System", "nvm": "NVM", "none": "Not configured"}
         children = [label("Node provider", "section-title")]
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        row.append(status_pill(names.get(provider, provider.title()), provider in {"debian", "nvm"}))
-        if provider == "debian" and data["system_version"]:
+        row.append(status_pill(names.get(provider, provider.title()), provider in {"system", "nvm"}))
+        if provider == "system" and data["system_version"]:
             row.append(label(f"System {data['system_version']}", "muted"))
         elif data["nvm_installed"]:
             row.append(label(f"NVM {data['nvm'] or 'installed'} · Shell: {data['rc']}", "muted"))
         children.append(row)
 
-        if provider == "debian":
+        if provider == "system":
             children.append(label(
-                "NativeDev is using Debian's system Node.js. Multi-version Node is available by explicitly migrating to NVM.",
+                "NativeDev is using the system Node.js packages. Multi-version Node is available by explicitly migrating to NVM.",
                 "muted", wrap=True,
             ))
             if data["removal_impact"]:
@@ -1311,7 +1311,7 @@ class NodePage(Page):
                 lambda *_: confirm(
                     self.window,
                     "Enable NVM multi-Node?",
-                    f"NativeDev will remove Debian Node.js{('/npm' if data['system_npm'] else '')} and its automatically installed Debian Node dependency stack, then install/configure NVM, install an NVM-managed LTS runtime and set it as default. Manually installed packages are never removed implicitly.",
+                    f"NativeDev will remove System Node.js{('/npm' if data['system_npm'] else '')} and its automatically installed system Node dependency stack, then install/configure NVM, install an NVM-managed LTS runtime and set it as default. Manually installed packages are never removed implicitly.",
                     lambda: self.action(migrate, self.context.controller.enable_nvm_multi_node, success_message="NVM multi-Node enabled", after=self.refresh),
                 ),
             )
@@ -1323,9 +1323,9 @@ class NodePage(Page):
                 "clicked",
                 lambda *_: confirm(
                     self.window,
-                    "Uninstall Debian Node.js?",
-                    "NativeDev will remove Debian nodejs/npm and their automatically installed Debian Node dependency packages. Migration is blocked if APT would remove another manually installed package.",
-                    lambda: self.action(remove, self.context.node.uninstall_system_node, success_message="Debian Node.js removed", after=self.refresh),
+                    "Uninstall System Node.js?",
+                    "NativeDev will remove system nodejs/npm and their automatically installed Node dependency packages. Migration is blocked if APT would remove another manually installed package.",
+                    lambda: self.action(remove, self.context.node.uninstall_system_node, success_message="System Node.js removed", after=self.refresh),
                 ),
             )
             actions.append(remove)
@@ -1333,18 +1333,18 @@ class NodePage(Page):
 
         elif provider == "nvm":
             children.append(label(
-                "NVM multi-version Node is active. NativeDev manages Node versions through NVM and does not offer Debian Node as a second provider.",
+                "NVM multi-version Node is active. NativeDev manages Node versions through NVM and does not offer System Node as a second provider.",
                 "muted", wrap=True,
             ))
             if data["system_installed"]:
                 if data["removal_impact"]:
                     children.append(label(
-                        "A Debian Node installation is still present, but cleanup is blocked because APT would also remove manually installed package(s): " + ", ".join(data["removal_impact"]),
+                        "A System Node installation is still present, but cleanup is blocked because APT would also remove manually installed package(s): " + ", ".join(data["removal_impact"]),
                         "error-text", wrap=True,
                     ))
                 else:
                     children.append(label(
-                        "A Debian Node installation is still present from before NVM. Complete the migration to remove that system runtime.",
+                        "A System Node installation is still present from before NVM. Complete the migration to remove that runtime.",
                         "error-text", wrap=True,
                     ))
             actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -1360,7 +1360,7 @@ class NodePage(Page):
                     lambda *_: confirm(
                         self.window,
                         "Complete NVM migration?",
-                        "NativeDev will remove the remaining Debian nodejs/npm packages, keep the NVM runtimes, ensure an NVM default, and retain NativeDev's NVM shell integration.",
+                        "NativeDev will remove the remaining system nodejs/npm packages, keep the NVM runtimes, ensure an NVM default, and retain NativeDev's NVM shell integration.",
                         lambda: self.action(cleanup, self.context.controller.enable_nvm_multi_node, success_message="NVM migration completed", after=self.refresh),
                     ),
                 )
@@ -1368,16 +1368,16 @@ class NodePage(Page):
             children.append(actions)
 
         else:
-            children.append(label("No Node.js runtime is installed. You can install Debian system Node or enable NVM multi-version Node.", "muted", wrap=True))
+            children.append(label("No Node.js runtime is installed. You can install System Node or enable NVM multi-version Node.", "muted", wrap=True))
             actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            debian = Gtk.Button(label="Install Debian Node")
+            debian = Gtk.Button(label="Install System Node")
             debian.connect(
                 "clicked",
                 lambda *_: confirm(
                     self.window,
-                    "Install Debian Node.js?",
-                    "NativeDev will install Debian's nodejs package and npm when available.",
-                    lambda: self.action(debian, self.context.node.install_system_node, success_message="Debian Node.js installed", after=self.refresh),
+                    "Install System Node.js?",
+                    "NativeDev will install the distribution's nodejs package and npm when available.",
+                    lambda: self.action(debian, self.context.node.install_system_node, success_message="System Node.js installed", after=self.refresh),
                 ),
             )
             actions.append(debian)
@@ -1388,7 +1388,7 @@ class NodePage(Page):
                 lambda *_: confirm(
                     self.window,
                     "Enable NVM and install Node LTS?",
-                    "NativeDev will install NVM for your user, install the latest LTS runtime and configure the NativeDev shell block. While NVM is active Debian Node will not be offered as another provider.",
+                    "NativeDev will install NVM for your user, install the latest LTS runtime and configure the NativeDev shell block. While NVM is active System Node will not be offered as another provider.",
                     lambda: self.action(nvm, self.context.controller.enable_nvm_multi_node, success_message="NVM multi-Node enabled", after=self.refresh),
                 ),
             )
@@ -1400,16 +1400,16 @@ class NodePage(Page):
     def _build_node_versions(self, data):
         provider = data["provider"]
         node = [label("Node.js versions", "section-title")]
-        if provider == "debian":
+        if provider == "system":
             if data["system_version"]:
                 row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
                 title = label(data["system_version"], "row-title")
                 title.set_hexpand(True)
                 row.append(title)
-                row.append(status_pill("Installed · Debian · Default", True))
+                row.append(status_pill("Installed · System · Default", True))
                 node.append(row)
             else:
-                node.append(label("Debian Node.js is not currently usable.", "muted"))
+                node.append(label("System Node.js is not currently usable.", "muted"))
             self._replace(self.node_card, node)
             return
 
@@ -1511,7 +1511,7 @@ class NodePage(Page):
 class ServicesPage(Page):
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
-        self.body.append(page_header("Services & tools", "Install, remove and control Debian-family system components.", self.refresh))
+        self.body.append(page_header("Services & tools", "Install, remove and control system components.", self.refresh))
         note = label("System authentication is requested once per NativeDev session; privileged actions reuse the restricted helper until the app closes.", "muted", wrap=True)
         self.body.append(note)
         self.list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -1569,7 +1569,7 @@ class ServicesPage(Page):
                         lambda _b, s=spec, btn=install: confirm(
                             self.window,
                             f"Install {s.title}?",
-                            "NativeDev will install the Debian-family system package(s). Database services also receive the local nativedev development account automatically. Services are enabled and started when applicable.",
+                            "NativeDev will install the system package(s). Database services also receive the local development account automatically. Services are enabled and started when applicable.",
                             lambda: self.action(btn, lambda: self.context.controller.install_component(s), success_message=f"{s.title} installed", after=self.refresh),
                         ),
                     )
@@ -2224,7 +2224,7 @@ class MainWindow(Gtk.ApplicationWindow):
         header = Gtk.HeaderBar()
         title = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         title.append(label("NativeDev", "app-title"))
-        title.append(label(f"Native Debian development manager · {__version__}", "muted"))
+        title.append(label(f"Native system development manager · {__version__}", "muted"))
         header.set_title_widget(title)
         self.set_titlebar(header)
 
@@ -2283,7 +2283,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.connect("close-request", self._on_close)
 
         if not self.context.distro.is_debian_family:
-            self.set_activity(False, f"{self.context.distro.pretty_name} is outside the supported Debian family", error=True)
+            self.set_activity(False, f"{self.context.distro.pretty_name} is outside the supported Debian/Ubuntu family", error=True)
 
     def _on_row_selected(self, _listbox, row):
         if row:

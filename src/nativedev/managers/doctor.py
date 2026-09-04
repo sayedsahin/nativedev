@@ -38,11 +38,11 @@ class Doctor:
 
     def run(self) -> list[Check]:
         checks: list[Check] = [
-            Check(self.distro.is_debian_family, "Debian-family distribution", self.distro.pretty_name),
+            Check(self.distro.is_debian_family, "Debian/Ubuntu-family distribution", self.distro.pretty_name),
             Check(self.apt.available, "APT/dpkg available"),
             Check(self.systemd.available, "systemd available"),
             Check(bool(shutil.which("pkexec")), "Polkit / pkexec available"),
-            Check(self.php.sury_configured(), "Sury PHP repository", "optional" if not self.php.sury_configured() else "configured"),
+            Check(self.php.multi_php_configured(), "Multi-PHP repository", "optional" if not self.php.multi_php_configured() else self.php.multi_php_repository_name),
             Check(bool(self.php.installed_versions()), "PHP installed", ", ".join(self.php.installed_versions())),
             Check(self.node.provider() != "none", "Node.js provider", self.node.provider()),
             Check(self.localdev.dns_ready(), f"*.{self.localdev.config.domain} DNS", self.localdev.dns_strategy()),

@@ -51,7 +51,7 @@ SUGGESTED_DIRECTIVES: tuple[str, ...] = (
 class PhpIniManager:
     """Manage one NativeDev-owned INI override layer per PHP version.
 
-    NativeDev never edits Debian/Sury's php.ini files. The root helper owns the
+    NativeDev never edits System/Multi-PHP php.ini files. The root helper owns the
     fixed /etc/php/<version>/mods-available/nativedev.ini file and the matching
     99-nativedev.ini links for CLI and FPM. PHP extension loading remains the
     exclusive responsibility of PhpExtensionManager.

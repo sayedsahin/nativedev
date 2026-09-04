@@ -1,10 +1,18 @@
 # Changelog
 
+## 0.1.9 - Debian/Ubuntu Multi-PHP provider refinement
+- Multi-PHP repository setup is now distro-aware. Debian uses `packages.sury.org/php`; Ubuntu uses the Ondřej PHP PPA, and Ubuntu derivatives resolve their parent suite from `UBUNTU_CODENAME` instead of using the derivative codename.
+- The privileged helper independently re-detects the host family and suite before accepting a Multi-PHP repository request. Ubuntu-family setup uses the fixed Ondřej Launchpad PPA URI with the resolved Ubuntu suite, so derivatives such as Linux Mint do not accidentally request a non-Ubuntu PPA series.
+- Existing active Sury/Ondřej APT sources are detected by repository URI rather than relying on one NativeDev filename, including both one-line `.list` and DEB822 `.sources` formats.
+- PHP provider terminology is distro-neutral in the UI and controller: **System PHP** / **Multi-PHP** replaces Debian-as-provider wording. Node's distribution-package provider is likewise exposed as **System Node** instead of Debian Node.
+- Privileged RPC advanced to protocol 15 for semantic `php.multi_repo.configure` / `php.multi_repo.remove`; re-run `./install.sh` after applying this patch.
+- Expanded regression coverage to 111 tests, including Ubuntu-derivative suite resolution, Ondřej/Sury source detection, fixed PPA configuration, and System Node provider naming.
+
 ## 0.1.9 - Service/database cleanup refinement
 - Reverted MariaDB/PostgreSQL uninstall to the original conservative `apt remove` runtime-package flow after the aggressive purge path could contend on the dpkg frontend lock and leave the UI waiting.
-- Removed the destructive database cleanup/ownership-repair RPCs from the privileged helper. Database uninstall now preserves Debian common/shared packages, database data, database users/passwords, service users/groups, logs/runtime directories, and APT cache.
+- Removed the destructive database cleanup/ownership-repair RPCs from the privileged helper. Database uninstall now preserves distribution common/shared packages, database data, database users/passwords, service users/groups, logs/runtime directories, and APT cache.
 - Database uninstall still deletes NativeDev's saved credential record (`~/.config/nativedev/database-credentials.json` entry) after package removal. Server-side database passwords live in database data, not `/etc/mysql` or `/etc/postgresql`, so they are intentionally not claimed to be erased by config cleanup.
-- Services are now ordered **Nginx → MariaDB / MySQL → PostgreSQL → Redis → Memcached → Composer → mkcert**. The separate MySQL install row is removed; NativeDev installs MariaDB from Debian repositories and displays the detected MariaDB version.
+- Services are now ordered **Nginx → MariaDB / MySQL → PostgreSQL → Redis → Memcached → Composer → mkcert**. The separate MySQL install row is removed; NativeDev installs MariaDB from system repositories and displays the detected MariaDB version.
 - Database credential cards now show conventional `localhost` endpoints for both MariaDB/MySQL and PostgreSQL, while NativeDev keeps explicit loopback TCP internally for password verification.
 - Privileged RPC advanced to protocol 14 so installations with the removed destructive database-cleanup RPC cannot be used accidentally; re-run `./install.sh` after applying this patch.
 

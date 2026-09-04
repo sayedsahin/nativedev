@@ -23,7 +23,15 @@ class DistroTests(unittest.TestCase):
     def test_ubuntu_derivative_uses_base_codename(self):
         info = self.parse('ID=linuxmint\nID_LIKE="ubuntu debian"\nVERSION_CODENAME=wilma\nUBUNTU_CODENAME=noble\n')
         self.assertTrue(info.is_debian_family)
+        self.assertTrue(info.is_ubuntu_family)
+        self.assertEqual(info.ubuntu_codename, "noble")
         self.assertEqual(info.codename, "noble")
+
+    def test_ubuntu_codename_marks_derivative_even_without_ubuntu_id_like(self):
+        info = self.parse('ID=example\nID_LIKE=debian\nVERSION_CODENAME=custom\nUBUNTU_CODENAME=jammy\n')
+        self.assertTrue(info.is_ubuntu_family)
+        self.assertTrue(info.is_debian_family)
+        self.assertEqual(info.codename, "jammy")
 
 
 class VersionTests(unittest.TestCase):
@@ -244,7 +252,7 @@ class PrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=uid)[0]
 
     def test_allows_structured_native_operations(self):
-        protocol = 14
+        protocol = 15
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "restart", "now": False, "service": "nginx"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "disable", "now": True, "service": "php8.4-fpm"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["redis-tools"]}))
@@ -266,12 +274,15 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/php/8.4/fpm/pool.d/nativedev-1001.conf"]}, uid=1000))
 
     def test_rejects_raw_commands_and_outside_packages(self):
-        protocol = 14
+        protocol = 15
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "run", "argv": ["bash", "-c", "id"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["openssh-server"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["/tmp/nativedev-test/debsuryorg-archive-keyring.deb"]}))
-        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "sury.configure", "codename": "trixie"}))
-        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "sury.configure", "codename": "evil-suite"}))
+        from unittest.mock import patch
+        with patch("nativedev.privileged_helper._php_multi_repo_target", return_value=("sury", "trixie")):
+            self.assertTrue(self.operation_ok({"protocol": protocol, "action": "php.multi_repo.configure", "backend": "sury", "codename": "trixie"}))
+            self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.multi_repo.configure", "backend": "sury", "codename": "evil-suite"}))
+            self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.multi_repo.configure", "backend": "ondrej", "codename": "trixie"}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "restart", "now": False, "service": "ssh"}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.reinstall_confmiss", "packages": ["nginx"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.install_packages", "packages": ["nginx"]}))
@@ -293,6 +304,43 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"memory_limit": "512M"}, "path": "/etc/php/8.4/php.ini"}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.reset", "version": "8.4", "settings": {"memory_limit": "512M"}}))
 
+    def test_php_multi_repo_root_detection_uses_ubuntu_codename_for_derivatives(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import _php_multi_repo_target
+
+        release = {
+            "ID": "linuxmint",
+            "ID_LIKE": "ubuntu debian",
+            "VERSION_CODENAME": "wilma",
+            "UBUNTU_CODENAME": "noble",
+        }
+        with patch("nativedev.privileged_helper._read_os_release", return_value=release):
+            self.assertEqual(_php_multi_repo_target(), ("ondrej", "noble"))
+
+    def test_php_multi_repo_ubuntu_configure_uses_fixed_ondrej_ppa(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import execute_operation
+        import subprocess
+
+        request = {
+            "protocol": 15,
+            "action": "php.multi_repo.configure",
+            "backend": "ondrej",
+            "codename": "noble",
+        }
+        completed = subprocess.CompletedProcess(["add-apt-repository"], 0, "", "")
+        with patch("nativedev.privileged_helper._validate_php_multi_repo_request", return_value=("ondrej", "noble")), \
+             patch("nativedev.privileged_helper.shutil.which", return_value="/usr/bin/add-apt-repository"), \
+             patch("nativedev.privileged_helper.subprocess.run", return_value=completed) as run:
+            result = execute_operation(request, uid=1000, timeout=120)
+
+        self.assertEqual(result.returncode, 0)
+        argv = run.call_args.args[0]
+        kwargs = run.call_args.kwargs
+        self.assertEqual(argv, ["/usr/bin/add-apt-repository", "-y", "--sourceslist", "deb https://ppa.launchpadcontent.net/ondrej/php/ubuntu noble main"])
+        self.assertEqual(kwargs["env"]["LC_ALL"], "C.UTF-8")
+        self.assertEqual(kwargs["env"]["PATH"], "/usr/sbin:/usr/bin:/sbin:/bin")
+
     def test_client_translates_to_semantic_rpc_without_argv(self):
         from nativedev.system import privileged_operation_for_command
         request = privileged_operation_for_command(["systemctl", "enable", "--now", "nginx"])
@@ -306,7 +354,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {
-            "protocol": 14,
+            "protocol": 15,
             "action": "php.install_packages",
             "packages": ["php8.4-cli", "php8.4-gd", "php8.4-opcache"],
         }
@@ -327,7 +375,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         from nativedev.system import CommandResult
 
-        request = {"protocol": 14, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
+        request = {"protocol": 15, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("nativedev.privileged_helper.subprocess.run") as run, \
              patch("nativedev.privileged_helper._run_extension_module_pair") as modules:
@@ -467,8 +515,8 @@ class ServiceCleanupTests(unittest.TestCase):
         from nativedev.privileged_helper import validate_operation
 
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
-            self.assertFalse(validate_operation({"protocol": 14, "action": "database.cleanup_component", "key": "mariadb", "delete_data": False})[0])
-            self.assertFalse(validate_operation({"protocol": 14, "action": "database.repair_data_ownership", "key": "postgresql"})[0])
+            self.assertFalse(validate_operation({"protocol": 15, "action": "database.cleanup_component", "key": "mariadb", "delete_data": False})[0])
+            self.assertFalse(validate_operation({"protocol": 15, "action": "database.repair_data_ownership", "key": "postgresql"})[0])
 
 
 class ManagerPackageExportTests(unittest.TestCase):
@@ -789,7 +837,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=1000)[0]
 
     def test_database_rpc_derives_username_from_peer_and_rejects_client_user_or_sql_selectors(self):
-        protocol = 14
+        protocol = 15
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.account_status"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "nativedev", "admin_password": "root secret !@#"}))
@@ -806,7 +854,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 14, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 15, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
         calls = []
 
         def run_admin(sql, admin_password, timeout, env):
@@ -831,7 +879,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 14, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 15, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
              patch("nativedev.privileged_helper._run_mysql_admin") as run_admin:
             run_admin.return_value = subprocess.CompletedProcess(["mariadb"], 1, "", "ERROR 1045")
@@ -846,7 +894,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         import subprocess
 
         request = {
-            "protocol": 14,
+            "protocol": 15,
             "action": "database.mysql.ensure_dev_account",
             "password": "nativedev",
             "admin_password": "Root secret !@#",
@@ -895,7 +943,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 14, "action": "database.postgresql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 15, "action": "database.postgresql.ensure_dev_account", "password": "nativedev"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
              patch("nativedev.privileged_helper._postgres_admin_argv", return_value=["/usr/bin/runuser", "psql"]), \
              patch("nativedev.privileged_helper.subprocess.run") as run:
@@ -1378,57 +1426,108 @@ class GuiFeatureRegressionTests(unittest.TestCase):
 
 
 class ProviderMigrationTests(unittest.TestCase):
-    def test_php_provider_uses_sury_mode_whenever_sury_source_is_active(self):
-        from nativedev.system import DistroInfo
-
-        class Apt:
-            def is_installed(self, package): return package == "php8.4-cli"
-
-        manager = PhpManager(None, Apt(), None, DistroInfo("debian", "Debian", "13", "trixie", (), "Debian 13"))
-        manager.sury_configured = lambda: True
-        manager.installed_versions = lambda: ["8.4"]
-        self.assertEqual(manager.provider(), "sury")
-
-    def test_php_provider_uses_debian_only_without_sury(self):
+    def test_php_provider_uses_multi_mode_whenever_multi_repo_is_active(self):
         from nativedev.system import DistroInfo
 
         manager = PhpManager(None, object(), None, DistroInfo("debian", "Debian", "13", "trixie", (), "Debian 13"))
-        manager.sury_configured = lambda: False
+        manager.multi_php_configured = lambda: True
         manager.installed_versions = lambda: ["8.4"]
-        self.assertEqual(manager.provider(), "debian")
+        self.assertEqual(manager.provider(), "multi")
 
-    def test_php_debian_to_sury_migrates_in_place_after_repository_preflight(self):
+    def test_php_provider_uses_system_without_multi_repo(self):
+        from nativedev.system import DistroInfo
+
+        manager = PhpManager(None, object(), None, DistroInfo("debian", "Debian", "13", "trixie", (), "Debian 13"))
+        manager.multi_php_configured = lambda: False
+        manager.installed_versions = lambda: ["8.4"]
+        self.assertEqual(manager.provider(), "system")
+
+    def test_php_multi_repo_backend_is_sury_on_debian_and_ondrej_on_ubuntu_derivative(self):
+        from nativedev.system import DistroInfo
+
+        debian = PhpManager(None, object(), None, DistroInfo("debian", "Debian", "13", "trixie", (), "Debian 13"))
+        ubuntu_derivative = PhpManager(
+            None, object(), None,
+            DistroInfo("linuxmint", "Linux Mint", "22", "noble", ("ubuntu", "debian"), "Linux Mint 22", "noble"),
+        )
+        self.assertEqual(debian.expected_multi_php_backend, "sury")
+        self.assertEqual(debian.multi_php_repository_name, "Sury")
+        self.assertTrue(debian.multi_php_supported)
+        self.assertEqual(ubuntu_derivative.expected_multi_php_backend, "ondrej")
+        self.assertEqual(ubuntu_derivative.multi_php_repository_name, "Ondřej PHP PPA")
+        self.assertTrue(ubuntu_derivative.multi_php_supported)
+
+    def test_php_multi_repo_detection_recognizes_existing_sury_and_ondrej_sources(self):
+        from unittest.mock import patch
+        from nativedev.system import DistroInfo
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sources = root / "sources.list.d"
+            sources.mkdir()
+            main = root / "sources.list"
+            main.write_text("# no multi-PHP repository here\n", encoding="utf-8")
+
+            ppa = sources / "ondrej.list"
+            ppa.write_text(
+                "deb https://ppa.launchpadcontent.net/ondrej/php/ubuntu noble main\n",
+                encoding="utf-8",
+            )
+            ubuntu = PhpManager(
+                None, object(), None,
+                DistroInfo("linuxmint", "Linux Mint", "22", "noble", ("ubuntu", "debian"), "Linux Mint 22", "noble"),
+            )
+            with patch("nativedev.managers.php.APT_SOURCES_LIST", main), \
+                 patch("nativedev.managers.php.APT_SOURCES_DIR", sources):
+                self.assertEqual(ubuntu.multi_php_backend(), "ondrej")
+                self.assertTrue(ubuntu.multi_php_configured())
+
+            ppa.unlink()
+            sury = sources / "sury.sources"
+            sury.write_text(
+                "Types: deb\n"
+                "URIs: https://packages.sury.org/php/\n"
+                "Suites: trixie\n"
+                "Components: main\n",
+                encoding="utf-8",
+            )
+            debian = PhpManager(None, object(), None, DistroInfo("debian", "Debian", "13", "trixie", (), "Debian 13"))
+            with patch("nativedev.managers.php.APT_SOURCES_LIST", main), \
+                 patch("nativedev.managers.php.APT_SOURCES_DIR", sources):
+                self.assertEqual(debian.multi_php_backend(), "sury")
+                self.assertTrue(debian.multi_php_configured())
+
+    def test_php_system_to_multi_migrates_in_place_after_repository_preflight(self):
         from nativedev.system import DistroInfo
 
         events = []
-
         manager = PhpManager(None, object(), None, DistroInfo("debian", "Debian", "13", "trixie", (), "Debian 13"))
         manager.default_fpm_version = lambda: "8.4"
         manager.cli_version = lambda: "8.4"
-        manager.sury_configured = lambda: False
-        manager.configure_sury = lambda explicit=False: events.append(("configure_sury", explicit))
+        manager.multi_php_configured = lambda: False
+        manager.configure_multi_php = lambda explicit=False: events.append(("configure_multi", explicit))
         manager.available_versions = lambda: ["8.5", "8.4"]
         manager.installed_versions = lambda: ["8.4"]
-        manager.install_version = lambda version: events.append(("install_sury", version))
+        manager.install_version = lambda version: events.append(("install_multi", version))
         manager.set_cli_default = lambda version: events.append(("default", version))
 
-        self.assertEqual(manager.enable_sury_multi_php(), "8.4")
-        self.assertEqual(events[0], ("configure_sury", True))
-        self.assertIn(("install_sury", "8.4"), events)
+        self.assertEqual(manager.enable_multi_php(), "8.4")
+        self.assertEqual(events[0], ("configure_multi", True))
+        self.assertIn(("install_multi", "8.4"), events)
         self.assertIn(("default", "8.4"), events)
 
-    def test_sury_migration_needed_reports_old_package_origin_without_changing_provider(self):
+    def test_multi_php_migration_needed_reports_system_package_origin_without_changing_provider(self):
         from nativedev.system import DistroInfo
 
         class Apt:
             def is_installed(self, package): return package == "php8.4-cli"
 
         manager = PhpManager(None, Apt(), None, DistroInfo("debian", "Debian", "13", "trixie", (), "Debian 13"))
-        manager.sury_configured = lambda: True
+        manager.multi_php_configured = lambda: True
         manager.installed_versions = lambda: ["8.4"]
-        manager.installed_package_provider = lambda package: "debian"
-        self.assertEqual(manager.provider(), "sury")
-        self.assertTrue(manager.sury_migration_needed())
+        manager.installed_package_provider = lambda package: "system"
+        self.assertEqual(manager.provider(), "multi")
+        self.assertTrue(manager.multi_php_migration_needed())
 
     def test_node_provider_nvm_wins_when_system_node_is_also_present(self):
         class Apt:
@@ -1437,6 +1536,14 @@ class ProviderMigrationTests(unittest.TestCase):
         manager = NodeManager(None, Apt())
         manager.installed = lambda: True
         self.assertEqual(manager.provider(), "nvm")
+
+    def test_node_provider_uses_system_name_for_distribution_packages(self):
+        class Apt:
+            def is_installed(self, package): return package == "nodejs"
+
+        manager = NodeManager(None, Apt())
+        manager.installed = lambda: False
+        self.assertEqual(manager.provider(), "system")
 
     def test_node_migration_blocks_manually_installed_apt_removals(self):
         from nativedev.system import CommandResult
@@ -1501,22 +1608,25 @@ class ProviderMigrationTests(unittest.TestCase):
         self.assertLess(events.index(("remove_system", ("nodejs", "npm"))), events.index(("install_nvm",)))
         self.assertLess(events.index(("install_nvm",)), events.index(("install_lts",)))
 
-    def test_provider_ui_is_one_way_and_has_no_switch_back_to_debian(self):
+    def test_provider_ui_is_one_way_and_uses_system_wording(self):
         gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
         controller = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "controller.py").read_text()
         php = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "managers" / "php.py").read_text()
         node = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "managers" / "node.py").read_text()
 
-        self.assertIn('Gtk.Button(label="Enable Sury Multi-PHP")', gui)
+        self.assertIn('Gtk.Button(label="Enable Multi-PHP")', gui)
         self.assertIn('Gtk.Button(label="Enable NVM Multi-Node")', gui)
-        self.assertNotIn('Gtk.Button(label="Switch to Debian PHP")', gui)
+        self.assertNotIn('Gtk.Button(label="Switch to System PHP")', gui)
         self.assertNotIn('Gtk.Button(label="Switch to Debian Node")', gui)
         self.assertNotIn('Gtk.Button(label="Normalize to Debian")', gui)
-        self.assertIn("def enable_sury_multi_php", controller)
+        self.assertNotIn("Install Debian PHP", gui)
+        self.assertNotIn("Debian system PHP", gui)
+        self.assertNotIn("Debian Node", gui)
+        self.assertIn("def enable_multi_php", controller)
         self.assertIn("def enable_nvm_multi_node", controller)
         self.assertNotIn("def switch_php_provider", controller)
         self.assertNotIn("def switch_node_provider", controller)
-        self.assertNotIn("def switch_to_debian", php)
+        self.assertNotIn("def switch_php_provider", php)
         self.assertNotIn("def switch_to_debian", node)
 
 
@@ -1558,22 +1668,22 @@ class MissingExecutableRegressionTests(unittest.TestCase):
         with patch("nativedev.managers.php.shutil.which", return_value=None):
             self.assertEqual(manager.cli_version(), "")
 
-    def test_php_refresh_source_detects_sury_before_parallel_catalog(self):
+    def test_php_refresh_checks_provider_before_parallel_catalog(self):
         gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
         php_page = gui[gui.index("class PhpPage"):gui.index("class NodePage")]
-        self.assertIn("sury = self.context.php.sury_configured()", php_page)
-        self.assertIn("available = self.context.php.available_versions() if provider == \"sury\" else []", php_page)
+        self.assertIn('provider = self.context.php.provider()', php_page)
+        self.assertIn('available = self.context.php.available_versions() if provider == "multi" else []', php_page)
 
-    def test_php_available_versions_require_sury(self):
+    def test_php_available_versions_require_multi_repo(self):
         from nativedev.system import DistroInfo
 
         class Runner:
             def run(self, argv, **kwargs):
-                raise AssertionError("APT metadata should not be queried before Sury is configured")
+                raise AssertionError("APT metadata should not be queried before Multi-PHP is configured")
 
         distro = DistroInfo("debian", "Debian", "13", "trixie", (), "Debian 13")
         manager = PhpManager(Runner(), None, None, distro)
-        manager.sury_configured = lambda: False
+        manager.multi_php_configured = lambda: False
         self.assertEqual(manager.available_versions(), [])
 
 

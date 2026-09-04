@@ -25,7 +25,7 @@ COMPONENTS: tuple[ComponentSpec, ...] = (
         ("mariadb-server", "mariadb-client"),
         "mariadb",
         "mariadb",
-        "MySQL-compatible server; NativeDev installs MariaDB from Debian repositories.",
+        "MySQL-compatible server; NativeDev installs MariaDB from the system repositories.",
     ),
     ComponentSpec("postgresql", "PostgreSQL", ("postgresql", "postgresql-client"), "postgresql", "psql"),
     ComponentSpec(

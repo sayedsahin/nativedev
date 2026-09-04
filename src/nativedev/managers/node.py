@@ -24,11 +24,11 @@ class LtsRelease:
 
 
 class NodeManager:
-    """Manage one active Node provider: Debian APT or per-user NVM.
+    """Manage one active Node provider: system APT packages or per-user NVM.
 
-    NativeDev can discover/manage an existing Debian Node installation without
+    NativeDev can discover/manage an existing System Node installation without
     touching it automatically. Multi-version Node is an explicit provider
-    migration to NVM; after a successful migration the Debian node/npm packages
+    migration to NVM; after a successful migration the system node/npm packages
     are no longer retained as a second selectable runtime.
     """
 
@@ -62,16 +62,16 @@ class NodeManager:
         return value if result.ok and re.fullmatch(r"v\d+\.\d+\.\d+", value) else ""
 
     def provider(self) -> str:
-        """Return the NativeDev Node mode: ``nvm``, ``debian`` or ``none``.
+        """Return the NativeDev Node mode: ``nvm``, ``system`` or ``none``.
 
         Presence of the NVM framework wins deliberately. NativeDev never offers
-        Debian as a second provider once NVM is active; a leftover system Node is
+        System Node as a second provider once NVM is active; a leftover system Node is
         treated only as an incomplete NVM migration that can be cleaned up.
         """
         if self.installed():
             return "nvm"
         if self.system_node_installed():
-            return "debian"
+            return "system"
         return "none"
 
     def install_nvm(self) -> None:
@@ -146,7 +146,7 @@ class NodeManager:
 
     def current_node(self) -> str:
         provider = self.provider()
-        if provider == "debian":
+        if provider == "system":
             return self.system_node_version()
         if not self.installed():
             return ""
@@ -244,11 +244,11 @@ class NodeManager:
     def system_removal_impact(self) -> list[str]:
         """Return manually-installed packages that would be removed with Node.
 
-        Debian's ``npm`` package pulls in a large graph of ``node-*`` packages
+        The system ``npm`` package pulls in a large graph of ``node-*`` packages
         (and tools such as eslint/webpack) as automatic dependencies. Removing
-        the Debian Node provider may legitimately remove that dependency graph;
+        the System Node provider may legitimately remove that dependency graph;
         treating every simulated ``Remv`` row as unrelated makes a normal
-        Debian -> NVM migration impossible.
+        System -> NVM migration impossible.
 
         NativeDev therefore blocks only when APT would also remove a package
         that is marked *manual* by apt-mark. If apt-mark cannot be queried, fall
@@ -293,33 +293,33 @@ class NodeManager:
         self.apt.install(packages)
         version = self.system_node_version()
         if not version:
-            raise RuntimeError("Debian Node.js was installed but /usr/bin/node is not usable")
+            raise RuntimeError("System Node.js was installed but /usr/bin/node is not usable")
         return version
 
     def uninstall_system_node(self) -> None:
         extras = self.system_removal_impact()
         if extras:
             raise RuntimeError(
-                "NativeDev will not remove Debian Node because APT would also remove manually installed package(s): "
+                "NativeDev will not remove System Node because APT would also remove manually installed package(s): "
                 + ", ".join(extras)
             )
         packages = [pkg for pkg in ("nodejs", "npm") if self.apt.is_installed(pkg)]
         if not packages:
-            raise RuntimeError("Debian Node.js is not installed")
+            raise RuntimeError("System Node.js is not installed")
         self.apt.remove(packages)
 
     def enable_nvm_multi_node(self) -> str:
-        """Migrate Debian Node to exclusive NVM management and install LTS."""
+        """Migrate System Node to exclusive NVM management and install LTS."""
         extras = self.system_removal_impact()
         if extras:
             raise RuntimeError(
-                "NativeDev will not remove Debian Node because APT would also remove manually installed package(s): "
+                "NativeDev will not remove System Node because APT would also remove manually installed package(s): "
                 + ", ".join(extras)
             )
 
-        # NativeDev's provider migration is explicit: retire Debian Node first,
+        # NativeDev's provider migration is explicit: retire System Node first,
         # then activate NVM. If NVM bootstrap or LTS installation fails, restore
-        # the Debian packages as rollback so the user is not left without Node.
+        # the system packages as rollback so the user is not left without Node.
         had_shell = self.shell_configured()
         system_packages = [pkg for pkg in ("nodejs", "npm") if self.apt.is_installed(pkg)]
 
@@ -339,7 +339,7 @@ class NodeManager:
                 try:
                     self.install_system_node()
                 except Exception as rollback_exc:
-                    rollback_errors.append(f"Debian Node restore failed: {rollback_exc}")
+                    rollback_errors.append(f"System Node restore failed: {rollback_exc}")
             if not had_shell:
                 try:
                     self.remove_shell_integration()
@@ -349,14 +349,14 @@ class NodeManager:
                 raise RuntimeError(
                     f"NVM migration failed ({exc}); " + "; ".join(rollback_errors)
                 ) from exc
-            restored = "Debian Node was restored" if system_packages else "provider state was rolled back"
+            restored = "System Node was restored" if system_packages else "provider state was rolled back"
             raise RuntimeError(f"NVM migration failed; {restored}: {exc}") from exc
 
         return self.default_node() or (self.installed_versions()[0] if self.installed_versions() else "")
 
     def _require_nvm_provider(self) -> None:
         provider = self.provider()
-        if provider == "debian":
+        if provider == "system":
             raise RuntimeError("Switch Node.js provider to NVM before managing multiple Node versions")
         if not self.installed():
             raise RuntimeError("NVM is not installed")

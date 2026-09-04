@@ -1,6 +1,6 @@
 # NativeDev
 
-**NativeDev provides a graphical control plane for a native PHP development stack on Debian-based Linux.**
+**NativeDev provides a graphical control plane for a native PHP development stack on Debian/Ubuntu-family Linux.**
 
 It is a minimal **Python + PyGObject + GTK4** desktop manager that orchestrates native host services instead of replacing them with a private container/runtime stack.
 
@@ -10,45 +10,45 @@ NativeDev deliberately manages the services already provided by your Linux syste
 
 ## Current target
 
-The distro detector accepts Debian/Ubuntu families through `/etc/os-release` (`ID` / `ID_LIKE`). The practical GTK4/Python baseline is:
+The distro detector accepts Debian/Ubuntu families through `/etc/os-release`. Ubuntu derivatives are resolved through `UBUNTU_CODENAME` when available, so their parent Ubuntu suite is used for repository decisions. The practical GTK4/Python baseline is:
 
 - Debian 12 (Bookworm) and Debian 13 (Trixie)
-- Ubuntu 22.04+ and current derivatives such as Linux Mint, Pop!_OS and Zorin when their base repositories provide the required GTK4 packages
+- Ubuntu 22.04 (Jammy) and 24.04 (Noble), plus derivatives based on those suites such as Linux Mint, Pop!_OS and Zorin when their base repositories provide the required GTK4 packages
 
 NativeDev intentionally does not bundle a newer Python/GTK runtime for old distributions. If `gir1.2-gtk-4.0` is unavailable from the distro, the lightweight installer stops instead of growing a second runtime stack.
 
 ## Included in this MVP
 
 ### PHP
-- Detect and manage an existing Debian system PHP without changing its repository merely because NativeDev starts
-- Use an existing Debian PHP-FPM installation for NativeDev `*.test` sites through a separate per-user pool
-- Offer an explicit, one-way **Enable Sury Multi-PHP** migration when multi-version PHP is wanted; once Sury is active NativeDev no longer offers Debian as a second PHP provider
-- Resolve Ubuntu-derived base codenames via `UBUNTU_CODENAME` and configure the Sury keyring + a NativeDev-owned DEB822 source file
-- Migrate existing Debian PHP package names to Sury candidates in place rather than uninstalling first, avoiding unnecessary removal of reverse dependants such as Composer
-- Discover versioned `phpX.Y-fpm` packages from Sury and render installed PHP versions before available versions
+- Detect and manage an existing System PHP without changing its repository merely because NativeDev starts
+- Use an existing System PHP-FPM installation for NativeDev `*.test` sites through a separate per-user pool
+- Offer an explicit, one-way **Enable Multi-PHP** migration when multi-version PHP is wanted; once the distro-appropriate Multi-PHP repository is active NativeDev no longer offers System PHP as a second provider
+- Configure Multi-PHP by distribution family: Debian uses `packages.sury.org/php` with NativeDev-owned DEB822/keyring integration; Ubuntu and Ubuntu derivatives use `ppa:ondrej/php`, with derivatives mapped to their parent Ubuntu suite through `UBUNTU_CODENAME`
+- Migrate existing System PHP package names to the active Multi-PHP candidates in place rather than uninstalling first, avoiding unnecessary removal of reverse dependants such as Composer
+- Discover versioned `phpX.Y-fpm` packages from the active Multi-PHP repository and render installed PHP versions before available versions
 - Install CLI/FPM plus a Laravel/Symfony-friendly baseline (`bcmath`, `curl`, `gd`, `intl`, `mbstring`, MySQL/PostgreSQL/SQLite drivers, `xml`, `zip`, etc.)
-- Restore missing Debian/Sury UCF-managed module definitions during the explicit Install operation, then enable the baseline for CLI and FPM; later manual module disables are not overridden during refresh/start/stop
+- Restore missing System/Multi-PHP UCF-managed module definitions during the explicit Install operation, then enable the baseline for CLI and FPM; later manual module disables are not overridden during refresh/start/stop
 - Install/enable the separate OPcache package for PHP versions before 8.5; PHP 8.5+ does not request a separate OPcache package
 - Start/stop/restart and enable/disable each installed PHP-FPM version
 - Uninstall a PHP version together with all currently installed `phpX.Y` / `phpX.Y-*` packages for that version
 - Select the default `/usr/bin/php` with `update-alternatives`; the current Default button is disabled
-- Create a NativeDev-owned per-user PHP-FPM pool for each version used by `*.test`; PHP workers run as the logged-in developer while Debian/Sury's `www` pool stays untouched
+- Create a NativeDev-owned per-user PHP-FPM pool for each version used by `*.test`; PHP workers run as the logged-in developer while the distribution/Multi-PHP `www` pool stays untouched
 - Manage extensions from a dedicated **PHP Extensions** page with an installed-PHP version selector; the current CLI default is preselected and explicitly marked. Install/Uninstall/Enable/Disable always apply to CLI and FPM together, never as separate SAPI controls
 - Show selected-version runtime/core modules such as JSON, OpenSSL, PDO and php-common modules as read-only **Built-in** inventory with no package actions
 - Curated extension catalog includes database/common packages plus APCu, BZip2, DBA, Enchant, GMP, IMAP, LDAP, ODBC, Pspell, SNMP, SOAP, Tidy, Redis, Memcached, Imagick, AMQP, MongoDB, SSH2, SMB Client, YAML, Igbinary, MessagePack, PCOV and Xdebug; unavailable packages are shown but cannot be installed
 - Keep package presence separate from enabled state: an installed-but-disabled extension remains installed until explicitly uninstalled, and ordinary refresh never overrides that choice. Normal rows use their far-right action buttons as the state cue; only **Built-in** and **Unavailable** rows show a status pill
 - Detect alpha/beta/RC/dev PHP runtimes from the selected runtime itself and mark them **Pre-release** on the Extensions page
 - Run an APT removal simulation before extension uninstall and block when another manually installed package would be removed; PHP configuration is not purged
-- Manage per-version custom PHP configuration from a dedicated **PHP Settings** page without editing Debian/Sury `php.ini`. NativeDev owns only `/etc/php/X.Y/mods-available/nativedev.ini` plus `cli/fpm/conf.d/99-nativedev.ini`, so CLI and FPM receive the same override layer
+- Manage per-version custom PHP configuration from a dedicated **PHP Settings** page without editing System/Multi-PHP `php.ini`. NativeDev owns only `/etc/php/X.Y/mods-available/nativedev.ini` plus `cli/fpm/conf.d/99-nativedev.ini`, so CLI and FPM receive the same override layer
 - Validate INI directives at both the application and root-helper boundary with `^[a-zA-Z][a-zA-Z0-9_.]*$`; values containing newline, carriage return or NUL are rejected rather than stripped, preventing one value from injecting another directive line
 - Keep extension loading on **PHP Extensions**: `extension`, `zend_extension` and `extension_dir` are rejected by PHP Settings. INI apply/reset validates PHP CLI + FPM, reloads FPM only when already running, and rolls back the NativeDev-owned files if validation/reload fails
 - Save each applied NativeDev INI profile under `~/.config/nativedev/php/X.Y.json` (mode `0600`). PHP uninstall removes the active `/etc/php/X.Y` NativeDev layer but retains the saved profile for an explicit restore after reinstall
 
 ### Node.js
-- Detect and manage an existing Debian `nodejs`/`npm` installation without replacing it merely because NativeDev starts
-- Offer an explicit, one-way **Enable NVM Multi-Node** migration; NativeDev first simulates Debian Node removal and blocks the migration when unrelated APT packages would also be removed
-- Remove Debian `nodejs`/`npm` during an approved migration, then install/configure NVM and an LTS Node runtime; failed migrations attempt to restore Debian Node
-- Once NVM is present, NativeDev treats NVM as the Node provider and does not offer Debian Node as a second selectable runtime; a leftover Debian Node is shown only as an incomplete migration to clean up
+- Detect and manage an existing System `nodejs`/`npm` installation without replacing it merely because NativeDev starts
+- Offer an explicit, one-way **Enable NVM Multi-Node** migration; NativeDev first simulates System Node removal and blocks the migration when unrelated APT packages would also be removed
+- Remove System `nodejs`/`npm` during an approved migration, then install/configure NVM and an LTS Node runtime; failed migrations attempt to restore System Node
+- Once NVM is present, NativeDev treats NVM as the Node provider and does not offer System Node as a second selectable runtime; a leftover System Node is shown only as an incomplete migration to clean up
 - Install pinned NVM installer version `v0.40.6`
 - Add a clearly marked NativeDev block to Bash/Zsh/profile startup config
 - Load all NVM LTS generations and show the latest patch for each LTS codename
@@ -57,7 +57,7 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 
 ### Native services and tools
 - Nginx
-- MariaDB / MySQL (NativeDev installs Debian MariaDB and shows the detected MariaDB version)
+- MariaDB / MySQL (NativeDev installs MariaDB from system repositories and shows the detected MariaDB version)
 - PostgreSQL
 - Redis Server + `redis-cli` as one component (`redis-server` + `redis-tools`)
 - Memcached
@@ -83,7 +83,7 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 - Per-project PHP dropdown: `Default (X.Y)` plus installed PHP-FPM versions
 - Route `*.test` PHP requests to each project's own `/run/php/phpX.Y-fpm-nativedev-UID.sock`, not the distro `www-data` FPM pool
 - Grant Nginx a read-only ACL on existing document roots and an inheritable read/traverse ACL on the configured park directory so projects created later work immediately; PHP itself never needs an ACL since it already runs as the developer
-- Install Debian's `acl` package automatically the first time that read grant is needed
+- Install the system `acl` package automatically the first time that read grant is needed
 - Generate only `/etc/nginx/sites-available/nativedev-sites.conf`; the file contains a wildcard/default PHP route plus explicit backend overrides only for projects pinned to another PHP version
 - Quote generated Nginx document-root paths safely, including project directories containing spaces
 - Validate with `nginx -t` before reload and restore both the previous site file and enablement state on failure
@@ -98,7 +98,7 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 - A normal `./install.sh` installation places the privileged helper at `/usr/lib/nativedev/privileged_helper.py` as a root-owned, non-user-writable file
 - The first privileged action launches that restricted helper through a dedicated installed Polkit action; authorization is reused for the rest of the app session. `./run.sh` explicitly opts into the source-tree helper for development only.
 - The privileged helper accepts **structured NativeDev operations**, not client-supplied command argv. Package/service/file targets are validated again on the root side; it is not an arbitrary root shell.
-- GUI and helper use privileged RPC protocol **10** in this release; `install.sh` installs the matching root-owned helper so stale protocol versions fail closed instead of executing an incompatible privileged request.
+- GUI and helper use privileged RPC protocol **15** in this release; `install.sh` installs the matching root-owned helper so stale protocol versions fail closed instead of executing an incompatible privileged request.
 - `subprocess` calls use argv lists; no generic `shell=True`
 - NVM is the only shell-sourced integration, with shell-quoted arguments
 - NativeDev writes distinct, named configuration files instead of editing unrelated user configs
@@ -123,7 +123,7 @@ It uses GTK CSS only; no libadwaita, WebView, Node/Electron, Qt, database, or ex
 
 ## Run from the ZIP
 
-Install the runtime dependencies on a Debian-family desktop:
+Install the runtime dependencies on a Debian/Ubuntu-family desktop:
 
 ```bash
 sudo apt update
@@ -178,7 +178,7 @@ python3 -m compileall -q src
 
 ## Managed system files
 
-NativeDev currently owns only files with explicit NativeDev names:
+NativeDev uses explicitly scoped system integration. Debian Multi-PHP uses NativeDev-owned Sury files; Ubuntu-family Multi-PHP delegates the Ondřej PPA source/key entry to `software-properties` with a fixed parent-Ubuntu suite:
 
 ```text
 /etc/apt/sources.list.d/nativedev-sury-php.sources
@@ -190,6 +190,8 @@ NativeDev currently owns only files with explicit NativeDev names:
 /etc/nginx/nativedev/nativedev-key.pem
 /etc/php/X.Y/fpm/pool.d/nativedev-UID.conf
 ```
+
+On Ubuntu/Ubuntu derivatives, `software-properties` may create the Ondřej PPA source/key files under `/etc/apt/sources.list.d/` and `/etc/apt/keyrings/`; NativeDev identifies that repository by its fixed Launchpad URI rather than by a hard-coded filename.
 
 User state:
 
@@ -215,7 +217,7 @@ NVM shell integration is enclosed by:
 - Site scanning is refresh-based, not a persistent filesystem daemon.
 - PHP requests for `*.test` run as the logged-in developer, which avoids CLI-vs-FPM ownership conflicts for cache/uploads/rate-limit directories. Nginx still needs read/traverse permission to serve static files directly under the project's document root; NativeDev grants that automatically via a read-only ACL scoped to the document root only, and never broadens permissions on the rest of the project or the home directory.
 - Project ACL management assumes normal development projects are owned by the desktop user; files owned by another account may require ownership repair outside NativeDev.
-- Oracle MySQL packaging differs between Debian-family distributions. The MVP only offers the button when APT exposes an actual `mysql-server` candidate.
+- NativeDev exposes one **MariaDB / MySQL** service and installs MariaDB from system repositories; it does not separately provision Oracle MySQL.
 
 ## Architecture
 
@@ -226,7 +228,7 @@ GTK4 GUI / future CLI
           |
           +-- NativeDevController -- serialized mutations + cross-manager reconciliation
           |        |
-          |        +-- PhpManager ------ APT / systemd / Sury
+          |        +-- PhpManager ------ APT / systemd / Multi-PHP
           |        +-- LocalDevManager - NetworkManager / Nginx / mkcert
           |        +-- DatabaseAccessManager - local DB account / credentials
           |

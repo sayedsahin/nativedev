@@ -12,21 +12,21 @@ from ..system import AptManager, CommandRunner, DistroInfo, SystemdManager
 
 
 SURY_SOURCE_FILE = Path("/etc/apt/sources.list.d/nativedev-sury-php.sources")
+ONDREJ_PPA_URIS = (
+    "https://ppa.launchpadcontent.net/ondrej/php/ubuntu",
+    "http://ppa.launchpadcontent.net/ondrej/php/ubuntu",
+    "https://ppa.launchpad.net/ondrej/php/ubuntu",
+    "http://ppa.launchpad.net/ondrej/php/ubuntu",
+)
 APT_SOURCES_LIST = Path("/etc/apt/sources.list")
 APT_SOURCES_DIR = Path("/etc/apt/sources.list.d")
-SURY_SUPPORTED_CODENAMES = {
-    "bullseye",
-    "bookworm",
-    "trixie",
-    "jammy",
-    "noble",
-    "resolute",
-}
+SURY_SUPPORTED_CODENAMES = {"bullseye", "bookworm", "trixie"}
+ONDREJ_SUPPORTED_CODENAMES = {"jammy", "noble"}
 # NativeDev installs a practical local-development baseline rather than only the
 # minimum PHP runtime. These cover Laravel/Symfony requirements plus the common
 # database/image/archive modules used by typical projects. Core/common modules
 # such as ctype, fileinfo, iconv, PDO, tokenizer and OpenSSL come from PHP itself
-# or phpX.Y-common on Debian/Sury.
+# or phpX.Y-common on supported system/multi-PHP repositories.
 DEVELOPMENT_EXTENSIONS = (
     "bcmath",
     "curl",
@@ -40,7 +40,7 @@ DEVELOPMENT_EXTENSIONS = (
     "xml",
     "zip",
 )
-# Debian/Sury package names do not always map one-to-one to PHP module names.
+# System/multi-PHP package names do not always map one-to-one to PHP module names.
 # NativeDev enables this known framework-development baseline only when a PHP
 # version is installed. It never re-enables modules during refresh/startup, so
 # a developer remains free to disable individual modules afterwards.
@@ -68,7 +68,7 @@ DEVELOPMENT_MODULES = (
 )
 OPCACHE_BUILT_IN_FROM = (8, 5)
 
-DEBIAN_BASE_PACKAGES = ("php-cli", "php-fpm", "php-common")
+SYSTEM_BASE_PACKAGES = ("php-cli", "php-fpm", "php-common")
 
 
 class PhpManager:
@@ -88,19 +88,8 @@ class PhpManager:
         self.developer_user = pwd.getpwuid(self.developer_uid).pw_name
         self.developer_group = grp.getgrgid(self.developer_gid).gr_name
 
-    def sury_configured(self) -> bool:
-        """Return True only when an *active* binary Sury APT source exists.
-
-        APT source directories commonly retain editor backups, ``*.save`` files,
-        disabled deb822 stanzas, or old commented-out ``deb`` lines.  Merely
-        finding the Sury URL anywhere below sources.list.d therefore produces
-        false positives after the repository has been removed.
-
-        NativeDev mirrors what APT actually considers a configured source:
-        ``/etc/apt/sources.list`` plus ``*.list`` and ``*.sources`` files only,
-        ignoring comments, source-only entries and deb822 stanzas with
-        ``Enabled: no``.
-        """
+    @staticmethod
+    def _source_files() -> list[Path]:
         candidates: list[Path] = []
         if APT_SOURCES_LIST.is_file():
             candidates.append(APT_SOURCES_LIST)
@@ -109,45 +98,37 @@ class PhpManager:
             candidates.extend(sorted(APT_SOURCES_DIR.glob("*.sources")))
         except OSError:
             pass
-
-        for path in candidates:
-            try:
-                text = path.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-
-            if path.suffix == ".sources":
-                if self._deb822_has_active_sury(text):
-                    return True
-            elif self._list_has_active_sury(text):
-                return True
-        return False
+        return candidates
 
     @staticmethod
-    def _is_sury_uri(value: str) -> bool:
-        return any(
-            uri.rstrip("/") == "https://packages.sury.org/php"
-            or uri.rstrip("/") == "http://packages.sury.org/php"
-            for uri in value.split()
-        )
+    def _repo_kind_for_uri(value: str) -> str:
+        uri = value.rstrip("/")
+        if uri in {"https://packages.sury.org/php", "http://packages.sury.org/php"}:
+            return "sury"
+        if uri in {item.rstrip("/") for item in ONDREJ_PPA_URIS}:
+            return "ondrej"
+        return ""
 
     @classmethod
-    def _list_has_active_sury(cls, text: str) -> bool:
+    def _list_active_repo_kinds(cls, text: str) -> set[str]:
+        found: set[str] = set()
         for raw in text.splitlines():
-            # Legacy one-line sources: only an uncommented binary ``deb`` entry
-            # enables installation. ``deb-src`` alone is not enough.
+            # Only an uncommented binary deb entry makes a repository active.
             line = raw.split("#", 1)[0].strip()
             if not line or not re.match(r"^deb(?:\s|$)", line):
                 continue
-            if "packages.sury.org/php" in line:
-                return True
-        return False
+            for marker, kind in (
+                ("packages.sury.org/php", "sury"),
+                ("ppa.launchpadcontent.net/ondrej/php/ubuntu", "ondrej"),
+                ("ppa.launchpad.net/ondrej/php/ubuntu", "ondrej"),
+            ):
+                if marker in line:
+                    found.add(kind)
+        return found
 
     @classmethod
-    def _deb822_has_active_sury(cls, text: str) -> bool:
-        # Deb822 source files are split into blank-line-separated stanzas.
-        # Continuation lines are folded into the preceding field so normal APT
-        # multiline URIs/Types values are handled as well.
+    def _deb822_active_repo_kinds(cls, text: str) -> set[str]:
+        found: set[str] = set()
         for stanza_text in re.split(r"\n\s*\n", text):
             fields: dict[str, str] = {}
             current: str | None = None
@@ -164,50 +145,70 @@ class PhpManager:
                 current = key.strip().lower()
                 fields[current] = value.strip()
 
-            enabled = fields.get("enabled", "yes").strip().lower()
-            if enabled in {"no", "false", "0"}:
+            if fields.get("enabled", "yes").strip().lower() in {"no", "false", "0"}:
                 continue
-            types = set(fields.get("types", "").split())
-            if "deb" not in types:
+            if "deb" not in set(fields.get("types", "").split()):
                 continue
-            if cls._is_sury_uri(fields.get("uris", "")):
-                return True
-        return False
+            for uri in fields.get("uris", "").split():
+                kind = cls._repo_kind_for_uri(uri)
+                if kind:
+                    found.add(kind)
+        return found
 
-    def additional_sury_sources_configured(self) -> list[str]:
-        """Return active Sury source files not owned by NativeDev.
+    @property
+    def expected_multi_php_backend(self) -> str:
+        if self.distro.is_ubuntu_family:
+            return "ondrej"
+        if self.distro.is_debian_family:
+            return "sury"
+        return ""
 
-        NativeDev may remove only its own repository file. Provider migration
-        back to Debian is blocked while another Sury source remains active,
-        otherwise APT could immediately select Sury packages again.
+    def multi_php_backend(self) -> str:
+        """Return the active multi-PHP repository backend, if any.
+
+        Debian-family systems use packages.sury.org while Ubuntu and Ubuntu
+        derivatives use ppa:ondrej/php. Detection follows active APT source
+        semantics rather than filenames, so existing user-managed PPA/source
+        files are recognized as well.
         """
-        paths: list[Path] = []
-        if APT_SOURCES_LIST.is_file():
-            paths.append(APT_SOURCES_LIST)
-        try:
-            paths.extend(sorted(APT_SOURCES_DIR.glob("*.list")))
-            paths.extend(sorted(APT_SOURCES_DIR.glob("*.sources")))
-        except OSError:
-            pass
-
-        found: list[str] = []
-        for path in paths:
-            try:
-                if path.resolve() == SURY_SOURCE_FILE.resolve():
-                    continue
-            except OSError:
-                pass
+        found: set[str] = set()
+        for path in self._source_files():
             try:
                 text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
-            active = self._deb822_has_active_sury(text) if path.suffix == ".sources" else self._list_has_active_sury(text)
-            if active:
-                found.append(str(path))
-        return found
+            if path.suffix == ".sources":
+                found.update(self._deb822_active_repo_kinds(text))
+            else:
+                found.update(self._list_active_repo_kinds(text))
+
+        expected = self.expected_multi_php_backend
+        if expected in found and len(found) == 1:
+            return expected
+        if len(found) == 1:
+            return next(iter(found))
+        if found:
+            return "mixed"
+        return ""
+
+    def multi_php_configured(self) -> bool:
+        return bool(self.multi_php_backend())
+
+    @staticmethod
+    def _multi_php_name_for_backend(backend: str) -> str:
+        if backend == "ondrej":
+            return "Ondřej PHP PPA"
+        if backend == "sury":
+            return "Sury"
+        return "Multi-PHP"
+
+    @property
+    def multi_php_repository_name(self) -> str:
+        backend = self.multi_php_backend() or self.expected_multi_php_backend
+        return self._multi_php_name_for_backend(backend)
 
     def installed_package_provider(self, package: str) -> str:
-        """Resolve the repository that supplied the installed package version."""
+        """Resolve whether the installed package came from system or multi-PHP."""
         if not self.apt.is_installed(package):
             return "none"
         result = self.runner.run(["apt-cache", "policy", package], timeout=30)
@@ -235,74 +236,74 @@ class PhpManager:
                 parts2 = item.split()
                 if item.startswith("*** ") or (len(parts2) == 2 and parts2[-1].isdigit()):
                     break
-                if "packages.sury.org/php" in item:
-                    return "sury"
-            return "debian"
+                if (
+                    "packages.sury.org/php" in item
+                    or "ppa.launchpadcontent.net/ondrej/php/ubuntu" in item
+                    or "ppa.launchpad.net/ondrej/php/ubuntu" in item
+                ):
+                    return "multi"
+            return "system"
         return "unknown"
 
     def provider(self) -> str:
-        """Return the NativeDev PHP mode: ``sury``, ``debian`` or ``none``.
-
-        Provider selection is intentionally one-way in the UI. Once any active
-        Sury source exists, NativeDev is in multi-PHP mode and never offers a
-        Debian-provider switch. Installed package origin is still inspected for
-        migration diagnostics, but it does not turn Sury mode back into a mixed
-        or Debian-selectable state.
-        """
-        if self.sury_configured():
-            return "sury"
+        """Return the NativeDev PHP mode: ``multi``, ``system`` or ``none``."""
+        if self.multi_php_configured():
+            return "multi"
         if self.installed_versions():
-            return "debian"
+            return "system"
         return "none"
 
-    def sury_migration_needed(self) -> bool:
-        """Return True when Sury mode still has non-Sury PHP runtimes installed."""
-        if not self.sury_configured():
+    def multi_php_migration_needed(self) -> bool:
+        if not self.multi_php_configured():
             return False
         for version in self.installed_versions():
             package = f"php{version}-cli" if self.apt.is_installed(f"php{version}-cli") else f"php{version}-fpm"
-            if self.installed_package_provider(package) != "sury":
+            if self.installed_package_provider(package) != "multi":
                 return True
         return False
 
     @property
-    def sury_supported(self) -> bool:
-        return self.distro.codename in SURY_SUPPORTED_CODENAMES
+    def multi_php_supported(self) -> bool:
+        backend = self.expected_multi_php_backend
+        if backend == "ondrej":
+            return self.distro.codename in ONDREJ_SUPPORTED_CODENAMES
+        if backend == "sury":
+            return self.distro.codename in SURY_SUPPORTED_CODENAMES
+        return False
 
-    def configure_sury(self, *, explicit: bool = False) -> None:
-        """Install/configure Sury only after an explicit user request.
-
-        Sury is optional in NativeDev.  Debian's own PHP packages remain fully
-        manageable without it.  Requiring an explicit flag here makes it
-        impossible for refresh/discovery or a future convenience path to
-        silently opt the host into a third-party APT repository.
-        """
+    def configure_multi_php(self, *, explicit: bool = False) -> None:
+        """Configure the distro-appropriate third-party multi-PHP repository."""
         if not explicit:
-            raise RuntimeError("Sury setup requires an explicit user action")
-        if self.sury_configured():
+            raise RuntimeError("Multi-PHP setup requires an explicit user action")
+
+        expected = self.expected_multi_php_backend
+        active = self.multi_php_backend()
+        if active == expected and active:
             return
-        if not self.sury_supported:
+        if active:
+            required_name = self._multi_php_name_for_backend(expected)
             raise RuntimeError(
-                f"Sury PHP repository is not known to publish suite '{self.distro.codename}'."
+                f"A different multi-PHP repository backend is already active ({active}). "
+                f"{self.distro.pretty_name} requires {required_name}."
+            )
+        if not expected or not self.multi_php_supported:
+            raise RuntimeError(
+                f"Multi-PHP is not supported for {self.distro.pretty_name} suite '{self.distro.codename}'."
             )
 
-        # The helper owns the entire privileged repository setup: it downloads
-        # the fixed Sury keyring URL and writes a fixed DEB822 template for the
-        # validated distro suite. No client-supplied .deb path or APT source
-        # content crosses the privilege boundary.
         self.runner.privileged_operation(
-            "sury.configure",
+            "php.multi_repo.configure",
+            backend=expected,
             codename=self.distro.codename,
             check=True,
-            timeout=600,
+            timeout=900,
         )
         self.apt.refresh()
 
     def available_versions(self) -> list[str]:
-        # Parallel version discovery is a Sury feature on Debian-family hosts.
-        # Without Sury configured, keep already-installed PHP manageable but do
-        # not present Debian's single-version metadata as a parallel PHP catalog.
-        if not self.sury_configured():
+        # Parallel version discovery is exposed only when the distro-appropriate
+        # multi-PHP repository is active. System PHP remains manageable without it.
+        if not self.multi_php_configured():
             return []
         result = self.runner.run(["apt-cache", "pkgnames"], timeout=45)
         versions: set[str] = set()
@@ -421,10 +422,10 @@ class PhpManager:
         self.systemd.disable_now(f"php{version}-fpm")
 
     # ---- NativeDev per-user FPM pool -------------------------------------
-    # We deliberately do not modify Debian/Sury's [www] pool. NativeDev owns a
+    # We deliberately do not modify the distribution/Multi-PHP [www] pool. NativeDev owns a
     # separate pool for every PHP version, and the workers run as the logged-in
     # developer. This keeps CLI-created and web-created application files under
-    # the same Unix user while Nginx stays on Debian's www-data account.
+    # the same Unix user while Nginx stays on the system www-data account.
 
     def developer_pool_name(self) -> str:
         return f"nativedev-{self.developer_uid}"
@@ -614,18 +615,20 @@ class PhpManager:
         elif was_running:
             self.systemd.start(f"php{version}-fpm")
 
-    def remove_sury_repository(self) -> None:
-        external = self.additional_sury_sources_configured()
-        if external:
-            raise RuntimeError(
-                "Cannot switch PHP provider to Debian while another Sury source is active: "
-                + ", ".join(external)
-            )
-        if SURY_SOURCE_FILE.exists():
-            self.runner.run(["rm", "-f", str(SURY_SOURCE_FILE)], privileged=True, check=True)
-            self.apt.refresh()
-        if self.sury_configured():
-            raise RuntimeError("Sury is still configured from a source NativeDev does not own")
+    def remove_multi_php_repository(self) -> None:
+        backend = self.expected_multi_php_backend
+        if not backend:
+            return
+        self.runner.privileged_operation(
+            "php.multi_repo.remove",
+            backend=backend,
+            codename=self.distro.codename,
+            check=True,
+            timeout=600,
+        )
+        self.apt.refresh()
+        if self.multi_php_configured():
+            raise RuntimeError("Multi-PHP repository is still active after rollback")
 
     def generic_development_packages(self) -> list[str]:
         extensions = list(DEVELOPMENT_EXTENSIONS) + ["opcache"]
@@ -636,8 +639,8 @@ class PhpManager:
                 packages.append(package)
         return packages
 
-    def debian_default_version(self) -> str:
-        """Resolve Debian's current php-cli dependency after repository selection."""
+    def system_default_version(self) -> str:
+        """Resolve the distro's current php-cli dependency after repository selection."""
         result = self.runner.run(["apt-cache", "depends", "php-cli"], timeout=30)
         if result.ok:
             for raw in result.stdout.splitlines():
@@ -646,18 +649,19 @@ class PhpManager:
                     return match.group(1)
         return ""
 
-    def install_debian_default(self, *, allow_downgrades: bool = False) -> str:
-        target = self.debian_default_version()
-        packages = [package for package in DEBIAN_BASE_PACKAGES if self.apt.candidate(package)]
+    def install_system_default(self, *, allow_downgrades: bool = False) -> str:
+        target = self.system_default_version()
+        packages = [package for package in SYSTEM_BASE_PACKAGES if self.apt.candidate(package)]
         packages.extend(self.generic_development_packages())
         if not {"php-cli", "php-fpm"}.issubset(packages):
-            raise RuntimeError("Debian PHP CLI/FPM packages are not available from configured repositories")
+            raise RuntimeError("System PHP CLI/FPM packages are not available from configured repositories")
         self.apt.install_php(packages, allow_downgrades=allow_downgrades)
         version = target or self.cli_version()
         if not version:
-            raise RuntimeError("Debian PHP was installed but no default CLI version could be detected")
-        # A provider migration can leave update-alternatives pointing at a still-
-        # installed Sury-only version. Make Debian's resolved runtime explicit.
+            raise RuntimeError("System PHP was installed but no default CLI version could be detected")
+        # A provider migration can leave update-alternatives pointing at a
+        # version no longer selected by the distro repository. Make the system
+        # provider's resolved runtime explicit.
         if Path(f"/usr/bin/php{version}").exists():
             self.set_cli_default(version)
         if not self.fpm_config_ready(version):
@@ -667,39 +671,33 @@ class PhpManager:
         self.ensure_developer_pool(version)
         return version
 
-    def enable_sury_multi_php(self) -> str:
-        """Enable Sury multi-PHP and migrate existing Debian PHP runtimes.
+    def enable_multi_php(self) -> str:
+        """Enable the distro-appropriate multi-PHP repository and migrate in place.
 
-        Debian and Sury publish the same versioned PHP package names, so a
-        literal uninstall-first migration can remove reverse dependants such as
-        Composer. NativeDev therefore replaces/reinstalls those package names
-        from the Sury candidate in place. From the user's perspective the old
-        Debian provider is retired: once Sury is active, no Debian-provider
-        install/switch action is exposed.
+        Debian uses packages.sury.org/php; Ubuntu and Ubuntu derivatives use
+        ppa:ondrej/php. Both repositories publish the same versioned PHP package
+        naming convention as the distro, so NativeDev reinstalls compatible
+        runtime package names in place rather than uninstalling first.
         """
         previous = self.default_fpm_version() or self.cli_version()
         installed_before = list(self.installed_versions())
+        had_multi = self.multi_php_configured()
 
-        # Debian and Sury intentionally use the same versioned package names.
-        # Configure Sury first, then reinstall each compatible runtime so APT
-        # replaces/upgrades it in place. This preserves reverse dependencies
-        # such as Debian's composer package that could be removed by an
-        # uninstall-first migration.
-        had_sury = self.sury_configured()
-        self.configure_sury(explicit=True)
+        self.configure_multi_php(explicit=True)
         available = self.available_versions()
+        repo_name = self.multi_php_repository_name
         if not available:
-            if not had_sury:
-                self.remove_sury_repository()
-            raise RuntimeError("Sury is configured but no PHP-FPM versions are available")
+            if not had_multi:
+                self.remove_multi_php_repository()
+            raise RuntimeError(f"{repo_name} is configured but no PHP-FPM versions are available")
 
         if installed_before:
             missing = [version for version in installed_before if version not in available]
             if missing:
-                if not had_sury:
-                    self.remove_sury_repository()
+                if not had_multi:
+                    self.remove_multi_php_repository()
                 raise RuntimeError(
-                    "Sury does not provide the currently installed PHP version(s): "
+                    f"{repo_name} does not provide the currently installed PHP version(s): "
                     + ", ".join(missing)
                 )
             for version in installed_before:
@@ -716,10 +714,10 @@ class PhpManager:
     def development_extension_packages(self, version: str) -> list[str]:
         """Resolve NativeDev's framework-friendly extension set for one PHP version.
 
-        PHP 8.5 made OPcache mandatory/built-in, so Debian/Sury no longer needs
-        (or publishes) a separate php8.5-opcache package. Keep the explicit
+        PHP 8.5 made OPcache mandatory/built-in, so the supported repositories no longer need
+        (or publish) a separate php8.5-opcache package. Keep the explicit
         package for older versions where it exists. Every optional package is
-        candidate-checked so the same code works across supported Debian-family
+        candidate-checked so the same code works across supported Debian/Ubuntu-family
         repositories without turning a missing non-core extension into a failed
         PHP installation.
         """
@@ -743,7 +741,7 @@ class PhpManager:
     def enable_development_modules(self, version: str) -> None:
         """Enable NativeDev's baseline for CLI and FPM after installation only.
 
-        Debian/Sury deliberately keeps module enablement separate from package
+        The supported PHP packaging keeps module enablement separate from package
         installation. A package may therefore be installed while its conf.d
         symlinks remain absent after a previous phpdismod. NativeDev promises a
         ready-to-use local development stack after *Install*, so explicitly
@@ -768,7 +766,7 @@ class PhpManager:
         packages = [f"php{version}-cli", f"php{version}-fpm", f"php{version}-common"]
         packages.extend(self.development_extension_packages(version))
 
-        # PHP module .ini definitions are UCF-managed on Debian/Sury. A normal
+        # PHP module .ini definitions are UCF-managed on supported system/multi-PHP repositories. A normal
         # reinstall honors a previously deleted /etc/php/<version>/mods-available
         # file, which would leave the package installed but make phpenmod report
         # "No module matches". The PHP-specific install path restores only
@@ -781,7 +779,7 @@ class PhpManager:
             self.repair_fpm(version)
 
         # Package installation alone does not guarantee enabled modules on
-        # Debian/Sury (for example after a prior phpdismod). Enforce NativeDev's
+        # System/Multi-PHP (for example after a prior phpdismod). Enforce NativeDev's
         # framework baseline once, specifically as part of Install.
         self.enable_development_modules(version)
 

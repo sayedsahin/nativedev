@@ -97,7 +97,7 @@ EXTENSIONS_BY_KEY = {item.key: item for item in EXTENSIONS}
 
 
 class PhpExtensionManager:
-    """Manage version-scoped Debian/Sury PHP extensions as one CLI+FPM state.
+    """Manage version-scoped System/Multi-PHP extensions as one CLI+FPM state.
 
     Package presence and module enablement are intentionally separate states:
     an installed package can remain disabled. NativeDev always enables/disables

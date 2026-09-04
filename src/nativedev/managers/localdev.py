@@ -215,7 +215,7 @@ class LocalDevManager:
         if shutil.which("setfacl"):
             return
         if not self.apt.candidate("acl"):
-            raise RuntimeError("The Debian 'acl' package is required to let Nginx read project document roots")
+            raise RuntimeError("The system 'acl' package is required to let Nginx read project document roots")
         self.apt.install(["acl"])
         if not shutil.which("setfacl"):
             raise RuntimeError("setfacl is still unavailable after installing the acl package")
@@ -264,7 +264,7 @@ class LocalDevManager:
     def configure_dns(self) -> None:
         if self.dns_strategy() != "networkmanager":
             raise RuntimeError(
-                "Automatic wildcard DNS currently supports NetworkManager-based Debian-family desktops only. "
+                "Automatic wildcard DNS currently supports NetworkManager-based Debian/Ubuntu-family desktops only. "
                 "NativeDev will not overwrite /etc/resolv.conf as a fallback."
             )
         if not self.apt.is_installed("dnsmasq-base"):

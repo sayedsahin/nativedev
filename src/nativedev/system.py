@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 
-PRIVILEGE_PROTOCOL_VERSION = 14
+PRIVILEGE_PROTOCOL_VERSION = 15
 PHP_FPM_COMMAND_RE = re.compile(r"^php-fpm(?P<version>\d+\.\d+)$")
 PHP_BINARY_PATH_RE = re.compile(r"^/usr/bin/php(?P<version>\d+\.\d+)$")
 
@@ -374,11 +374,17 @@ class DistroInfo:
     codename: str
     id_like: tuple[str, ...]
     pretty_name: str
+    ubuntu_codename: str = ""
+
+    @property
+    def is_ubuntu_family(self) -> bool:
+        family = {self.id, *self.id_like}
+        return bool(self.ubuntu_codename or "ubuntu" in family)
 
     @property
     def is_debian_family(self) -> bool:
         family = {self.id, *self.id_like}
-        return bool(family.intersection({"debian", "ubuntu"}))
+        return bool(family.intersection({"debian", "ubuntu"}) or self.ubuntu_codename)
 
 
 def read_os_release(path: Path = Path("/etc/os-release")) -> DistroInfo:
@@ -393,10 +399,12 @@ def read_os_release(path: Path = Path("/etc/os-release")) -> DistroInfo:
     except OSError:
         pass
 
-    # Ubuntu derivatives usually expose UBUNTU_CODENAME. Prefer the base codename
-    # so repositories can target the parent release rather than Mint/Pop codenames.
+    # Ubuntu derivatives normally expose UBUNTU_CODENAME. Preserve it separately
+    # so NativeDev can classify the host as Ubuntu-family even when ID/ID_LIKE
+    # belong to a derivative, and use the parent Ubuntu suite for PPAs.
+    ubuntu_codename = data.get("UBUNTU_CODENAME", "").lower()
     codename = (
-        data.get("UBUNTU_CODENAME")
+        ubuntu_codename
         or data.get("DEBIAN_CODENAME")
         or data.get("VERSION_CODENAME")
         or ""
@@ -408,6 +416,7 @@ def read_os_release(path: Path = Path("/etc/os-release")) -> DistroInfo:
         codename=codename.lower(),
         id_like=tuple(x.lower() for x in data.get("ID_LIKE", "").split()),
         pretty_name=data.get("PRETTY_NAME", data.get("NAME", "Unknown Linux")),
+        ubuntu_codename=ubuntu_codename,
     )
 
 
@@ -450,7 +459,7 @@ class AptManager:
     def install_php(self, packages: Iterable[str], *, allow_downgrades: bool = False) -> CommandResult:
         """Install/reinstall versioned PHP packages and restore missing UCF config.
 
-        Debian/Sury PHP module definitions under /etc/php/<version>/mods-available
+        System/Multi-PHP PHP module definitions under /etc/php/<version>/mods-available
         are managed by ucf rather than ordinary dpkg conffiles. If a definition
         was locally deleted, a normal package reinstall deliberately preserves
         that deletion. NativeDev's explicit PHP Install action promises a ready

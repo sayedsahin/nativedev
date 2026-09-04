@@ -198,14 +198,14 @@ class NativeDevController:
                     ) from exc
                 raise
 
-    def install_debian_php(self) -> str:
+    def install_system_php(self) -> str:
         with self._mutation_lock:
-            version = self.php.install_debian_default()
+            version = self.php.install_system_default()
             try:
                 self._reconcile_managed_nginx()
             except Exception as exc:
                 raise RuntimeError(
-                    f"Debian PHP {version} was installed, but NativeDev Nginx reconciliation failed: {exc}"
+                    f"System PHP {version} was installed, but NativeDev Nginx reconciliation failed: {exc}"
                 ) from exc
             return version
 
@@ -279,20 +279,20 @@ class NativeDevController:
                     ) from exc
                 raise
 
-    def enable_sury_multi_php(self) -> str:
-        """One-way migration from Debian system PHP to Sury multi-PHP."""
+    def enable_multi_php(self) -> str:
+        """One-way migration from System PHP to the distro-appropriate Multi-PHP repository."""
         with self._mutation_lock:
-            version = self.php.enable_sury_multi_php()
+            version = self.php.enable_multi_php()
             try:
                 self._reconcile_managed_nginx()
             except Exception as exc:
                 raise RuntimeError(
-                    f"Sury PHP migration completed, but NativeDev Nginx reconciliation failed: {exc}"
+                    f"Multi-PHP migration completed, but NativeDev Nginx reconciliation failed: {exc}"
                 ) from exc
             return version
 
     def enable_nvm_multi_node(self) -> str:
-        """One-way migration from Debian system Node to NVM multi-Node."""
+        """One-way migration from System Node to NVM multi-Node."""
         with self._mutation_lock:
             if self.node is None:
                 raise RuntimeError("Node manager is not available")

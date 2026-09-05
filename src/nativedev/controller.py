@@ -9,6 +9,7 @@ from .managers.localdev import LocalDevManager
 from .managers.php import PhpManager
 from .managers.php_ini import PhpIniManager
 from .managers.database_access import DatabaseAccessManager
+from .managers.developer_tools import DeveloperToolManager, DeveloperToolSpec
 from .services import ComponentSpec, ServiceManager
 from .managers.node import NodeManager
 
@@ -36,6 +37,7 @@ class NativeDevController:
         php_ini: PhpIniManager | None = None,
         services: ServiceManager | None = None,
         database_access: DatabaseAccessManager | None = None,
+        developer_tools: DeveloperToolManager | None = None,
     ):
         self.php = php
         self.localdev = localdev
@@ -43,6 +45,7 @@ class NativeDevController:
         self.php_ini = php_ini
         self.services = services
         self.database_access = database_access
+        self.developer_tools = developer_tools
         self._mutation_lock = threading.RLock()
 
     def run_mutation(self, fn: Callable[..., T], *args, **kwargs) -> T:
@@ -161,6 +164,70 @@ class NativeDevController:
                     if self.database_access is not None:
                         self.database_access.forget(spec.key)
 
+    def install_developer_tool(self, spec: DeveloperToolSpec, version: str) -> None:
+        with self._mutation_lock:
+            if self.developer_tools is None:
+                raise RuntimeError("Developer Tool manager is not available")
+            if not shutil.which("nginx"):
+                raise RuntimeError("Install Nginx before installing a web Developer Tool")
+            # Validate/create the fixed NativeDev developer pool before changing
+            # package state so a broken FPM configuration fails early.
+            self.php.ensure_developer_pool(version)
+            self.developer_tools.install(spec, version)
+            try:
+                self.localdev.configure_nginx_sites()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"{spec.title} was installed, but NativeDev Nginx integration failed: {exc}"
+                ) from exc
+
+    def uninstall_developer_tool(self, spec: DeveloperToolSpec) -> None:
+        with self._mutation_lock:
+            if self.developer_tools is None:
+                raise RuntimeError("Developer Tool manager is not available")
+            self.developer_tools.uninstall(spec)
+            try:
+                self._reconcile_managed_nginx()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"{spec.title} was uninstalled, but NativeDev Nginx reconciliation failed: {exc}"
+                ) from exc
+
+    def repair_developer_tool(self, spec: DeveloperToolSpec) -> None:
+        with self._mutation_lock:
+            if self.developer_tools is None:
+                raise RuntimeError("Developer Tool manager is not available")
+            self.developer_tools.reconcile_runtime(spec)
+            if self.localdev.nginx_managed() and shutil.which("nginx"):
+                self.localdev.configure_nginx_sites()
+
+    def set_developer_tool_php(self, spec: DeveloperToolSpec, version: str) -> None:
+        with self._mutation_lock:
+            if self.developer_tools is None:
+                raise RuntimeError("Developer Tool manager is not available")
+            if not self.developer_tools.state(spec).installed:
+                raise RuntimeError(f"{spec.title} is not installed")
+            previous_selected = self.developer_tools.selected_php(spec.key)
+            self.php.ensure_developer_pool(version)
+            self.developer_tools.set_selected_php(spec.key, version)
+            try:
+                self.localdev.configure_nginx_sites()
+            except Exception as exc:
+                rollback_error = None
+                try:
+                    if previous_selected:
+                        self.developer_tools.set_selected_php(spec.key, previous_selected)
+                    else:
+                        self.developer_tools.clear_selected_php(spec.key)
+                    self.localdev.configure_nginx_sites()
+                except Exception as rollback_exc:
+                    rollback_error = rollback_exc
+                if rollback_error is not None:
+                    raise RuntimeError(
+                        f"{spec.title} PHP switch failed ({exc}); rollback also failed ({rollback_error})"
+                    ) from exc
+                raise RuntimeError(f"{spec.title} PHP switch failed and was rolled back: {exc}") from exc
+
     def use_existing_database_access(self, key: str, password: str):
         with self._mutation_lock:
             if self.database_access is None:
@@ -232,6 +299,13 @@ class NativeDevController:
 
     def uninstall_php(self, version: str) -> None:
         with self._mutation_lock:
+            if self.developer_tools is not None:
+                users = self.developer_tools.tools_using_php(version)
+                if users:
+                    raise RuntimeError(
+                        f"PHP {version} is currently used by: {', '.join(users)}. "
+                        "Choose another PHP version for these Developer Tools before uninstalling it."
+                    )
             detached_ini = False
             if self.php_ini is not None and self.php_ini.has_active_override(version):
                 self.php_ini.detach_runtime(version)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
 
 from .system import AptManager, CommandRunner, SystemdManager
 
@@ -37,8 +38,24 @@ COMPONENTS: tuple[ComponentSpec, ...] = (
         "Redis Server and redis-cli are installed and removed together.",
     ),
     ComponentSpec("memcached", "Memcached", ("memcached",), "memcached", "memcached"),
+    ComponentSpec(
+        "rabbitmq",
+        "RabbitMQ",
+        ("rabbitmq-server",),
+        "rabbitmq-server",
+        "rabbitmqctl",
+        "Native RabbitMQ message broker from the system repositories.",
+    ),
     ComponentSpec("composer", "Composer", ("composer",), None, "composer", "CLI tool; no system service."),
     ComponentSpec("mkcert", "mkcert", ("mkcert",), None, "mkcert", "Local certificate tool; no system service."),
+    ComponentSpec(
+        "mailpit",
+        "Mailpit",
+        (),
+        "mailpit",
+        "mailpit",
+        "Local email testing: Web UI localhost:8025, SMTP localhost:1025.",
+    ),
 )
 
 
@@ -48,6 +65,11 @@ COMPONENTS: tuple[ComponentSpec, ...] = (
 # but deliberately leave common/shared packages and database data alone.
 POSTGRESQL_RUNTIME_RE = re.compile(r"^postgresql(?:-client)?-\d+(?:\.\d+)*$")
 MARIADB_RUNTIME_RE = re.compile(r"^mariadb-(?:server|client)-core(?:-\d+(?:\.\d+)*)?$")
+
+
+MAILPIT_BINARY_PATH = Path("/usr/local/bin/mailpit")
+MAILPIT_SERVICE_PATH = Path("/etc/systemd/system/mailpit.service")
+MAILPIT_MANAGED_MARKER = "# Managed by NativeDev"
 
 
 @dataclass(slots=True)
@@ -104,6 +126,23 @@ class ServiceManager:
         installed_packages = self.installed_component_packages(spec)
         packages_installed = bool(installed_packages)
         binary_path = shutil.which(spec.binary) if spec.binary else None
+        uninstallable = packages_installed
+        uninstall_note = ""
+
+        if spec.key == "mailpit":
+            managed = self._mailpit_managed()
+            service_file_present = MAILPIT_SERVICE_PATH.is_file()
+            fixed_binary_present = MAILPIT_BINARY_PATH.is_file()
+            if fixed_binary_present:
+                binary_path = str(MAILPIT_BINARY_PATH)
+            # Mailpit is intentionally not modelled as an APT package: upstream
+            # ships a static Linux binary. Treat either its binary or service
+            # unit as presence, but only allow NativeDev uninstall when our
+            # marker proves the unit belongs to NativeDev.
+            packages_installed = bool(binary_path or service_file_present)
+            uninstallable = managed
+            if packages_installed and not managed:
+                uninstall_note = "Existing Mailpit installation detected; NativeDev will not remove files it does not manage."
 
         # A partially removed component (for example postgresql meta-package gone
         # but postgresql-client-17 still installed) must remain visible as
@@ -112,7 +151,7 @@ class ServiceManager:
         if not spec.service and binary_path:
             installed = True
 
-        installable = any(self.apt.candidate(pkg) for pkg in spec.packages)
+        installable = True if spec.key == "mailpit" else any(self.apt.candidate(pkg) for pkg in spec.packages)
 
         enabled_state = "n/a"
         service_available = False
@@ -136,13 +175,17 @@ class ServiceManager:
             enabled=enabled,
             enabled_state=enabled_state,
             service_available=service_available,
-            uninstallable=packages_installed,
-            uninstall_note="",
+            uninstallable=uninstallable,
+            uninstall_note=uninstall_note,
             binary_path=binary_path,
             version=version,
         )
 
     def install(self, spec: ComponentSpec) -> None:
+        if spec.key == "mailpit":
+            self.runner.privileged_operation("mailpit.install", check=True, timeout=600)
+            return
+
         installable = [pkg for pkg in spec.packages if self.apt.candidate(pkg)]
         if not installable:
             raise RuntimeError(f"No installable APT package found for {spec.title}")
@@ -151,13 +194,19 @@ class ServiceManager:
             self.systemd.enable_now(spec.service)
 
     def uninstall(self, spec: ComponentSpec) -> None:
-        """Remove runtime packages without purge/autoremove or database-data deletion.
+        """Remove managed runtimes without broad purge/autoremove cleanup.
 
         Database credential metadata is cleared by the controller after this
         succeeds. Debian common/shared packages and on-disk database clusters
         are intentionally preserved, matching NativeDev's original stable
-        uninstall behavior.
+        uninstall behavior. Mailpit's persistent message store is also kept.
         """
+        if spec.key == "mailpit":
+            if not self._mailpit_managed():
+                raise RuntimeError("Mailpit is not managed by NativeDev")
+            self.runner.privileged_operation("mailpit.uninstall", check=True, timeout=300)
+            return
+
         installed = self.installed_component_packages(spec)
         if not installed:
             raise RuntimeError(f"{spec.title} is not installed through APT")
@@ -192,6 +241,13 @@ class ServiceManager:
             check=True,
             timeout=None,
         )
+
+    @staticmethod
+    def _mailpit_managed() -> bool:
+        try:
+            return MAILPIT_MANAGED_MARKER in MAILPIT_SERVICE_PATH.read_text(encoding="utf-8")
+        except OSError:
+            return False
 
     def _component_version(self, spec: ComponentSpec, binary_path: str | None) -> str | None:
         if spec.key != "mariadb" or not binary_path:

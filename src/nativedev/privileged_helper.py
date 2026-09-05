@@ -7,15 +7,18 @@ import os
 import pwd
 import re
 import signal
+import secrets
 import socket
 import struct
 import subprocess
 import shutil
 import tempfile
+import tarfile
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
-PROTOCOL_VERSION = 18
+PROTOCOL_VERSION = 21
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 MANAGED_FILES = {
@@ -33,7 +36,7 @@ MANAGED_DIRS = {
     "/etc/nginx/nativedev",
 }
 SERVICE_RE = re.compile(
-    r"^(?:nginx|redis-server|memcached|mariadb|mysql|postgresql|php\d+\.\d+-fpm)(?:\.service)?$"
+    r"^(?:nginx|redis-server|memcached|rabbitmq-server|mailpit|mariadb|mysql|postgresql|php\d+\.\d+-fpm)(?:\.service)?$"
 )
 PHP_PACKAGE_RE = re.compile(r"^php\d+\.\d+(?:-[A-Za-z0-9][A-Za-z0-9.+~_-]*)?$")
 PHP_FPM_PACKAGE_RE = re.compile(r"^php\d+\.\d+-fpm$")
@@ -44,6 +47,10 @@ PHP_INI_MAX_SETTINGS = 128
 PHP_INI_MAX_DIRECTIVE_LENGTH = 128
 PHP_INI_MAX_VALUE_LENGTH = 4096
 PHP_CONFIG_ROOT = Path("/etc/php")
+PHPMYADMIN_NATIVEDEV_CONFIG = Path("/etc/phpmyadmin/conf.d/nativedev.php")
+PHPMYADMIN_ENTRYPOINT = Path("/usr/share/phpmyadmin/index.php")
+PHPMYADMIN_RUNTIME_ROOT = Path("/var/lib/nativedev/phpmyadmin")
+PHPMYADMIN_CONFIG_MARKER = "// Managed by NativeDev. Manual edits may be replaced."
 DATABASE_USERNAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,31}$")
 DATABASE_PASSWORD_RE = re.compile(r"^[A-Za-z0-9!@#$%^&*()_+\-=.,:?/]{1,128}$")
 MYSQL_DEV_PRIVILEGES = (
@@ -116,14 +123,55 @@ ONDREJ_PPA_URI = "https://ppa.launchpadcontent.net/ondrej/php/ubuntu"
 ONDREJ_SUPPORTED_CODENAMES = {"jammy", "noble"}
 
 
+MAILPIT_RELEASE_API = "https://api.github.com/repos/axllent/mailpit/releases/latest"
+MAILPIT_BINARY_PATH = Path("/usr/local/bin/mailpit")
+MAILPIT_SERVICE_PATH = Path("/etc/systemd/system/mailpit.service")
+MAILPIT_MANAGED_MARKER = "# Managed by NativeDev"
+MAILPIT_MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
+MAILPIT_SERVICE_CONTENT = f"""{MAILPIT_MANAGED_MARKER}
+[Unit]
+Description=Mailpit local email testing server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mailpit --listen 127.0.0.1:8025 --smtp 127.0.0.1:1025 -d /var/lib/mailpit/mailpit.db
+Restart=on-failure
+RestartSec=2
+DynamicUser=yes
+StateDirectory=mailpit
+StateDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
 # Only packages NativeDev actually exposes as native stack components. PHP is
 # handled separately because the version/extension portion is dynamic.
+DEVELOPER_TOOL_PACKAGES = {
+    "phpmyadmin": "phpmyadmin",
+    "adminer": "adminer",
+}
+
+
 COMPONENT_PACKAGES = {
     "acl",
     "nginx",
     "redis-server",
     "redis-tools",
     "memcached",
+    "rabbitmq-server",
     "mariadb-server",
     "mariadb-client",
     "postgresql",
@@ -909,6 +957,36 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
         _database_username_for_uid(uid)
         return []
 
+    if action in {"mailpit.install", "mailpit.uninstall"}:
+        if set(request).difference({"protocol", "action", "timeout"}):
+            raise RuntimeError("Mailpit operation contains unsupported fields")
+        return []
+
+    if action == "developer_tool.reconcile":
+        if set(request).difference({"protocol", "action", "timeout", "tool"}):
+            raise RuntimeError("Developer Tool reconciliation contains unsupported fields")
+        if request.get("tool") != "phpmyadmin":
+            raise RuntimeError("Only phpMyAdmin currently has NativeDev runtime reconciliation")
+        _database_username_for_uid(uid)
+        return []
+
+    if action in {"developer_tool.install", "developer_tool.uninstall"}:
+        if set(request).difference({"protocol", "action", "timeout", "tool"}):
+            raise RuntimeError("Developer Tool operation contains unsupported fields")
+        tool = request.get("tool")
+        if tool not in DEVELOPER_TOOL_PACKAGES:
+            raise RuntimeError("Developer Tool is outside NativeDev's allowlist")
+        package = DEVELOPER_TOOL_PACKAGES[tool]
+        verb = "install" if action == "developer_tool.install" else "remove"
+        return [
+            _binary("apt-get"),
+            "-o", "DPkg::Lock::Timeout=0",
+            verb,
+            "-y",
+            *(["--no-install-recommends"] if verb == "install" else []),
+            package,
+        ]
+
     if action == "apt.update":
         return [_binary("apt-get"), "update"]
 
@@ -1063,6 +1141,310 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
     raise RuntimeError(f"Privileged operation is not allowed: {action}")
 
 
+
+def _mailpit_managed_unit() -> bool:
+    try:
+        return MAILPIT_MANAGED_MARKER in MAILPIT_SERVICE_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def _mailpit_release_architecture() -> str:
+    machine = os.uname().machine.lower()
+    mapping = {
+        "x86_64": "amd64",
+        "amd64": "amd64",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+        "i386": "386",
+        "i486": "386",
+        "i586": "386",
+        "i686": "386",
+    }
+    arch = mapping.get(machine)
+    if arch is None:
+        raise RuntimeError(f"Mailpit does not provide a NativeDev-supported Linux binary for architecture: {machine}")
+    return arch
+
+
+def _mailpit_latest_asset_url(timeout: int | None) -> str:
+    request = urllib.request.Request(
+        MAILPIT_RELEASE_API,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "NativeDev",
+        },
+    )
+    network_timeout = 120 if timeout is None else max(10, min(timeout, 120))
+    with urllib.request.urlopen(request, timeout=network_timeout) as response:
+        release = json.load(response)
+    if not isinstance(release, dict):
+        raise RuntimeError("Mailpit release metadata is invalid")
+
+    expected_name = f"mailpit-linux-{_mailpit_release_architecture()}.tar.gz"
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        raise RuntimeError("Mailpit release metadata does not contain assets")
+
+    for asset in assets:
+        if not isinstance(asset, dict) or asset.get("name") != expected_name:
+            continue
+        url = asset.get("browser_download_url")
+        if not isinstance(url, str):
+            break
+        parsed = urllib.parse.urlparse(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != "github.com"
+            or not parsed.path.startswith("/axllent/mailpit/releases/download/")
+        ):
+            raise RuntimeError("Mailpit release asset URL is outside the official upstream repository")
+        return url
+    raise RuntimeError(f"Mailpit release does not contain {expected_name}")
+
+
+def _download_mailpit_asset(url: str, destination: Path, timeout: int | None) -> None:
+    network_timeout = 120 if timeout is None else max(10, min(timeout, 120))
+    request = urllib.request.Request(url, headers={"User-Agent": "NativeDev"})
+    total = 0
+    with urllib.request.urlopen(request, timeout=network_timeout) as response, destination.open("wb") as handle:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAILPIT_MAX_DOWNLOAD_BYTES:
+                raise RuntimeError("Mailpit release asset exceeds NativeDev's download size limit")
+            handle.write(chunk)
+    if total == 0:
+        raise RuntimeError("Downloaded Mailpit release asset is empty")
+
+
+def _execute_mailpit_install(timeout: int | None) -> subprocess.CompletedProcess:
+    if MAILPIT_SERVICE_PATH.exists() or MAILPIT_BINARY_PATH.exists():
+        return subprocess.CompletedProcess(
+            [],
+            1,
+            "",
+            "Mailpit files already exist; NativeDev will not overwrite an existing installation.",
+        )
+
+    installed_binary = False
+    installed_unit = False
+    success = False
+    try:
+        with tempfile.TemporaryDirectory(prefix="nativedev-root-mailpit-", dir="/tmp") as temp_dir:
+            temp = Path(temp_dir)
+            archive = temp / "mailpit.tar.gz"
+            extracted = temp / "mailpit"
+            unit = temp / "mailpit.service"
+
+            url = _mailpit_latest_asset_url(timeout)
+            _download_mailpit_asset(url, archive, timeout)
+
+            with tarfile.open(archive, mode="r:gz") as bundle:
+                members = [
+                    member for member in bundle.getmembers()
+                    if member.isfile() and Path(member.name).name == "mailpit"
+                ]
+                if len(members) != 1:
+                    raise RuntimeError("Mailpit release archive does not contain exactly one mailpit binary")
+                if members[0].size > MAILPIT_MAX_DOWNLOAD_BYTES:
+                    raise RuntimeError("Mailpit binary exceeds NativeDev's extraction size limit")
+                source = bundle.extractfile(members[0])
+                if source is None:
+                    raise RuntimeError("Mailpit binary could not be read from the release archive")
+                with source, extracted.open("wb") as destination:
+                    shutil.copyfileobj(source, destination)
+            os.chmod(extracted, 0o755)
+
+            validation = subprocess.run(
+                [str(extracted), "version"],
+                text=True,
+                capture_output=True,
+                timeout=30,
+                env={**os.environ, "PATH": SAFE_PATH},
+            )
+            if validation.returncode != 0:
+                return subprocess.CompletedProcess(
+                    validation.args,
+                    validation.returncode,
+                    validation.stdout,
+                    validation.stderr or "Downloaded Mailpit binary failed validation",
+                )
+
+            install_binary = subprocess.run(
+                [_binary("install"), "-m", "0755", str(extracted), str(MAILPIT_BINARY_PATH)],
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+            )
+            if install_binary.returncode != 0:
+                return install_binary
+            installed_binary = True
+
+            unit.write_text(MAILPIT_SERVICE_CONTENT, encoding="utf-8")
+            install_unit = subprocess.run(
+                [_binary("install"), "-m", "0644", str(unit), str(MAILPIT_SERVICE_PATH)],
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+            )
+            if install_unit.returncode != 0:
+                return install_unit
+            installed_unit = True
+
+        reload_proc = subprocess.run(
+            [_binary("systemctl"), "daemon-reload"],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        if reload_proc.returncode != 0:
+            return reload_proc
+
+        enable_proc = subprocess.run(
+            [_binary("systemctl"), "enable", "--now", "mailpit"],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        if enable_proc.returncode != 0:
+            return enable_proc
+        success = True
+        return enable_proc
+    except Exception as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
+    finally:
+        # A failed install must not leave a half-managed service behind.
+        if not success and (installed_unit or installed_binary):
+            try:
+                subprocess.run(
+                    [_binary("systemctl"), "disable", "--now", "mailpit"],
+                    text=True,
+                    capture_output=True,
+                    timeout=30,
+                )
+            except Exception:
+                pass
+            if installed_unit:
+                try:
+                    MAILPIT_SERVICE_PATH.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if installed_binary:
+                try:
+                    MAILPIT_BINARY_PATH.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            try:
+                subprocess.run(
+                    [_binary("systemctl"), "daemon-reload"],
+                    text=True,
+                    capture_output=True,
+                    timeout=30,
+                )
+            except Exception:
+                pass
+
+
+def _execute_mailpit_uninstall(timeout: int | None) -> subprocess.CompletedProcess:
+    if not _mailpit_managed_unit():
+        return subprocess.CompletedProcess([], 1, "", "Mailpit is not managed by NativeDev")
+
+    try:
+        subprocess.run(
+            [_binary("systemctl"), "disable", "--now", "mailpit"],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        MAILPIT_SERVICE_PATH.unlink(missing_ok=True)
+        MAILPIT_BINARY_PATH.unlink(missing_ok=True)
+        reload_proc = subprocess.run(
+            [_binary("systemctl"), "daemon-reload"],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        if reload_proc.returncode != 0:
+            return reload_proc
+        return subprocess.CompletedProcess([], 0, "", "")
+    except (OSError, RuntimeError) as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
+
+def _phpmyadmin_runtime_paths(uid: int) -> tuple[pwd.struct_passwd, Path]:
+    _database_username_for_uid(uid)
+    account = pwd.getpwuid(uid)
+    runtime_dir = PHPMYADMIN_RUNTIME_ROOT / str(uid) / "tmp"
+    return account, runtime_dir
+
+
+def _phpmyadmin_existing_secret() -> str | None:
+    if not PHPMYADMIN_NATIVEDEV_CONFIG.exists():
+        return None
+    if PHPMYADMIN_NATIVEDEV_CONFIG.is_symlink() or not PHPMYADMIN_NATIVEDEV_CONFIG.is_file():
+        raise RuntimeError("Refusing to replace unexpected phpMyAdmin NativeDev config path")
+    text = PHPMYADMIN_NATIVEDEV_CONFIG.read_text(encoding="utf-8", errors="strict")
+    if PHPMYADMIN_CONFIG_MARKER not in text:
+        raise RuntimeError("Refusing to replace phpMyAdmin config not owned by NativeDev")
+    match = re.search(r"\$cfg\['blowfish_secret'\]\s*=\s*'([0-9a-f]{32})';", text)
+    return match.group(1) if match else None
+
+
+def _execute_phpmyadmin_reconcile(uid: int) -> subprocess.CompletedProcess:
+    try:
+        if not PHPMYADMIN_ENTRYPOINT.is_file():
+            raise RuntimeError("phpMyAdmin package files are not installed")
+        conf_dir = PHPMYADMIN_NATIVEDEV_CONFIG.parent
+        if not conf_dir.is_dir() or conf_dir.is_symlink():
+            raise RuntimeError("phpMyAdmin configuration directory is unavailable or unsafe")
+
+        account, runtime_dir = _phpmyadmin_runtime_paths(uid)
+        for path in (PHPMYADMIN_RUNTIME_ROOT, PHPMYADMIN_RUNTIME_ROOT / str(uid), runtime_dir):
+            if path.exists() and path.is_symlink():
+                raise RuntimeError(f"Refusing unsafe phpMyAdmin runtime path: {path}")
+            path.mkdir(mode=0o700 if path != PHPMYADMIN_RUNTIME_ROOT else 0o755, parents=True, exist_ok=True)
+
+        user_root = PHPMYADMIN_RUNTIME_ROOT / str(uid)
+        for path in (user_root, runtime_dir):
+            os.chown(path, uid, account.pw_gid)
+            os.chmod(path, 0o700)
+
+        secret = _phpmyadmin_existing_secret() or secrets.token_hex(16)
+        temp_literal = str(runtime_dir).replace("\\", "\\\\").replace("'", "\\'")
+        content = (
+            "<?php\n"
+            f"{PHPMYADMIN_CONFIG_MARKER}\n"
+            f"$cfg['blowfish_secret'] = '{secret}';\n"
+            f"$cfg['TempDir'] = '{temp_literal}';\n"
+            "$cfg['PmaNoRelation_DisableWarning'] = true;\n"
+        ).encode("utf-8")
+        _atomic_write_bytes(PHPMYADMIN_NATIVEDEV_CONFIG, content, 0o640)
+        os.chown(PHPMYADMIN_NATIVEDEV_CONFIG, 0, account.pw_gid)
+        os.chmod(PHPMYADMIN_NATIVEDEV_CONFIG, 0o640)
+        return subprocess.CompletedProcess([], 0, "", "")
+    except (OSError, RuntimeError, UnicodeError) as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
+
+
+def _execute_phpmyadmin_cleanup(uid: int) -> subprocess.CompletedProcess:
+    try:
+        if PHPMYADMIN_NATIVEDEV_CONFIG.exists():
+            if PHPMYADMIN_NATIVEDEV_CONFIG.is_symlink() or not PHPMYADMIN_NATIVEDEV_CONFIG.is_file():
+                raise RuntimeError("Refusing to remove unexpected phpMyAdmin NativeDev config path")
+            text = PHPMYADMIN_NATIVEDEV_CONFIG.read_text(encoding="utf-8", errors="strict")
+            if PHPMYADMIN_CONFIG_MARKER in text:
+                PHPMYADMIN_NATIVEDEV_CONFIG.unlink(missing_ok=True)
+        _account, runtime_dir = _phpmyadmin_runtime_paths(uid)
+        user_root = runtime_dir.parent
+        if user_root.exists() and not user_root.is_symlink():
+            shutil.rmtree(user_root)
+        return subprocess.CompletedProcess([], 0, "", "")
+    except (OSError, RuntimeError, UnicodeError) as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
+
+
 def validate_operation(request: dict, uid: int = 1000) -> tuple[bool, str]:
     try:
         command_for_operation(request, uid)
@@ -1106,6 +1488,14 @@ def _execute_database_delete_all_data(request: dict) -> subprocess.CompletedProc
 def execute_operation(request: dict, uid: int, timeout: int | None) -> subprocess.CompletedProcess:
     action = request.get("action")
 
+    if action == "mailpit.install":
+        command_for_operation(request, uid)
+        return _execute_mailpit_install(timeout)
+
+    if action == "mailpit.uninstall":
+        command_for_operation(request, uid)
+        return _execute_mailpit_uninstall(timeout)
+
     if action == "database.postgresql.ensure_cluster":
         command_for_operation(request, uid)
         return _execute_postgresql_ensure_cluster(timeout)
@@ -1118,7 +1508,11 @@ def execute_operation(request: dict, uid: int, timeout: int | None) -> subproces
         command_for_operation(request, uid)
         return _execute_database_operation(request, uid, timeout)
 
-    if action in {"apt.install", "apt.remove"}:
+    if action == "developer_tool.reconcile":
+        command_for_operation(request, uid)
+        return _execute_phpmyadmin_reconcile(uid)
+
+    if action in {"apt.install", "apt.remove", "developer_tool.install", "developer_tool.uninstall"}:
         argv = command_for_operation(request, uid)
         env = dict(os.environ)
         env["PATH"] = SAFE_PATH
@@ -1128,13 +1522,51 @@ def execute_operation(request: dict, uid: int, timeout: int | None) -> subproces
         env["DEBIAN_FRONTEND"] = "noninteractive"
         env["APT_LISTCHANGES_FRONTEND"] = "none"
         env["NEEDRESTART_MODE"] = "a"
-        return subprocess.run(
+
+        # Debian/Ubuntu phpMyAdmin ships optional Apache/dbconfig integration.
+        # NativeDev owns the Nginx route and never needs a phpMyAdmin control
+        # database for basic local DB administration, so pin both answers to
+        # safe noninteractive values before the fixed package install.
+        if action == "developer_tool.install" and request.get("tool") == "phpmyadmin":
+            preseed = (
+                "phpmyadmin phpmyadmin/reconfigure-webserver multiselect \n"
+                "phpmyadmin phpmyadmin/dbconfig-install boolean false\n"
+            )
+            seeded = subprocess.run(
+                [_binary("debconf-set-selections")],
+                input=preseed,
+                text=True,
+                capture_output=True,
+                timeout=60,
+                env=env,
+            )
+            if seeded.returncode != 0:
+                return seeded
+
+        package_proc = subprocess.run(
             argv,
             text=True,
             capture_output=True,
             timeout=timeout,
             env=env,
         )
+        if package_proc.returncode != 0:
+            return package_proc
+
+        if request.get("tool") == "phpmyadmin":
+            if action == "developer_tool.install":
+                runtime_proc = _execute_phpmyadmin_reconcile(uid)
+            elif action == "developer_tool.uninstall":
+                runtime_proc = _execute_phpmyadmin_cleanup(uid)
+            else:
+                runtime_proc = subprocess.CompletedProcess([], 0, "", "")
+            if runtime_proc.returncode != 0:
+                if package_proc.stdout:
+                    runtime_proc.stdout = package_proc.stdout + runtime_proc.stdout
+                if package_proc.stderr:
+                    runtime_proc.stderr = package_proc.stderr + runtime_proc.stderr
+                return runtime_proc
+        return package_proc
 
     if action == "php.extension_install":
         version, _extension, _package, modules = _php_extension_details(request)

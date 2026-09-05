@@ -9,12 +9,13 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, GLib, Gtk
+from gi.repository import Gdk, Gio, GLib, Gtk
 
 from . import __version__
 from .context import AppContext
 from .services import COMPONENTS, ComponentSpec
 from .managers.database_access import DatabaseAdminPasswordRequired, DatabaseAccessManager, DEFAULT_DATABASE_PASSWORD
+from .managers.developer_tools import DEVELOPER_WEB_TOOLS
 
 
 class Worker:
@@ -1557,7 +1558,7 @@ class ServicesPage(Page):
         self.list_box.append(label("Detecting installed components…", "muted"))
 
         def collect():
-            rows = []
+            components = {}
             for spec in COMPONENTS:
                 state = self.context.services.state(spec)
                 database = None
@@ -1566,121 +1567,271 @@ class ServicesPage(Page):
                         database = self.context.database_access.state(spec.key)
                     except Exception as exc:
                         database = exc
-                rows.append((state, database))
-            return rows
+                components[spec.key] = (state, database)
+            developer_tools = [self.context.developer_tools.state(spec) for spec in DEVELOPER_WEB_TOOLS]
+            return components, developer_tools
 
-        def done(rows):
+        def done(data):
+            components, developer_tools = data
             self._clear()
-            for state, database in rows:
-                spec = state.spec
-                box = card()
-                top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-                copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-                copy.set_hexpand(True)
-                copy.append(label(spec.title, "section-title"))
-                if spec.key == "mariadb" and state.version:
-                    copy.append(label(f"Version {state.version}", "muted"))
-                if spec.note:
-                    copy.append(label(spec.note, "muted", wrap=True))
-                top.append(copy)
-                if state.running:
-                    top.append(status_pill("Running", True))
-                elif state.installed:
-                    top.append(status_pill("Installed", True))
-                else:
-                    top.append(status_pill("Not installed", False))
-                if spec.service and state.service_available:
-                    top.append(status_pill(state.enabled_state.capitalize(), state.enabled if state.enabled_state in {"enabled", "disabled"} else None))
-                box.append(top)
 
-                actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-                if not state.installed:
-                    install = Gtk.Button(label="Install")
-                    install.set_sensitive(state.installable and self.context.distro.is_debian_family)
-                    install.add_css_class("suggested-action")
-                    install.connect(
-                        "clicked",
-                        lambda _b, s=spec, btn=install: confirm(
-                            self.window,
-                            f"Install {s.title}?",
-                            "NativeDev will install the system package(s). Database services also receive the local development account automatically. Services are enabled and started when applicable.",
-                            lambda: self.action(btn, lambda: self.context.controller.install_component(s), success_message=f"{s.title} installed", after=self.refresh),
-                        ),
-                    )
-                    actions.append(install)
-                else:
-                    if spec.service and state.service_available:
-                        if state.running:
-                            stop = Gtk.Button(label="Stop")
-                            stop.connect("clicked", lambda _b, s=spec, btn=stop: self.action(btn, lambda: self.context.services.stop(s), success_message=f"{s.title} stopped", after=self.refresh))
-                            actions.append(stop)
-                            restart = Gtk.Button(label="Restart")
-                            restart.connect("clicked", lambda _b, s=spec, btn=restart: self.action(btn, lambda: self.context.services.restart(s), success_message=f"{s.title} restarted", after=self.refresh))
-                            actions.append(restart)
-                        else:
-                            start_btn = Gtk.Button(label="Start")
-                            start_btn.connect("clicked", lambda _b, s=spec, btn=start_btn: self.action(btn, lambda: self.context.services.start(s), success_message=f"{s.title} started", after=self.refresh))
-                            actions.append(start_btn)
+            self.list_box.append(label("SYSTEM SERVICES", "section-title"))
+            for key in ("nginx", "mariadb", "postgresql", "redis", "memcached", "rabbitmq"):
+                state, database = components[key]
+                self.list_box.append(self._service_component_card(state, database))
 
-                        if state.enabled_state == "enabled":
-                            disable = Gtk.Button(label="Disable")
-                            disable.connect("clicked", lambda _b, s=spec, btn=disable: self.action(btn, lambda: self.context.services.disable(s), success_message=f"{s.title} disabled", after=self.refresh))
-                            actions.append(disable)
-                        elif state.enabled_state == "disabled":
-                            enable = Gtk.Button(label="Enable")
-                            enable.connect("clicked", lambda _b, s=spec, btn=enable: self.action(btn, lambda: self.context.services.enable(s), success_message=f"{s.title} enabled", after=self.refresh))
-                            actions.append(enable)
+            self.list_box.append(label("SYSTEM TOOLS", "section-title"))
+            for key in ("composer", "mkcert"):
+                state, database = components[key]
+                self.list_box.append(self._service_component_card(state, database))
 
-                    uninstall = Gtk.Button(label="Uninstall")
-                    uninstall.set_sensitive(state.uninstallable)
-                    uninstall.add_css_class("destructive-action")
-                    if state.uninstallable:
-                        if spec.key in {"mariadb", "postgresql"}:
-                            uninstall.connect(
-                                "clicked",
-                                lambda _b, s=spec, btn=uninstall: confirm_database_uninstall(
-                                    self.window,
-                                    f"Uninstall {s.title}?",
-                                    lambda delete_data: self.action(
-                                        btn,
-                                        lambda: self.context.controller.uninstall_component(
-                                            s, delete_database_data=delete_data
-                                        ),
-                                        success_message=(
-                                            f"{s.title} uninstalled; database data and accounts deleted"
-                                            if delete_data else f"{s.title} uninstalled"
-                                        ),
-                                        after=self.refresh,
-                                    ),
-                                ),
-                            )
-                        else:
-                            uninstall.connect(
-                                "clicked",
-                                lambda _b, s=spec, btn=uninstall: confirm(
-                                    self.window,
-                                    f"Uninstall {s.title}?",
-                                    "NativeDev removes this component's installed runtime package(s).",
-                                    lambda: self.action(
-                                        btn,
-                                        lambda: self.context.controller.uninstall_component(s),
-                                        success_message=f"{s.title} uninstalled",
-                                        after=self.refresh,
-                                    ),
-                                ),
-                            )
-                    actions.append(uninstall)
-                    if state.uninstall_note:
-                        box.append(label(state.uninstall_note, "muted", wrap=True))
-                if actions.get_first_child():
-                    box.append(actions)
-
-                if state.installed and self.context.database_access.supports(spec.key):
-                    self._append_database_access(box, spec, database)
-                self.list_box.append(box)
+            self.list_box.append(label("DEVELOPER TOOLS", "section-title"))
+            nginx_installed = components["nginx"][0].installed
+            for state in developer_tools:
+                self.list_box.append(self._developer_web_tool_card(state, nginx_installed))
+            mailpit_state, mailpit_database = components["mailpit"]
+            self.list_box.append(self._service_component_card(mailpit_state, mailpit_database))
             return False
 
         self.worker.submit(collect, done, lambda exc: self.window.set_activity(False, str(exc), error=True))
+
+    def _service_component_card(self, state, database):
+        spec = state.spec
+        box = card()
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        copy.set_hexpand(True)
+        copy.append(label(spec.title, "section-title"))
+        if spec.key == "mariadb" and state.version:
+            copy.append(label(f"Version {state.version}", "muted"))
+        if spec.note:
+            copy.append(label(spec.note, "muted", wrap=True))
+        top.append(copy)
+        if state.running:
+            top.append(status_pill("Running", True))
+        elif state.installed:
+            top.append(status_pill("Installed", True))
+        else:
+            top.append(status_pill("Not installed", False))
+        if spec.service and state.service_available:
+            top.append(status_pill(state.enabled_state.capitalize(), state.enabled if state.enabled_state in {"enabled", "disabled"} else None))
+        box.append(top)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        if not state.installed:
+            install = Gtk.Button(label="Install")
+            install.set_sensitive(state.installable and self.context.distro.is_debian_family)
+            install.add_css_class("suggested-action")
+            install.connect(
+                "clicked",
+                lambda _b, s=spec, btn=install: confirm(
+                    self.window,
+                    f"Install {s.title}?",
+                    (
+                        "NativeDev will install the official Mailpit Linux binary and a NativeDev-managed systemd service. "
+                        "The Web UI and SMTP listener are bound to localhost only."
+                        if s.key == "mailpit"
+                        else "NativeDev will install the system package(s). Database services also receive the local development account automatically. Services are enabled and started when applicable."
+                    ),
+                    lambda: self.action(btn, lambda: self.context.controller.install_component(s), success_message=f"{s.title} installed", after=self.refresh),
+                ),
+            )
+            actions.append(install)
+        else:
+            if spec.service and state.service_available:
+                if state.running:
+                    stop = Gtk.Button(label="Stop")
+                    stop.connect("clicked", lambda _b, s=spec, btn=stop: self.action(btn, lambda: self.context.services.stop(s), success_message=f"{s.title} stopped", after=self.refresh))
+                    actions.append(stop)
+                    restart = Gtk.Button(label="Restart")
+                    restart.connect("clicked", lambda _b, s=spec, btn=restart: self.action(btn, lambda: self.context.services.restart(s), success_message=f"{s.title} restarted", after=self.refresh))
+                    actions.append(restart)
+                else:
+                    start_btn = Gtk.Button(label="Start")
+                    start_btn.connect("clicked", lambda _b, s=spec, btn=start_btn: self.action(btn, lambda: self.context.services.start(s), success_message=f"{s.title} started", after=self.refresh))
+                    actions.append(start_btn)
+
+                if state.enabled_state == "enabled":
+                    disable = Gtk.Button(label="Disable")
+                    disable.connect("clicked", lambda _b, s=spec, btn=disable: self.action(btn, lambda: self.context.services.disable(s), success_message=f"{s.title} disabled", after=self.refresh))
+                    actions.append(disable)
+                elif state.enabled_state == "disabled":
+                    enable = Gtk.Button(label="Enable")
+                    enable.connect("clicked", lambda _b, s=spec, btn=enable: self.action(btn, lambda: self.context.services.enable(s), success_message=f"{s.title} enabled", after=self.refresh))
+                    actions.append(enable)
+
+            uninstall = Gtk.Button(label="Uninstall")
+            uninstall.set_sensitive(state.uninstallable)
+            uninstall.add_css_class("destructive-action")
+            if state.uninstallable:
+                if spec.key in {"mariadb", "postgresql"}:
+                    uninstall.connect(
+                        "clicked",
+                        lambda _b, s=spec, btn=uninstall: confirm_database_uninstall(
+                            self.window,
+                            f"Uninstall {s.title}?",
+                            lambda delete_data: self.action(
+                                btn,
+                                lambda: self.context.controller.uninstall_component(s, delete_database_data=delete_data),
+                                success_message=(
+                                    f"{s.title} uninstalled; database data and accounts deleted"
+                                    if delete_data else f"{s.title} uninstalled"
+                                ),
+                                after=self.refresh,
+                            ),
+                        ),
+                    )
+                else:
+                    uninstall.connect(
+                        "clicked",
+                        lambda _b, s=spec, btn=uninstall: confirm(
+                            self.window,
+                            f"Uninstall {s.title}?",
+                            (
+                                "NativeDev removes the managed Mailpit binary and systemd service. Stored Mailpit messages are preserved."
+                                if s.key == "mailpit"
+                                else "NativeDev removes this component's installed runtime package(s)."
+                            ),
+                            lambda: self.action(btn, lambda: self.context.controller.uninstall_component(s), success_message=f"{s.title} uninstalled", after=self.refresh),
+                        ),
+                    )
+            actions.append(uninstall)
+            if state.uninstall_note:
+                box.append(label(state.uninstall_note, "muted", wrap=True))
+        if actions.get_first_child():
+            box.append(actions)
+
+        if state.installed and self.context.database_access.supports(spec.key):
+            self._append_database_access(box, spec, database)
+        return box
+
+    def _developer_web_tool_card(self, state, nginx_installed: bool):
+        spec = state.spec
+        box = card()
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        copy.set_hexpand(True)
+        copy.append(label(spec.title, "section-title"))
+        if state.version:
+            copy.append(label(f"Version {state.version}", "muted"))
+        copy.append(label(spec.description, "muted"))
+        if state.installed:
+            copy.append(label(state.url, "muted"))
+        top.append(copy)
+        top.append(status_pill("Installed" if state.installed else "Not installed", True if state.installed else False))
+        box.append(top)
+
+        if state.installed and not state.document_root_ready:
+            box.append(label(f"Package installed, but expected web entry point is missing under: {spec.document_root}", "error-text", wrap=True))
+        if state.installed and not state.runtime_ready:
+            box.append(label(state.runtime_note, "error-text", wrap=True))
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        if not state.installed:
+            install = Gtk.Button(label="Install")
+            install.set_sensitive(
+                state.installable
+                and bool(state.php_version)
+                and nginx_installed
+                and self.context.distro.is_debian_family
+            )
+            install.add_css_class("suggested-action")
+            if state.php_version:
+                install.connect(
+                    "clicked",
+                    lambda _b, s=spec, v=state.php_version, btn=install: confirm(
+                        self.window,
+                        f"Install {s.title}?",
+                        f"NativeDev will install the official Debian/Ubuntu package without recommended web servers, serve it at {s.key}.localhost over HTTP, and use PHP {v} FPM. Package updates remain managed by APT.",
+                        lambda: self.action(
+                            btn,
+                            lambda: self.context.controller.install_developer_tool(s, v),
+                            success_message=f"{s.title} installed",
+                            after=self.refresh,
+                        ),
+                    ),
+                )
+            if not state.installable:
+                box.append(label("Unavailable in configured repositories.", "muted", wrap=True))
+            elif not nginx_installed:
+                box.append(label("Install Nginx first.", "muted", wrap=True))
+            elif not state.php_version:
+                box.append(label("Install a PHP-FPM version first.", "muted", wrap=True))
+            actions.append(install)
+        else:
+            if not state.runtime_ready:
+                repair = Gtk.Button(label="Repair")
+                repair.add_css_class("suggested-action")
+                repair.connect(
+                    "clicked",
+                    lambda _b, s=spec, btn=repair: self.action(
+                        btn,
+                        lambda: self.context.controller.repair_developer_tool(s),
+                        success_message=f"{s.title} integration repaired",
+                        after=self.refresh,
+                    ),
+                )
+                actions.append(repair)
+
+            open_button = Gtk.Button(label="Open")
+            open_button.set_sensitive(state.document_root_ready)
+
+            def open_tool(_button, uri=state.url):
+                try:
+                    Gio.AppInfo.launch_default_for_uri(uri, None)
+                except Exception as exc:
+                    self.window.set_activity(False, str(exc), error=True)
+
+            open_button.connect("clicked", open_tool)
+            actions.append(open_button)
+
+            php_values = list(state.php_versions)
+            php_dropdown = Gtk.DropDown.new_from_strings([f"PHP {version}" for version in php_values])
+            php_dropdown.set_sensitive(bool(php_values))
+            try:
+                php_dropdown.set_selected(php_values.index(state.php_version))
+            except ValueError:
+                if php_values:
+                    php_dropdown.set_selected(0)
+            actions.append(php_dropdown)
+
+            uninstall = Gtk.Button(label="Uninstall")
+            uninstall.add_css_class("destructive-action")
+            uninstall.connect(
+                "clicked",
+                lambda _b, s=spec, btn=uninstall: confirm(
+                    self.window,
+                    f"Uninstall {s.title}?",
+                    "NativeDev will remove the distro package and its NativeDev Nginx integration. No database data or accounts are removed, and NativeDev does not run autoremove.",
+                    lambda: self.action(
+                        btn,
+                        lambda: self.context.controller.uninstall_developer_tool(s),
+                        success_message=f"{s.title} uninstalled",
+                        after=self.refresh,
+                    ),
+                ),
+            )
+            actions.append(uninstall)
+
+            def php_changed(dropdown, _param, s=spec, values=php_values, current=state.php_version):
+                index = dropdown.get_selected()
+                if index < 0 or index >= len(values):
+                    return
+                version = values[index]
+                if version == current:
+                    return
+                self.action(
+                    dropdown,
+                    lambda: self.context.controller.set_developer_tool_php(s, version),
+                    success_message=f"{s.title} now uses PHP {version}",
+                    after=self.refresh,
+                )
+
+            php_dropdown.connect("notify::selected", php_changed)
+
+        if actions.get_first_child():
+            box.append(actions)
+        return box
 
     def _use_default_database_user(self, button: Gtk.Button, spec: ComponentSpec, username: str) -> None:
         if spec.key in {"mariadb", "mysql"}:

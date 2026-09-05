@@ -23,6 +23,7 @@ class AppConfig:
     php_version: str = ""
     https_enabled: bool = False
     projects: dict[str, dict[str, str]] = field(default_factory=dict)
+    developer_tools: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -34,6 +35,8 @@ class AppConfig:
         values = {key: value for key, value in data.items() if key in allowed}
         if not isinstance(values.get("projects", {}), dict):
             values["projects"] = {}
+        if not isinstance(values.get("developer_tools", {}), dict):
+            values["developer_tools"] = {}
         return cls(**values)
 
     def save(self) -> None:

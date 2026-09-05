@@ -13,6 +13,7 @@ from pathlib import Path
 from ..config import AppConfig, STATE_DIR
 from ..system import AptManager, CommandRunner, SystemdManager
 from .php import PhpManager
+from .developer_tools import DEVELOPER_WEB_TOOLS, developer_tool_hostname
 
 
 NGINX_SITE = Path("/etc/nginx/sites-available/nativedev-sites.conf")
@@ -320,7 +321,13 @@ class LocalDevManager:
         ready immediately after either setting changes. A hash keeps arbitrary
         filesystem characters out of an Nginx comment line.
         """
-        payload = f"{self.config.domain}\0{self.park_dir}".encode("utf-8", errors="surrogateescape")
+        # Keep Local Development readiness tied only to settings that define
+        # the persistent wildcard router. Developer Tool package/PHP state is
+        # reconciled explicitly by its own mutations, so LocalDev refresh does
+        # not need extra dpkg queries just to decide whether routing is ready.
+        payload = f"{self.config.domain}\0{self.park_dir}".encode(
+            "utf-8", errors="surrogateescape"
+        )
         return hashlib.sha256(payload).hexdigest()
 
     def nginx_ready(self) -> bool:
@@ -371,6 +378,110 @@ class LocalDevManager:
             routes[host] = project
         return routes
 
+    def _developer_tool_php(self, key: str, installed_versions: set[str], default_version: str) -> str:
+        preference = self.config.developer_tools.get(key, {})
+        selected = preference.get("php", "") if isinstance(preference, dict) else ""
+        return selected if selected in installed_versions else default_version
+
+    def _render_developer_tool_servers(self, default_version: str, installed_versions: set[str]) -> list[str]:
+        if not self.apt:
+            return []
+        blocks: list[str] = []
+        for spec in DEVELOPER_WEB_TOOLS:
+            if not self.apt.is_installed(spec.package):
+                continue
+            version = self._developer_tool_php(spec.key, installed_versions, default_version)
+            if not version:
+                continue
+            host = developer_tool_hostname(spec.key)
+            socket_value = f"unix:{self.php.developer_socket_path(version)}"
+            backend = self._nginx_quote(socket_value)
+
+            if spec.key == "adminer":
+                # Debian/Ubuntu ship a compiled single-file Adminer at
+                # /usr/share/adminer/adminer.php. Serving the source/development
+                # tree directly makes its CSS/JS routing brittle. The compiled
+                # entry point self-serves its bundled assets via ?file=..., so
+                # only that PHP file is executable/exposed.
+                script = self._nginx_quote(str(spec.document_root / spec.entrypoint))
+                blocks.append(
+                    f"""server {{
+    listen 80;
+    listen [::]:80;
+    server_name {host};
+
+    allow 127.0.0.1;
+    allow ::1;
+    deny all;
+
+    location = / {{
+        include fastcgi_params;
+        fastcgi_pass {backend};
+        fastcgi_param SCRIPT_FILENAME {script};
+        fastcgi_param SCRIPT_NAME /adminer.php;
+        fastcgi_param HTTPS off;
+    }}
+
+    location = /adminer.php {{
+        include fastcgi_params;
+        fastcgi_pass {backend};
+        fastcgi_param SCRIPT_FILENAME {script};
+        fastcgi_param SCRIPT_NAME /adminer.php;
+        fastcgi_param HTTPS off;
+    }}
+
+    location / {{
+        return 404;
+    }}
+}}
+"""
+                )
+                continue
+
+            root = self._nginx_quote(str(spec.document_root))
+            blocks.append(
+                f"""server {{
+    listen 80;
+    listen [::]:80;
+    server_name {host};
+
+    allow 127.0.0.1;
+    allow ::1;
+    deny all;
+
+    root {root};
+    index index.php index.html;
+
+    location / {{
+        try_files $uri $uri/ /index.php?$query_string;
+    }}
+
+    # Static assets must never fall back to index.php. Returning HTML for a
+    # missing CSS/JS path makes browsers reject the response on MIME grounds.
+    location ~* \\.(?:css|js|map|png|gif|jpe?g|svg|ico|webp|woff2?|ttf)$ {{
+        try_files $uri =404;
+        access_log off;
+    }}
+
+    location ~ \\.php$ {{
+        try_files $uri =404;
+        include fastcgi_params;
+        fastcgi_pass {backend};
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param HTTPS off;
+        # Distro phpMyAdmin is an application dependency, not user project
+        # code. Do not expose vendor/dependency deprecation notices in-page.
+        fastcgi_param PHP_ADMIN_VALUE "display_errors=Off\\nerror_reporting=E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED";
+    }}
+
+    location ~ /\\. {{
+        deny all;
+    }}
+}}
+"""
+            )
+        return blocks
+
     def https_ready(self) -> bool:
         """Return True only when HTTPS is enabled *and* both TLS files exist."""
         return bool(self.config.https_enabled and NGINX_CERT.is_file() and NGINX_KEY.is_file())
@@ -394,6 +505,7 @@ class LocalDevManager:
             )
 
         default_socket = f"unix:{self.php.developer_socket_path(default_version)}"
+        installed = set(self.php.installed_fpm_versions())
         routes = self._known_project_routes()
         dynamic_path = self._nginx_template_path(str(self.park_dir) + os.sep, "nativedev_auto_project")
         domain_re = re.escape(domain)
@@ -419,7 +531,6 @@ class LocalDevManager:
             "map $host $nativedev_php_backend {",
             f"    default {self._nginx_quote(default_socket)};",
         ]
-        installed = set(self.php.installed_fpm_versions())
         for host, project in sorted(routes.items()):
             version = self.project_preferences(project)["php"]
             if version == PHP_DEFAULT or version not in installed:
@@ -482,6 +593,7 @@ class LocalDevManager:
                 "",
                 *php_map,
                 "",
+                *self._render_developer_tool_servers(default_version, installed),
                 server,
             ]
         )
@@ -501,6 +613,8 @@ class LocalDevManager:
             version = self.project_preferences(project)["php"]
             if version != PHP_DEFAULT and version in installed:
                 versions_needed.add(version)
+        # Developer Tool pools are created/validated by their install/PHP-switch
+        # mutations. Do not repeat that work during an unrelated TLD/Park save.
 
         for version in versions_needed:
             self.php.ensure_developer_pool(version)

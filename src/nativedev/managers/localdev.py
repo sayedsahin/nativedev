@@ -13,7 +13,14 @@ from pathlib import Path
 from ..config import AppConfig, STATE_DIR
 from ..system import AptManager, CommandRunner, SystemdManager
 from .php import PhpManager
-from .developer_tools import DEVELOPER_WEB_TOOLS, developer_tool_hostname
+from .developer_tools import (
+    ADMINER_SQLITE_ENTRYPOINT,
+    ADMINER_SQLITE_HOSTNAME,
+    ADMINER_SQLITE_MARKER,
+    DEVELOPER_TOOL_BY_KEY,
+    DEVELOPER_WEB_TOOLS,
+    developer_tool_hostname,
+)
 
 
 NGINX_SITE = Path("/etc/nginx/sites-available/nativedev-sites.conf")
@@ -383,29 +390,21 @@ class LocalDevManager:
         selected = preference.get("php", "") if isinstance(preference, dict) else ""
         return selected if selected in installed_versions else default_version
 
-    def _render_developer_tool_servers(self, default_version: str, installed_versions: set[str]) -> list[str]:
-        if not self.apt:
-            return []
-        blocks: list[str] = []
-        for spec in DEVELOPER_WEB_TOOLS:
-            if not self.apt.is_installed(spec.package):
-                continue
-            version = self._developer_tool_php(spec.key, installed_versions, default_version)
-            if not version:
-                continue
-            host = developer_tool_hostname(spec.key)
-            socket_value = f"unix:{self.php.developer_socket_path(version)}"
-            backend = self._nginx_quote(socket_value)
+    @staticmethod
+    def _adminer_sqlite_managed() -> bool:
+        path = ADMINER_SQLITE_ENTRYPOINT
+        if not path.is_file() or path.is_symlink():
+            return False
+        try:
+            return ADMINER_SQLITE_MARKER in path.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeError):
+            return False
 
-            if spec.key == "adminer":
-                # Debian/Ubuntu ship a compiled single-file Adminer at
-                # /usr/share/adminer/adminer.php. Serving the source/development
-                # tree directly makes its CSS/JS routing brittle. The compiled
-                # entry point self-serves its bundled assets via ?file=..., so
-                # only that PHP file is executable/exposed.
-                script = self._nginx_quote(str(spec.document_root / spec.entrypoint))
-                blocks.append(
-                    f"""server {{
+    def _render_adminer_single_file_server(self, host: str, script_path: Path, version: str) -> str:
+        socket_value = f"unix:{self.php.developer_socket_path(version)}"
+        backend = self._nginx_quote(socket_value)
+        script = self._nginx_quote(str(script_path))
+        return f"""server {{
     listen 80;
     listen [::]:80;
     server_name {host};
@@ -435,6 +434,29 @@ class LocalDevManager:
     }}
 }}
 """
+
+    def _render_developer_tool_servers(self, default_version: str, installed_versions: set[str]) -> list[str]:
+        if not self.apt:
+            return []
+        blocks: list[str] = []
+        for spec in DEVELOPER_WEB_TOOLS:
+            if not self.apt.is_installed(spec.package):
+                continue
+            version = self._developer_tool_php(spec.key, installed_versions, default_version)
+            if not version:
+                continue
+            host = developer_tool_hostname(spec.key)
+            socket_value = f"unix:{self.php.developer_socket_path(version)}"
+            backend = self._nginx_quote(socket_value)
+
+            if spec.key == "adminer":
+                # Debian/Ubuntu ship a compiled single-file Adminer. The normal
+                # endpoint and the optional SQLite wrapper both execute the
+                # distro-owned Adminer core without serving its source tree.
+                blocks.append(
+                    self._render_adminer_single_file_server(
+                        host, spec.document_root / spec.entrypoint, version
+                    )
                 )
                 continue
 
@@ -480,6 +502,15 @@ class LocalDevManager:
 }}
 """
             )
+        adminer = DEVELOPER_TOOL_BY_KEY["adminer"]
+        if self.apt.is_installed(adminer.package) and self._adminer_sqlite_managed():
+            version = self._developer_tool_php("adminer", installed_versions, default_version)
+            if version:
+                blocks.append(
+                    self._render_adminer_single_file_server(
+                        ADMINER_SQLITE_HOSTNAME, ADMINER_SQLITE_ENTRYPOINT, version
+                    )
+                )
         return blocks
 
     def https_ready(self) -> bool:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import re
 
 from ..config import AppConfig
 from ..system import AptManager, CommandRunner
@@ -43,6 +44,12 @@ PHPMYADMIN_NATIVEDEV_CONFIG = Path("/etc/phpmyadmin/conf.d/nativedev.php")
 PHPMYADMIN_RUNTIME_ROOT = Path("/var/lib/nativedev/phpmyadmin")
 PHPMYADMIN_CONFIG_MARKER = "// Managed by NativeDev. Manual edits may be replaced."
 DEVELOPER_TOOL_DOMAIN = "localhost"
+ADMINER_SQLITE_KEY = "adminer_sqlite"
+ADMINER_SQLITE_TITLE = "Adminer SQLite"
+ADMINER_SQLITE_HOSTNAME = "adminer-sqlite.localhost"
+ADMINER_SQLITE_ENTRYPOINT = Path("/usr/lib/nativedev/adminer-sqlite/index.php")
+ADMINER_SQLITE_MARKER = "// Managed by NativeDev: Adminer SQLite"
+ADMINER_SQLITE_PASSWORD = "nativedev"
 
 
 def developer_tool_hostname(key: str) -> str:
@@ -65,6 +72,19 @@ class DeveloperToolState:
     runtime_note: str
 
 
+@dataclass(slots=True)
+class AdminerSqliteState:
+    installed: bool
+    installable: bool
+    adminer_installed: bool
+    adminer_version: str | None
+    php_version: str
+    url: str
+    password: str
+    runtime_ready: bool
+    runtime_note: str
+
+
 class DeveloperToolManager:
     """APT-backed developer web applications served by NativeDev Nginx.
 
@@ -81,6 +101,95 @@ class DeveloperToolManager:
     @staticmethod
     def supports(key: str) -> bool:
         return key in DEVELOPER_TOOL_BY_KEY
+
+    def adminer_sqlite_state(self) -> AdminerSqliteState:
+        adminer = DEVELOPER_TOOL_BY_KEY["adminer"]
+        adminer_installed = self.apt.is_installed(adminer.package)
+        adminer_version = self._installed_version(adminer.package) if adminer_installed else None
+        php_version = self.effective_php("adminer") if adminer_installed else ""
+        adminer_major = self._adminer_major(adminer_version)
+        installed = self._adminer_sqlite_managed()
+        runtime_ready = False
+        runtime_note = ""
+        if installed:
+            expected_major = adminer_major
+            wrapper_major = self._adminer_sqlite_wrapper_major()
+            if not adminer_installed:
+                runtime_note = "Adminer is not installed."
+            elif expected_major not in {4, 5}:
+                runtime_note = "Installed Adminer version is not supported by this NativeDev SQLite integration."
+            elif wrapper_major != expected_major:
+                runtime_note = "Adminer SQLite integration needs repair after an Adminer version change."
+            else:
+                runtime_ready = True
+        return AdminerSqliteState(
+            installed=installed,
+            installable=adminer_installed and adminer_major in {4, 5} and bool(php_version),
+            adminer_installed=adminer_installed,
+            adminer_version=adminer_version,
+            php_version=php_version,
+            url=f"http://{ADMINER_SQLITE_HOSTNAME}",
+            password=ADMINER_SQLITE_PASSWORD,
+            runtime_ready=runtime_ready,
+            runtime_note=runtime_note,
+        )
+
+    def install_adminer_sqlite(self) -> None:
+        state = self.adminer_sqlite_state()
+        if not state.adminer_installed:
+            raise RuntimeError("Install Adminer before installing Adminer SQLite")
+        if not state.php_version:
+            raise RuntimeError("Adminer does not currently have an available PHP-FPM runtime")
+        self.runner.privileged_operation(
+            "developer_tool.adminer_sqlite.install",
+            check=True,
+            timeout=120,
+        )
+
+    def uninstall_adminer_sqlite(self) -> None:
+        if not self._adminer_sqlite_managed():
+            raise RuntimeError("Adminer SQLite is not installed")
+        self.runner.privileged_operation(
+            "developer_tool.adminer_sqlite.uninstall",
+            check=True,
+            timeout=120,
+        )
+
+    def reconcile_adminer_sqlite(self) -> None:
+        if not self.apt.is_installed("adminer"):
+            raise RuntimeError("Adminer is not installed")
+        self.runner.privileged_operation(
+            "developer_tool.adminer_sqlite.install",
+            check=True,
+            timeout=120,
+        )
+
+    def _adminer_sqlite_managed(self) -> bool:
+        path = ADMINER_SQLITE_ENTRYPOINT
+        if not path.is_file() or path.is_symlink():
+            return False
+        try:
+            return ADMINER_SQLITE_MARKER in path.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeError):
+            return False
+
+    def _adminer_sqlite_wrapper_major(self) -> int | None:
+        path = ADMINER_SQLITE_ENTRYPOINT
+        if not path.is_file() or path.is_symlink():
+            return None
+        try:
+            text = path.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeError):
+            return None
+        match = re.search(r"NativeDev Adminer major: (\d+)", text)
+        return int(match.group(1)) if match else None
+
+    @staticmethod
+    def _adminer_major(version: str | None) -> int | None:
+        if not version:
+            return None
+        match = re.search(r"(?:^|:)(\d+)\.", version)
+        return int(match.group(1)) if match else None
 
     def state(self, spec: DeveloperToolSpec) -> DeveloperToolState:
         installed = self.apt.is_installed(spec.package)

@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-PROTOCOL_VERSION = 21
+PROTOCOL_VERSION = 22
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 MANAGED_FILES = {
@@ -53,6 +53,14 @@ PHPMYADMIN_NATIVEDEV_CONFIG = Path("/etc/phpmyadmin/conf.d/nativedev.php")
 PHPMYADMIN_ENTRYPOINT = Path("/usr/share/phpmyadmin/index.php")
 PHPMYADMIN_RUNTIME_ROOT = Path("/var/lib/nativedev/phpmyadmin")
 PHPMYADMIN_CONFIG_MARKER = "// Managed by NativeDev. Manual edits may be replaced."
+ADMINER_ENTRYPOINT = Path("/usr/share/adminer/adminer.php")
+ADMINER_PLUGIN_ROOT = Path("/usr/share/adminer/plugins")
+ADMINER_SQLITE_ROOT = Path("/usr/lib/nativedev/adminer-sqlite")
+ADMINER_SQLITE_ENTRYPOINT = ADMINER_SQLITE_ROOT / "index.php"
+ADMINER_SQLITE_MARKER = "// Managed by NativeDev: Adminer SQLite"
+# Fixed local-development password requested by NativeDev: nativedev. Only the
+# password hash is written to the wrapper.
+ADMINER_SQLITE_PASSWORD_HASH = "$2y$12$C16uY0VkrjEQq/iP.As05ern2e0ADR72CuNFblqWAb5O2RwFei2Q2"
 DATABASE_USERNAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,31}$")
 DATABASE_PASSWORD_RE = re.compile(r"^[A-Za-z0-9!@#$%^&*()_+\-=.,:?/]{1,128}$")
 MYSQL_DEV_PRIVILEGES = (
@@ -969,6 +977,11 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
             raise RuntimeError("Mailpit operation contains unsupported fields")
         return []
 
+    if action in {"developer_tool.adminer_sqlite.install", "developer_tool.adminer_sqlite.uninstall"}:
+        if set(request).difference({"protocol", "action", "timeout"}):
+            raise RuntimeError("Adminer SQLite operation contains unsupported fields")
+        return []
+
     if action == "developer_tool.reconcile":
         if set(request).difference({"protocol", "action", "timeout", "tool"}):
             raise RuntimeError("Developer Tool reconciliation contains unsupported fields")
@@ -1380,6 +1393,126 @@ def _execute_mailpit_uninstall(timeout: int | None) -> subprocess.CompletedProce
     except (OSError, RuntimeError) as exc:
         return subprocess.CompletedProcess([], 1, "", str(exc))
 
+def _adminer_installed_version() -> str:
+    proc = subprocess.run(
+        [_binary("dpkg-query"), "-W", "-f=${Version}", "adminer"],
+        text=True,
+        capture_output=True,
+        timeout=15,
+        env={**os.environ, "PATH": SAFE_PATH},
+    )
+    if proc.returncode != 0:
+        raise RuntimeError("Adminer is not installed")
+    version = proc.stdout.strip()
+    if not version:
+        raise RuntimeError("Unable to detect the installed Adminer version")
+    return version
+
+
+def _adminer_major(version: str) -> int:
+    match = re.search(r"(?:^|:)(\d+)\.", version)
+    if not match:
+        raise RuntimeError(f"Unable to parse installed Adminer version: {version}")
+    major = int(match.group(1))
+    if major not in {4, 5}:
+        raise RuntimeError(
+            f"Adminer {version} is not supported by NativeDev Adminer SQLite; "
+            "Debian 12/Adminer 4.x and Debian 13/Adminer 5.x are supported"
+        )
+    return major
+
+
+def _adminer_sqlite_wrapper(major: int) -> bytes:
+    marker = ADMINER_SQLITE_MARKER
+    version_marker = f"// NativeDev Adminer major: {major}"
+    password_hash = ADMINER_SQLITE_PASSWORD_HASH
+    if major == 4:
+        content = (
+            "<?php\n"
+            f"{marker}\n"
+            f"{version_marker}\n"
+            "function adminer_object() {\n"
+            "    include_once '/usr/share/adminer/plugins/plugin.php';\n"
+            "    include_once '/usr/share/adminer/plugins/login-password-less.php';\n"
+            "    return new AdminerPlugin(array(\n"
+            f"        new AdminerLoginPasswordLess('{password_hash}'),\n"
+            "    ));\n"
+            "}\n"
+            "include '/usr/share/adminer/adminer.php';\n"
+        )
+    elif major == 5:
+        content = (
+            "<?php\n"
+            f"{marker}\n"
+            f"{version_marker}\n"
+            "function adminer_object() {\n"
+            "    include_once '/usr/share/adminer/plugins/login-password-less.php';\n"
+            "    return new Adminer\\Plugins(array(\n"
+            f"        new AdminerLoginPasswordLess('{password_hash}'),\n"
+            "    ));\n"
+            "}\n"
+            "include '/usr/share/adminer/adminer.php';\n"
+        )
+    else:
+        raise RuntimeError("Unsupported Adminer major version")
+    return content.encode("utf-8")
+
+
+def _adminer_sqlite_is_managed() -> bool:
+    if not ADMINER_SQLITE_ENTRYPOINT.is_file() or ADMINER_SQLITE_ENTRYPOINT.is_symlink():
+        return False
+    try:
+        return ADMINER_SQLITE_MARKER in ADMINER_SQLITE_ENTRYPOINT.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeError):
+        return False
+
+
+def _execute_adminer_sqlite_install() -> subprocess.CompletedProcess:
+    try:
+        version = _adminer_installed_version()
+        major = _adminer_major(version)
+        required = [ADMINER_ENTRYPOINT, ADMINER_PLUGIN_ROOT / "login-password-less.php"]
+        if major == 4:
+            required.append(ADMINER_PLUGIN_ROOT / "plugin.php")
+        missing = [str(path) for path in required if not path.is_file() or path.is_symlink()]
+        if missing:
+            raise RuntimeError("Adminer package is missing required SQLite integration files: " + ", ".join(missing))
+
+        if ADMINER_SQLITE_ROOT.exists():
+            if not ADMINER_SQLITE_ROOT.is_dir() or ADMINER_SQLITE_ROOT.is_symlink():
+                raise RuntimeError(f"Refusing to replace unexpected path: {ADMINER_SQLITE_ROOT}")
+            unexpected = [path for path in ADMINER_SQLITE_ROOT.iterdir() if path != ADMINER_SQLITE_ENTRYPOINT]
+            if unexpected:
+                raise RuntimeError(f"Refusing to modify non-empty unmanaged directory: {ADMINER_SQLITE_ROOT}")
+            if (ADMINER_SQLITE_ENTRYPOINT.exists() or ADMINER_SQLITE_ENTRYPOINT.is_symlink()) and not _adminer_sqlite_is_managed():
+                raise RuntimeError(f"Refusing to replace unmanaged Adminer SQLite wrapper: {ADMINER_SQLITE_ENTRYPOINT}")
+        else:
+            ADMINER_SQLITE_ROOT.mkdir(parents=True, mode=0o755)
+        os.chmod(ADMINER_SQLITE_ROOT, 0o755)
+        _atomic_write_bytes(ADMINER_SQLITE_ENTRYPOINT, _adminer_sqlite_wrapper(major), 0o644)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
+    return subprocess.CompletedProcess([], 0, "", "")
+
+
+def _execute_adminer_sqlite_uninstall() -> subprocess.CompletedProcess:
+    try:
+        if ADMINER_SQLITE_ENTRYPOINT.exists() or ADMINER_SQLITE_ENTRYPOINT.is_symlink():
+            if not _adminer_sqlite_is_managed():
+                raise RuntimeError(f"Refusing to remove unmanaged Adminer SQLite wrapper: {ADMINER_SQLITE_ENTRYPOINT}")
+            ADMINER_SQLITE_ENTRYPOINT.unlink()
+        if ADMINER_SQLITE_ROOT.exists():
+            if not ADMINER_SQLITE_ROOT.is_dir() or ADMINER_SQLITE_ROOT.is_symlink():
+                raise RuntimeError(f"Refusing to remove unexpected path: {ADMINER_SQLITE_ROOT}")
+            try:
+                ADMINER_SQLITE_ROOT.rmdir()
+            except OSError as exc:
+                raise RuntimeError(f"Refusing to remove non-empty Adminer SQLite directory: {ADMINER_SQLITE_ROOT}") from exc
+    except (OSError, RuntimeError) as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
+    return subprocess.CompletedProcess([], 0, "", "")
+
+
 def _phpmyadmin_runtime_paths(uid: int) -> tuple[pwd.struct_passwd, Path]:
     _database_username_for_uid(uid)
     account = pwd.getpwuid(uid)
@@ -1515,6 +1648,14 @@ def execute_operation(request: dict, uid: int, timeout: int | None) -> subproces
         command_for_operation(request, uid)
         return _execute_database_operation(request, uid, timeout)
 
+    if action == "developer_tool.adminer_sqlite.install":
+        command_for_operation(request, uid)
+        return _execute_adminer_sqlite_install()
+
+    if action == "developer_tool.adminer_sqlite.uninstall":
+        command_for_operation(request, uid)
+        return _execute_adminer_sqlite_uninstall()
+
     if action == "developer_tool.reconcile":
         command_for_operation(request, uid)
         return _execute_phpmyadmin_reconcile(uid)
@@ -1573,6 +1714,14 @@ def execute_operation(request: dict, uid: int, timeout: int | None) -> subproces
                 if package_proc.stderr:
                     runtime_proc.stderr = package_proc.stderr + runtime_proc.stderr
                 return runtime_proc
+        if request.get("tool") == "adminer" and action == "developer_tool.uninstall":
+            sqlite_proc = _execute_adminer_sqlite_uninstall()
+            if sqlite_proc.returncode != 0 and ADMINER_SQLITE_ENTRYPOINT.exists():
+                if package_proc.stdout:
+                    sqlite_proc.stdout = package_proc.stdout + sqlite_proc.stdout
+                if package_proc.stderr:
+                    sqlite_proc.stderr = package_proc.stderr + sqlite_proc.stderr
+                return sqlite_proc
         return package_proc
 
     if action == "php.extension_install":

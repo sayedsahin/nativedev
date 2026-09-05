@@ -228,6 +228,52 @@ class NativeDevController:
                     ) from exc
                 raise RuntimeError(f"{spec.title} PHP switch failed and was rolled back: {exc}") from exc
 
+    def install_adminer_sqlite(self) -> None:
+        with self._mutation_lock:
+            if self.developer_tools is None:
+                raise RuntimeError("Developer Tool manager is not available")
+            if not shutil.which("nginx"):
+                raise RuntimeError("Install Nginx before installing Adminer SQLite")
+            state = self.developer_tools.adminer_sqlite_state()
+            if not state.adminer_installed:
+                raise RuntimeError("Install Adminer before installing Adminer SQLite")
+            if not state.php_version:
+                raise RuntimeError("Adminer does not currently have an available PHP-FPM runtime")
+            self.php.ensure_developer_pool(state.php_version)
+            self.developer_tools.install_adminer_sqlite()
+            try:
+                self.localdev.configure_nginx_sites()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Adminer SQLite was installed, but NativeDev Nginx integration failed: {exc}"
+                ) from exc
+
+    def uninstall_adminer_sqlite(self) -> None:
+        with self._mutation_lock:
+            if self.developer_tools is None:
+                raise RuntimeError("Developer Tool manager is not available")
+            self.developer_tools.uninstall_adminer_sqlite()
+            try:
+                self._reconcile_managed_nginx()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Adminer SQLite was uninstalled, but NativeDev Nginx reconciliation failed: {exc}"
+                ) from exc
+
+    def repair_adminer_sqlite(self) -> None:
+        with self._mutation_lock:
+            if self.developer_tools is None:
+                raise RuntimeError("Developer Tool manager is not available")
+            state = self.developer_tools.adminer_sqlite_state()
+            if not state.adminer_installed:
+                raise RuntimeError("Adminer is not installed")
+            if not state.php_version:
+                raise RuntimeError("Adminer does not currently have an available PHP-FPM runtime")
+            self.php.ensure_developer_pool(state.php_version)
+            self.developer_tools.reconcile_adminer_sqlite()
+            if self.localdev.nginx_managed() and shutil.which("nginx"):
+                self.localdev.configure_nginx_sites()
+
     def use_existing_database_access(self, key: str, password: str):
         with self._mutation_lock:
             if self.database_access is None:

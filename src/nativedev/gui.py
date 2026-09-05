@@ -1590,10 +1590,11 @@ class ServicesPage(Page):
                         database = exc
                 components[spec.key] = (state, database)
             developer_tools = [self.context.developer_tools.state(spec) for spec in DEVELOPER_WEB_TOOLS]
-            return components, developer_tools
+            adminer_sqlite = self.context.developer_tools.adminer_sqlite_state()
+            return components, developer_tools, adminer_sqlite
 
         def done(data):
-            components, developer_tools = data
+            components, developer_tools, adminer_sqlite = data
             self._clear()
 
             system_services = self._section_panel(
@@ -1622,6 +1623,8 @@ class ServicesPage(Page):
             nginx_installed = components["nginx"][0].installed
             for state in developer_tools:
                 developer_tools_box.append(self._developer_web_tool_card(state, nginx_installed))
+                if state.spec.key == "adminer":
+                    developer_tools_box.append(self._adminer_sqlite_card(adminer_sqlite, nginx_installed))
             mailpit_state, mailpit_database = components["mailpit"]
             developer_tools_box.append(self._service_component_card(mailpit_state, mailpit_database))
             return False
@@ -1851,7 +1854,11 @@ class ServicesPage(Page):
                 lambda _b, s=spec, btn=uninstall: confirm(
                     self.window,
                     f"Uninstall {s.title}?",
-                    "NativeDev will remove the distro package and its NativeDev Nginx integration. No database data or accounts are removed, and NativeDev does not run autoremove.",
+                    (
+                        "NativeDev will remove the Adminer distro package and its NativeDev Nginx integration. If Adminer SQLite is installed, its NativeDev wrapper is also removed. SQLite database files are preserved, and NativeDev does not run autoremove."
+                        if s.key == "adminer"
+                        else "NativeDev will remove the distro package and its NativeDev Nginx integration. No database data or accounts are removed, and NativeDev does not run autoremove."
+                    ),
                     lambda: self.action(
                         btn,
                         lambda: self.context.controller.uninstall_developer_tool(s),
@@ -1877,6 +1884,99 @@ class ServicesPage(Page):
                 )
 
             php_dropdown.connect("notify::selected", php_changed)
+
+        if actions.get_first_child():
+            box.append(actions)
+        return box
+
+    def _adminer_sqlite_card(self, state, nginx_installed: bool):
+        box = card()
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        copy.set_hexpand(True)
+        copy.append(label("Adminer SQLite", "section-title"))
+        copy.append(label("SQLite administration through Adminer", "muted"))
+        if state.installed:
+            copy.append(label(state.url, "muted"))
+            copy.append(label(f"Password: {state.password}", "muted"))
+        top.append(copy)
+        top.append(status_pill("Installed" if state.installed else "Not installed", True if state.installed else False))
+        box.append(top)
+
+        if state.installed and not state.runtime_ready:
+            box.append(label(state.runtime_note or "Adminer SQLite integration needs repair.", "error-text", wrap=True))
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        if not state.installed:
+            install = Gtk.Button(label="Install")
+            install.set_sensitive(state.installable and nginx_installed)
+            install.add_css_class("suggested-action")
+            if state.installable and nginx_installed:
+                install.connect(
+                    "clicked",
+                    lambda _b, btn=install: confirm(
+                        self.window,
+                        "Install Adminer SQLite?",
+                        "NativeDev will create a version-compatible Adminer SQLite wrapper for the installed Debian/Ubuntu Adminer package and serve it at adminer-sqlite.localhost over HTTP. The fixed local login password is nativedev. SQLite PHP extensions are not installed or enabled by this action.",
+                        lambda: self.action(
+                            btn,
+                            self.context.controller.install_adminer_sqlite,
+                            success_message="Adminer SQLite installed",
+                            after=self.refresh,
+                        ),
+                    ),
+                )
+            if not state.adminer_installed:
+                box.append(label("Requires Adminer. Install Adminer first.", "muted", wrap=True))
+            elif not nginx_installed:
+                box.append(label("Install Nginx first.", "muted", wrap=True))
+            elif not state.php_version:
+                box.append(label("Adminer does not currently have an available PHP-FPM runtime.", "muted", wrap=True))
+            actions.append(install)
+        else:
+            if not state.runtime_ready:
+                repair = Gtk.Button(label="Repair")
+                repair.add_css_class("suggested-action")
+                repair.connect(
+                    "clicked",
+                    lambda _b, btn=repair: self.action(
+                        btn,
+                        self.context.controller.repair_adminer_sqlite,
+                        success_message="Adminer SQLite integration repaired",
+                        after=self.refresh,
+                    ),
+                )
+                actions.append(repair)
+
+            open_button = Gtk.Button(label="Open")
+            open_button.set_sensitive(state.runtime_ready)
+
+            def open_sqlite(_button, uri=state.url):
+                try:
+                    Gio.AppInfo.launch_default_for_uri(uri, None)
+                except Exception as exc:
+                    self.window.set_activity(False, str(exc), error=True)
+
+            open_button.connect("clicked", open_sqlite)
+            actions.append(open_button)
+
+            uninstall = Gtk.Button(label="Uninstall")
+            uninstall.add_css_class("destructive-action")
+            uninstall.connect(
+                "clicked",
+                lambda _b, btn=uninstall: confirm(
+                    self.window,
+                    "Uninstall Adminer SQLite?",
+                    "NativeDev will remove only its Adminer SQLite wrapper and localhost Nginx integration. Adminer and SQLite database files are preserved.",
+                    lambda: self.action(
+                        btn,
+                        self.context.controller.uninstall_adminer_sqlite,
+                        success_message="Adminer SQLite uninstalled",
+                        after=self.refresh,
+                    ),
+                ),
+            )
+            actions.append(uninstall)
 
         if actions.get_first_child():
             box.append(actions)

@@ -91,6 +91,18 @@ class Doctor:
 
             detail = "; ".join(problems) if problems else f"PHP {state.php_version} — {state.url}"
             checks.append(Check(not problems, spec.title, detail))
+
+        sqlite_state = self.developer_tools.adminer_sqlite_state()
+        if sqlite_state.installed:
+            problems: list[str] = []
+            if not sqlite_state.adminer_installed:
+                problems.append("Adminer is not installed")
+            if not sqlite_state.php_version:
+                problems.append("no Adminer PHP-FPM runtime available")
+            if not sqlite_state.runtime_ready:
+                problems.append(sqlite_state.runtime_note or "NativeDev integration needs repair")
+            detail = "; ".join(problems) if problems else f"PHP {sqlite_state.php_version} — {sqlite_state.url}"
+            checks.append(Check(not problems, "Adminer SQLite", detail))
         return checks
 
     @staticmethod

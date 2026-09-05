@@ -2077,6 +2077,17 @@ class PhpExtensionManagerTests(unittest.TestCase):
         self.assertIn("padding: 1px 6px", style)
         self.assertIn("button {\n  min-height: 15px;", style)
 
+    def test_php_subpage_back_button_sits_above_page_title(self):
+        gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text(encoding="utf-8")
+        start = gui.index("def page_header")
+        end = gui.index("\ndef card()", start)
+        helper = gui[start:end]
+        self.assertIn("outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL", helper)
+        self.assertIn('back_button = Gtk.Button(label="← PHP")', helper)
+        self.assertIn("back_button.set_halign(Gtk.Align.START)", helper)
+        self.assertLess(helper.index("outer.append(back_button)"), helper.index("outer.append(row)"))
+        self.assertIn("button.set_valign(Gtk.Align.CENTER)", helper)
+
     def test_status_pills_keep_natural_height(self):
         gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text(encoding="utf-8")
         start = gui.index("def status_pill")

@@ -66,23 +66,28 @@ def page_header(
     *,
     back: Callable | None = None,
 ) -> Gtk.Widget:
-    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-    box.set_margin_bottom(18)
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+    outer.set_margin_bottom(18)
+
     if back:
         back_button = Gtk.Button(label="← PHP")
-        back_button.set_valign(Gtk.Align.CENTER)
+        back_button.set_halign(Gtk.Align.START)
         back_button.connect("clicked", lambda *_: back())
-        box.append(back_button)
+        outer.append(back_button)
+
+    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
     copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
     copy.set_hexpand(True)
     copy.append(label(title, "page-title"))
     copy.append(label(subtitle, "muted", wrap=True))
-    box.append(copy)
+    row.append(copy)
     if refresh:
         button = Gtk.Button(label="Refresh")
+        button.set_valign(Gtk.Align.CENTER)
         button.connect("clicked", lambda *_: refresh())
-        box.append(button)
-    return box
+        row.append(button)
+    outer.append(row)
+    return outer
 
 
 def card() -> Gtk.Box:

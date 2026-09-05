@@ -9,7 +9,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, GLib, Gtk
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
 from . import __version__
 from .context import AppContext
@@ -54,9 +54,23 @@ class Worker:
 def label(text: str = "", css: str | None = None, *, wrap: bool = False) -> Gtk.Label:
     widget = Gtk.Label(label=text, xalign=0)
     widget.set_wrap(wrap)
-    widget.set_selectable(False)
+    if wrap:
+        # WORD_CHAR also breaks long paths/commands with no convenient spaces,
+        # preventing diagnostic text from increasing the window's minimum width.
+        widget.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+    widget.set_selectable(css == "error-text")
+    if css == "error-text":
+        widget.set_max_width_chars(90)
     if css:
         widget.add_css_class(css)
+    return widget
+
+
+def _constrain_dialog_text(widget: Gtk.Label, max_width_chars: int = 52) -> Gtk.Label:
+    """Keep explanatory/validation text compact inside modal dialogs."""
+    widget.set_max_width_chars(max_width_chars)
+    widget.set_wrap(True)
+    widget.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
     return widget
 
 
@@ -172,6 +186,7 @@ def prompt_database_password(
     on_accept: Callable[[str], None],
 ) -> None:
     dialog = Gtk.Dialog(title=title, transient_for=parent, modal=True)
+    dialog.set_default_size(440, -1)
     dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
     dialog.add_button("Change", Gtk.ResponseType.OK)
     content = dialog.get_content_area()
@@ -181,18 +196,20 @@ def prompt_database_password(
     content.set_margin_start(12)
     content.set_margin_end(12)
 
-    note = label(
+    note = _constrain_dialog_text(label(
         "Use 1-128 characters: letters, numbers, or !@#$%^&*()_+-=.,:?/",
         "muted",
         wrap=True,
-    )
+    ))
     password_label = label("New password", "row-title")
     password = Gtk.PasswordEntry()
+    password.set_hexpand(True)
     password.set_show_peek_icon(True)
     confirm_password_label = label("Confirm password", "row-title")
     confirm_password = Gtk.PasswordEntry()
+    confirm_password.set_hexpand(True)
     confirm_password.set_show_peek_icon(True)
-    error = label("", "error-text", wrap=True)
+    error = _constrain_dialog_text(label("", "error-text", wrap=True))
     error.set_visible(False)
     content.append(note)
     content.append(password_label)
@@ -230,6 +247,7 @@ def prompt_existing_database_password(
     on_accept: Callable[[str], None],
 ) -> None:
     dialog = Gtk.Dialog(title=title, transient_for=parent, modal=True)
+    dialog.set_default_size(440, -1)
     dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
     dialog.add_button("Use user", Gtk.ResponseType.OK)
     content = dialog.get_content_area()
@@ -239,15 +257,16 @@ def prompt_existing_database_password(
     content.set_margin_start(12)
     content.set_margin_end(12)
 
-    content.append(label(
+    content.append(_constrain_dialog_text(label(
         f'Enter the current database password for "{username}". NativeDev will verify it and save the credential without changing the account password. A wrong password changes nothing.',
         "muted",
         wrap=True,
-    ))
+    )))
     password_label = label("Current database password", "row-title")
     password = Gtk.PasswordEntry()
+    password.set_hexpand(True)
     password.set_show_peek_icon(True)
-    error = label("", "error-text", wrap=True)
+    error = _constrain_dialog_text(label("", "error-text", wrap=True))
     error.set_visible(False)
     content.append(password_label)
     content.append(password)
@@ -277,6 +296,7 @@ def prompt_database_admin_password(
     on_accept: Callable[[str], None],
 ) -> None:
     dialog = Gtk.Dialog(title=title, transient_for=parent, modal=True)
+    dialog.set_default_size(440, -1)
     dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
     dialog.add_button("Continue", Gtk.ResponseType.OK)
     content = dialog.get_content_area()
@@ -286,16 +306,17 @@ def prompt_database_admin_password(
     content.set_margin_start(12)
     content.set_margin_end(12)
 
-    content.append(label(
+    content.append(_constrain_dialog_text(label(
         "NativeDev could not authenticate the local MariaDB/MySQL root account without a password. "
         "Enter the database root password for this one operation. It will not be saved.",
         "muted",
         wrap=True,
-    ))
+    )))
     content.append(label("MariaDB/MySQL root password", "row-title"))
     password = Gtk.PasswordEntry()
+    password.set_hexpand(True)
     password.set_show_peek_icon(True)
-    error = label("", "error-text", wrap=True)
+    error = _constrain_dialog_text(label("", "error-text", wrap=True))
     error.set_visible(False)
     content.append(password)
     content.append(error)
@@ -2471,7 +2492,17 @@ class MainWindow(Gtk.ApplicationWindow):
         self.statusbar.append(self.activity_spinner)
         self.status = label("Ready")
         self.status.set_hexpand(True)
+        self.status.set_wrap(True)
+        self.status.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.status.set_max_width_chars(72)
         self.statusbar.append(self.status)
+        self.status_copy = Gtk.Button(label="Copy")
+        self.status_copy.set_valign(Gtk.Align.CENTER)
+        self.status_copy.set_tooltip_text("Copy error message")
+        self.status_copy.set_visible(False)
+        self.status_copy.connect("clicked", self._copy_status_error)
+        self.statusbar.append(self.status_copy)
+        self._status_message = "Ready"
         root.append(self.statusbar)
         self.set_child(root)
 
@@ -2519,21 +2550,34 @@ class MainWindow(Gtk.ApplicationWindow):
         # the parent page, so avoid an unnecessary asynchronous refresh.
         self.stack.set_visible_child_name("php")
 
+    def _copy_status_error(self, *_args) -> None:
+        if not self._status_message:
+            return
+        display = Gdk.Display.get_default()
+        if display:
+            display.get_clipboard().set(self._status_message)
+
     def set_activity(self, active: bool, message: str, *, error: bool = False):
         self.status.remove_css_class("error-text")
         self.status.remove_css_class("muted")
+        self.status.set_selectable(False)
+        self.status_copy.set_visible(False)
         if active:
             self.activity_spinner.set_visible(True)
             self.activity_spinner.start()
+            self._status_message = ""
             self.status.set_text("")
             self.status.add_css_class("muted")
             return
 
         self.activity_spinner.stop()
         self.activity_spinner.set_visible(False)
+        self._status_message = message
         self.status.set_text(message)
         if error:
             self.status.add_css_class("error-text")
+            self.status.set_selectable(True)
+            self.status_copy.set_visible(bool(message))
 
     def _on_close(self, *_):
         self.worker.shutdown()

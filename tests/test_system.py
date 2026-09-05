@@ -227,6 +227,29 @@ class GtkSourceRegressionTests(unittest.TestCase):
         self.assertIn("secondary_text=message", gui)
         self.assertNotIn("dialog.format_secondary_text(", gui)
 
+    def test_error_status_wraps_without_expanding_window_and_can_be_copied(self):
+        gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
+        main = gui[gui.index("class MainWindow"):gui.index("class NativeDevApplication")]
+        self.assertIn("self.status.set_wrap(True)", main)
+        self.assertIn("self.status.set_wrap_mode(Pango.WrapMode.WORD_CHAR)", main)
+        self.assertIn("self.status.set_max_width_chars(72)", main)
+        self.assertIn('self.status_copy = Gtk.Button(label="Copy")', main)
+        self.assertIn('self.status_copy.set_tooltip_text("Copy error message")', main)
+        self.assertIn("display.get_clipboard().set(self._status_message)", main)
+        self.assertIn("self.status.set_selectable(True)", main)
+
+    def test_database_password_dialogs_are_compact(self):
+        gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
+        start = gui.index("def prompt_existing_database_password")
+        end = gui.index("def prompt_database_admin_password", start)
+        existing = gui[start:end]
+        self.assertIn("dialog.set_default_size(440, -1)", existing)
+        self.assertIn("_constrain_dialog_text", existing)
+        self.assertIn("password.set_hexpand(True)", existing)
+        helper = gui[gui.index("def _constrain_dialog_text"):gui.index("def page_header")]
+        self.assertIn("widget.set_max_width_chars(max_width_chars)", helper)
+        self.assertIn("Pango.WrapMode.WORD_CHAR", helper)
+
 class NodeLtsTests(unittest.TestCase):
     def test_parse_lts_keeps_latest_patch_per_codename(self):
         sample = '''

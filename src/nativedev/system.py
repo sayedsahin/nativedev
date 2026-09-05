@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 
-PRIVILEGE_PROTOCOL_VERSION = 15
+PRIVILEGE_PROTOCOL_VERSION = 17
 PHP_FPM_COMMAND_RE = re.compile(r"^php-fpm(?P<version>\d+\.\d+)$")
 PHP_BINARY_PATH_RE = re.compile(r"^/usr/bin/php(?P<version>\d+\.\d+)$")
 
@@ -48,7 +48,7 @@ class PrivilegeProtocolMismatch(RuntimeError):
     pass
 
 
-def privileged_operation_for_command(argv: Sequence[str], timeout: int = 120) -> dict:
+def privileged_operation_for_command(argv: Sequence[str], timeout: int | None = 120) -> dict:
     """Translate the legacy subprocess-shaped call into a semantic root RPC.
 
     Managers still describe familiar system commands, but the root helper never
@@ -62,7 +62,10 @@ def privileged_operation_for_command(argv: Sequence[str], timeout: int = 120) ->
     args = command[1:]
     payload: dict = {
         "protocol": PRIVILEGE_PROTOCOL_VERSION,
-        "timeout": max(1, min(int(timeout), 1800)),
+        # None means: do not apply an artificial wall-clock timeout. This is
+        # used only for operations such as package removal/data deletion where
+        # legitimate work can take an unpredictable amount of time.
+        "timeout": None if timeout is None else max(1, min(int(timeout), 1800)),
     }
 
     if cmd == "apt-get":
@@ -207,9 +210,12 @@ class PrivilegeSession:
             time.sleep(0.1)
         raise RuntimeError("Timed out waiting for system authorization")
 
-    def _request(self, payload: dict, *, timeout: int = 120) -> dict:
+    def _request(self, payload: dict, *, timeout: int | None = 120) -> dict:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.settimeout(max(5, min(timeout + 5, 1805)))
+        if timeout is None:
+            client.settimeout(None)
+        else:
+            client.settimeout(max(5, min(timeout + 5, 1805)))
         try:
             client.connect(str(self.socket_path))
             client.sendall((json.dumps(payload) + "\n").encode("utf-8"))
@@ -248,13 +254,13 @@ class PrivilegeSession:
         except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
             return False
 
-    def operation(self, payload: dict, *, display_argv: Sequence[str], timeout: int = 120) -> CommandResult:
+    def operation(self, payload: dict, *, display_argv: Sequence[str], timeout: int | None = 120) -> CommandResult:
         with self.lock:
             self.ensure()
             request = {
                 **payload,
                 "protocol": PRIVILEGE_PROTOCOL_VERSION,
-                "timeout": max(1, min(int(timeout), 1800)),
+                "timeout": None if timeout is None else max(1, min(int(timeout), 1800)),
             }
             reply = self._request(request, timeout=timeout)
             if not reply.get("ok"):
@@ -266,7 +272,7 @@ class PrivilegeSession:
                 str(reply.get("stderr", "")),
             )
 
-    def run(self, argv: Sequence[str], *, timeout: int = 120) -> CommandResult:
+    def run(self, argv: Sequence[str], *, timeout: int | None = 120) -> CommandResult:
         payload = privileged_operation_for_command(argv, timeout)
         return self.operation(payload, display_argv=argv, timeout=timeout)
 
@@ -304,7 +310,7 @@ class CommandRunner:
         timeout: int | None = 120,
     ) -> CommandResult:
         command = [str(item) for item in argv]
-        effective_timeout = timeout or 120
+        effective_timeout = timeout
         if privileged and input_text is not None:
             raise RuntimeError("Privileged argv operations do not accept stdin payloads")
         if privileged and os.geteuid() != 0:
@@ -334,7 +340,7 @@ class CommandRunner:
         action: str,
         *,
         check: bool = False,
-        timeout: int = 120,
+        timeout: int | None = 120,
         **fields,
     ) -> CommandResult:
         """Run a semantic helper operation that has no safe client-side argv form."""
@@ -477,9 +483,9 @@ class AptManager:
             timeout=1200,
         )
 
-    def remove(self, packages: Iterable[str]) -> CommandResult:
+    def remove(self, packages: Iterable[str], *, timeout: int | None = 1200) -> CommandResult:
         return self.runner.run(
-            ["apt-get", "remove", "-y", *list(packages)], privileged=True, check=True, timeout=1200
+            ["apt-get", "remove", "-y", *list(packages)], privileged=True, check=True, timeout=timeout
         )
 
 

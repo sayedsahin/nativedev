@@ -123,19 +123,36 @@ def confirm(parent: Gtk.Window, title: str, message: str, on_accept: Callable[[]
 def confirm_database_uninstall(
     parent: Gtk.Window,
     title: str,
-    component_title: str,
-    on_accept: Callable[[], None],
+    on_accept: Callable[[bool], None],
 ) -> None:
-    confirm(
-        parent,
-        title,
-        (
-            f"NativeDev will remove the installed {component_title} server/client runtime packages "
-            "and forget NativeDev's saved database credential. Database data, database users, "
-            "database passwords, and distribution common/shared packages are preserved."
-        ),
-        on_accept,
-    )
+    dialog = Gtk.Dialog(title=title, transient_for=parent, modal=True)
+    dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+    uninstall = dialog.add_button("Uninstall", Gtk.ResponseType.OK)
+    uninstall.add_css_class("destructive-action")
+
+    content = dialog.get_content_area()
+    content.set_spacing(10)
+    content.set_margin_top(12)
+    content.set_margin_bottom(12)
+    content.set_margin_start(12)
+    content.set_margin_end(12)
+    content.append(label(
+        "Packages and NativeDev configuration will be removed.\n"
+        "Existing database data and accounts will be preserved.",
+        wrap=True,
+    ))
+    delete_data = Gtk.CheckButton(label="Delete all database data and accounts")
+    delete_data.set_active(False)
+    content.append(delete_data)
+
+    def response(_dialog, response_id):
+        selected = bool(delete_data.get_active())
+        dialog.destroy()
+        if response_id == Gtk.ResponseType.OK:
+            on_accept(selected)
+
+    dialog.connect("response", response)
+    dialog.present()
 
 
 def prompt_database_password(
@@ -1607,11 +1624,15 @@ class ServicesPage(Page):
                                 lambda _b, s=spec, btn=uninstall: confirm_database_uninstall(
                                     self.window,
                                     f"Uninstall {s.title}?",
-                                    s.title,
-                                    lambda: self.action(
+                                    lambda delete_data: self.action(
                                         btn,
-                                        lambda: self.context.controller.uninstall_component(s),
-                                        success_message=f"{s.title} uninstalled",
+                                        lambda: self.context.controller.uninstall_component(
+                                            s, delete_database_data=delete_data
+                                        ),
+                                        success_message=(
+                                            f"{s.title} uninstalled; database data and accounts deleted"
+                                            if delete_data else f"{s.title} uninstalled"
+                                        ),
                                         after=self.refresh,
                                     ),
                                 ),

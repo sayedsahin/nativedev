@@ -15,7 +15,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-PROTOCOL_VERSION = 15
+PROTOCOL_VERSION = 17
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 MANAGED_FILES = {
@@ -787,6 +787,13 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
         raise RuntimeError("NativeDev privileged protocol version mismatch")
 
     action = request.get("action")
+    if action == "database.delete_all_data":
+        if set(request).difference({"protocol", "action", "timeout", "key"}):
+            raise RuntimeError("Database reset operation contains unsupported fields")
+        if request.get("key") not in {"mariadb", "postgresql"}:
+            raise RuntimeError("Database reset target is outside NativeDev's allowlist")
+        _database_username_for_uid(uid)
+        return []
     if isinstance(action, str) and action.startswith("database."):
         _database_request_details(request)
         _database_username_for_uid(uid)
@@ -801,6 +808,12 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
         if not all(allowed(item) for item in packages):
             raise RuntimeError("APT package request is outside NativeDev's component allowlist")
         verb = "install" if action == "apt.install" else "remove"
+        if action == "apt.remove":
+            # Never wait behind another package-manager process. If dpkg is
+            # busy, fail immediately and let the GUI surface the real lock
+            # owner/error. This avoids a fake spinner wait without imposing a
+            # wall-clock limit on a removal that has actually started.
+            return [_binary("apt-get"), "-o", "DPkg::Lock::Timeout=0", verb, "-y", *packages]
         return [_binary("apt-get"), verb, "-y", *packages]
 
     if action == "apt.reinstall_confmiss":
@@ -948,12 +961,66 @@ def validate_operation(request: dict, uid: int = 1000) -> tuple[bool, str]:
     return True, ""
 
 
-def execute_operation(request: dict, uid: int, timeout: int) -> subprocess.CompletedProcess:
+def _remove_fixed_tree(path: Path) -> None:
+    """Remove one fixed root-owned tree without following a symlink target."""
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.exists():
+            shutil.rmtree(path)
+    except FileNotFoundError:
+        pass
+
+
+def _execute_database_delete_all_data(request: dict) -> subprocess.CompletedProcess:
+    key = request.get("key")
+    try:
+        if key == "mariadb":
+            # MariaDB/MySQL users, grants and passwords live in the mysql system
+            # database under the datadir, so removing the complete default
+            # datadir resets accounts together with user databases.
+            _remove_fixed_tree(Path("/var/lib/mysql"))
+        elif key == "postgresql":
+            # PostgreSQL roles/passwords live inside cluster data. Remove both
+            # the default cluster data and its per-cluster configuration so a
+            # later package install can initialize a genuinely fresh cluster.
+            _remove_fixed_tree(Path("/var/lib/postgresql"))
+            _remove_fixed_tree(Path("/etc/postgresql"))
+        else:
+            raise RuntimeError("Database reset target is outside NativeDev's allowlist")
+    except OSError as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
+    return subprocess.CompletedProcess([], 0, "", "")
+
+
+def execute_operation(request: dict, uid: int, timeout: int | None) -> subprocess.CompletedProcess:
     action = request.get("action")
+
+    if action == "database.delete_all_data":
+        command_for_operation(request, uid)
+        return _execute_database_delete_all_data(request)
 
     if isinstance(action, str) and action.startswith("database."):
         command_for_operation(request, uid)
         return _execute_database_operation(request, uid, timeout)
+
+    if action in {"apt.install", "apt.remove"}:
+        argv = command_for_operation(request, uid)
+        env = dict(os.environ)
+        env["PATH"] = SAFE_PATH
+        # APT must never wait for a debconf/needrestart prompt behind the GTK
+        # spinner. Package scripts can still take as long as they genuinely
+        # need; timeout=None intentionally permits that.
+        env["DEBIAN_FRONTEND"] = "noninteractive"
+        env["APT_LISTCHANGES_FRONTEND"] = "none"
+        env["NEEDRESTART_MODE"] = "a"
+        return subprocess.run(
+            argv,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+        )
 
     if action == "php.extension_install":
         version, _extension, _package, modules = _php_extension_details(request)
@@ -1190,11 +1257,14 @@ def serve(socket_path: Path, uid: int, gid: int, parent_pid: int) -> int:
                         running = False
                         continue
 
-                    timeout = request.get("timeout", 120)
-                    try:
-                        timeout = max(1, min(int(timeout), 1800))
-                    except (TypeError, ValueError):
-                        timeout = 120
+                    timeout_value = request.get("timeout", 120)
+                    if timeout_value is None:
+                        timeout = None
+                    else:
+                        try:
+                            timeout = max(1, min(int(timeout_value), 1800))
+                        except (TypeError, ValueError):
+                            timeout = 120
                     proc = execute_operation(request, uid, timeout)
                     _send(
                         conn,

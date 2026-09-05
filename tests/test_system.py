@@ -252,7 +252,7 @@ class PrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=uid)[0]
 
     def test_allows_structured_native_operations(self):
-        protocol = 15
+        protocol = 17
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "restart", "now": False, "service": "nginx"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "disable", "now": True, "service": "php8.4-fpm"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["redis-tools"]}))
@@ -274,7 +274,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/php/8.4/fpm/pool.d/nativedev-1001.conf"]}, uid=1000))
 
     def test_rejects_raw_commands_and_outside_packages(self):
-        protocol = 15
+        protocol = 17
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "run", "argv": ["bash", "-c", "id"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["openssh-server"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["/tmp/nativedev-test/debsuryorg-archive-keyring.deb"]}))
@@ -323,7 +323,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         import subprocess
 
         request = {
-            "protocol": 15,
+            "protocol": 17,
             "action": "php.multi_repo.configure",
             "backend": "ondrej",
             "codename": "noble",
@@ -341,6 +341,55 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertEqual(kwargs["env"]["LC_ALL"], "C.UTF-8")
         self.assertEqual(kwargs["env"]["PATH"], "/usr/sbin:/usr/bin:/sbin:/bin")
 
+    def test_apt_remove_fails_immediately_when_dpkg_is_busy(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import command_for_operation
+
+        with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
+            argv = command_for_operation({
+                "protocol": 17,
+                "action": "apt.remove",
+                "packages": ["mariadb-server"],
+            }, uid=1000)
+        self.assertEqual(argv, [
+            "/usr/bin/apt-get", "-o", "DPkg::Lock::Timeout=0",
+            "remove", "-y", "mariadb-server",
+        ])
+
+    def test_apt_remove_execution_is_noninteractive_and_can_run_to_completion(self):
+        import subprocess
+        from unittest.mock import patch
+        from nativedev.privileged_helper import execute_operation
+
+        request = {
+            "protocol": 17,
+            "action": "apt.remove",
+            "packages": ["mariadb-server"],
+            "timeout": None,
+        }
+        completed = subprocess.CompletedProcess(["apt-get"], 0, "", "")
+        with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
+             patch("nativedev.privileged_helper.subprocess.run", return_value=completed) as run:
+            result = execute_operation(request, uid=1000, timeout=None)
+
+        self.assertEqual(result.returncode, 0)
+        argv = run.call_args.args[0]
+        kwargs = run.call_args.kwargs
+        self.assertEqual(argv, [
+            "/usr/bin/apt-get", "-o", "DPkg::Lock::Timeout=0",
+            "remove", "-y", "mariadb-server",
+        ])
+        self.assertIsNone(kwargs["timeout"])
+        self.assertEqual(kwargs["env"]["DEBIAN_FRONTEND"], "noninteractive")
+        self.assertEqual(kwargs["env"]["APT_LISTCHANGES_FRONTEND"], "none")
+        self.assertEqual(kwargs["env"]["NEEDRESTART_MODE"], "a")
+
+    def test_client_and_helper_protocol_versions_match(self):
+        from nativedev.system import PRIVILEGE_PROTOCOL_VERSION
+        from nativedev.privileged_helper import PROTOCOL_VERSION
+        self.assertEqual(PRIVILEGE_PROTOCOL_VERSION, 17)
+        self.assertEqual(PROTOCOL_VERSION, PRIVILEGE_PROTOCOL_VERSION)
+
     def test_client_translates_to_semantic_rpc_without_argv(self):
         from nativedev.system import privileged_operation_for_command
         request = privileged_operation_for_command(["systemctl", "enable", "--now", "nginx"])
@@ -354,7 +403,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {
-            "protocol": 15,
+            "protocol": 17,
             "action": "php.install_packages",
             "packages": ["php8.4-cli", "php8.4-gd", "php8.4-opcache"],
         }
@@ -375,7 +424,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         from nativedev.system import CommandResult
 
-        request = {"protocol": 15, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
+        request = {"protocol": 17, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("nativedev.privileged_helper.subprocess.run") as run, \
              patch("nativedev.privileged_helper._run_extension_module_pair") as modules:
@@ -414,6 +463,7 @@ class ServiceCleanupTests(unittest.TestCase):
         class Apt:
             def __init__(self):
                 self.removed = []
+                self.remove_kwargs = []
             def candidate(self, package):
                 return "1"
             def is_installed(self, package):
@@ -421,8 +471,9 @@ class ServiceCleanupTests(unittest.TestCase):
                     line.startswith("ii ") and line.split("\t", 1)[-1].strip().split(":", 1)[0] == package
                     for line in dpkg_output.splitlines()
                 )
-            def remove(self, packages):
+            def remove(self, packages, **kwargs):
                 self.removed.append(list(packages))
+                self.remove_kwargs.append(dict(kwargs))
             def install(self, packages):
                 pass
 
@@ -476,7 +527,18 @@ class ServiceCleanupTests(unittest.TestCase):
             apt.removed[1],
             ["postgresql", "postgresql-17", "postgresql-client", "postgresql-client-17"],
         )
+        self.assertEqual(apt.remove_kwargs, [{"timeout": None}, {"timeout": None}])
         self.assertEqual(runner.operations, [])
+
+    def test_database_data_reset_is_separate_semantic_operation(self):
+        from nativedev.services import COMPONENTS
+
+        manager, _apt, runner = self._manager("ii \tmariadb-server\nii \tmariadb-client\n")
+        mariadb = next(item for item in COMPONENTS if item.key == "mariadb")
+        manager.delete_database_data(mariadb)
+        self.assertEqual(runner.operations[0][0], "database.delete_all_data")
+        self.assertEqual(runner.operations[0][1]["key"], "mariadb")
+        self.assertIsNone(runner.operations[0][1]["timeout"])
 
     def test_mariadb_mysql_is_one_debian_mariadb_component_in_requested_order(self):
         from nativedev.services import COMPONENTS
@@ -510,13 +572,16 @@ class ServiceCleanupTests(unittest.TestCase):
         manager.uninstall(spec)
         self.assertEqual(apt.removed[-1], ["redis-server", "redis-tools"])
 
-    def test_helper_rejects_removed_destructive_database_cleanup_operations(self):
+    def test_helper_allows_only_fixed_database_data_reset_targets(self):
         from unittest.mock import patch
         from nativedev.privileged_helper import validate_operation
 
-        with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
-            self.assertFalse(validate_operation({"protocol": 15, "action": "database.cleanup_component", "key": "mariadb", "delete_data": False})[0])
-            self.assertFalse(validate_operation({"protocol": 15, "action": "database.repair_data_ownership", "key": "postgresql"})[0])
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"):
+            self.assertTrue(validate_operation({"protocol": 17, "action": "database.delete_all_data", "key": "mariadb"})[0])
+            self.assertTrue(validate_operation({"protocol": 17, "action": "database.delete_all_data", "key": "postgresql"})[0])
+            self.assertFalse(validate_operation({"protocol": 17, "action": "database.delete_all_data", "key": "redis"})[0])
+            self.assertFalse(validate_operation({"protocol": 17, "action": "database.delete_all_data", "key": "mariadb", "path": "/tmp/evil"})[0])
+            self.assertFalse(validate_operation({"protocol": 17, "action": "database.cleanup_component", "key": "mariadb"})[0])
 
 
 class ManagerPackageExportTests(unittest.TestCase):
@@ -837,7 +902,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=1000)[0]
 
     def test_database_rpc_derives_username_from_peer_and_rejects_client_user_or_sql_selectors(self):
-        protocol = 15
+        protocol = 17
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.account_status"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "nativedev", "admin_password": "root secret !@#"}))
@@ -854,7 +919,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 15, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 17, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
         calls = []
 
         def run_admin(sql, admin_password, timeout, env):
@@ -879,7 +944,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 15, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 17, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
              patch("nativedev.privileged_helper._run_mysql_admin") as run_admin:
             run_admin.return_value = subprocess.CompletedProcess(["mariadb"], 1, "", "ERROR 1045")
@@ -894,7 +959,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         import subprocess
 
         request = {
-            "protocol": 15,
+            "protocol": 17,
             "action": "database.mysql.ensure_dev_account",
             "password": "nativedev",
             "admin_password": "Root secret !@#",
@@ -943,7 +1008,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 15, "action": "database.postgresql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 17, "action": "database.postgresql.ensure_dev_account", "password": "nativedev"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
              patch("nativedev.privileged_helper._postgres_admin_argv", return_value=["/usr/bin/runuser", "psql"]), \
              patch("nativedev.privileged_helper.subprocess.run") as run:
@@ -956,6 +1021,33 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         self.assertIn("NOCREATEROLE", sql)
         self.assertIn("NOREPLICATION", sql)
         self.assertIn("NOBYPASSRLS", sql)
+
+
+class DatabaseDataResetHelperTests(unittest.TestCase):
+    def test_mariadb_reset_removes_only_fixed_default_datadir(self):
+        from unittest.mock import patch, call
+        from nativedev.privileged_helper import execute_operation
+
+        request = {"protocol": 17, "action": "database.delete_all_data", "key": "mariadb"}
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+             patch("nativedev.privileged_helper._remove_fixed_tree") as remove:
+            result = execute_operation(request, uid=1000, timeout=90)
+        self.assertEqual(result.returncode, 0)
+        remove.assert_called_once_with(Path("/var/lib/mysql"))
+
+    def test_postgresql_reset_removes_cluster_data_and_cluster_config(self):
+        from unittest.mock import patch, call
+        from nativedev.privileged_helper import execute_operation
+
+        request = {"protocol": 17, "action": "database.delete_all_data", "key": "postgresql"}
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+             patch("nativedev.privileged_helper._remove_fixed_tree") as remove:
+            result = execute_operation(request, uid=1000, timeout=90)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(remove.call_args_list, [
+            call(Path("/var/lib/postgresql")),
+            call(Path("/etc/postgresql")),
+        ])
 
 
 class DatabaseAccessUiTests(unittest.TestCase):
@@ -977,10 +1069,10 @@ class DatabaseAccessUiTests(unittest.TestCase):
         self.assertIn('label("Current database password", "row-title")', gui)
         self.assertIn('label("MariaDB/MySQL root password", "row-title")', gui)
         self.assertIn("DatabaseAdminPasswordRequired", gui)
-        self.assertNotIn('Gtk.CheckButton(label="Also delete database data")', gui)
-        self.assertNotIn("delete_database_data", services)
-        self.assertIn("database users", gui)
-        self.assertIn("database passwords", gui)
+        self.assertIn('Gtk.CheckButton(label="Delete all database data and accounts")', gui)
+        self.assertIn("delete_database_data=delete_data", services)
+        self.assertIn("Packages and NativeDev configuration will be removed.", gui)
+        self.assertIn("Existing database data and accounts will be preserved.", gui)
         self.assertIn('label(f"Version {state.version}", "muted")', services)
         self.assertNotIn('password.set_placeholder_text', gui)
 
@@ -1183,6 +1275,30 @@ class ControllerTests(unittest.TestCase):
         controller = NativeDevController(object(), object(), services=Services(), database_access=Db())
         controller.install_component(ComponentSpec("postgresql", "PostgreSQL", ("postgresql",)))
         self.assertEqual(events, [("install", "postgresql"), ("access", "postgresql")])
+
+    def test_database_uninstall_deletes_data_only_when_checkbox_requested(self):
+        from nativedev.controller import NativeDevController
+        from nativedev.services import ComponentSpec
+
+        events = []
+        class Services:
+            def uninstall(self, spec): events.append(("uninstall", spec.key))
+            def delete_database_data(self, spec): events.append(("delete_data", spec.key))
+        class Db:
+            def forget(self, key): events.append(("forget", key))
+
+        spec = ComponentSpec("mariadb", "MariaDB / MySQL", ("mariadb-server",))
+        controller = NativeDevController(object(), object(), services=Services(), database_access=Db())
+        controller.uninstall_component(spec)
+        self.assertEqual(events, [("uninstall", "mariadb"), ("forget", "mariadb")])
+
+        events.clear()
+        controller.uninstall_component(spec, delete_database_data=True)
+        self.assertEqual(events, [
+            ("uninstall", "mariadb"),
+            ("delete_data", "mariadb"),
+            ("forget", "mariadb"),
+        ])
 
     def test_mutations_are_globally_serialized(self):
         import threading

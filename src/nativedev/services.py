@@ -166,7 +166,32 @@ class ServiceManager:
                 self.systemd.disable_now(spec.service)
             except RuntimeError:
                 pass
-        self.apt.remove(installed)
+        # Database removal is deliberately the ordinary APT remove path. Do not
+        # impose an arbitrary wall-clock timeout: maintainer scripts may
+        # legitimately take time. The privileged helper makes APT non-interactive
+        # and fails immediately when dpkg is already busy, so the GUI never sits
+        # waiting on a lock or hidden prompt.
+        if spec.key in {"mariadb", "postgresql"}:
+            self.apt.remove(installed, timeout=None)
+        else:
+            self.apt.remove(installed)
+
+    def delete_database_data(self, spec: ComponentSpec) -> None:
+        """Delete the complete local database state for an explicit reset uninstall.
+
+        This is intentionally separate from normal package removal. The root
+        helper owns the fixed distro paths; no filesystem path crosses the
+        privilege boundary. Removing the data/cluster state also removes all
+        database users, roles and passwords stored inside it.
+        """
+        if spec.key not in {"mariadb", "postgresql"}:
+            raise RuntimeError(f"{spec.title} is not a database component")
+        self.runner.privileged_operation(
+            "database.delete_all_data",
+            key=spec.key,
+            check=True,
+            timeout=None,
+        )
 
     def _component_version(self, spec: ComponentSpec, binary_path: str | None) -> str | None:
         if spec.key != "mariadb" or not binary_path:

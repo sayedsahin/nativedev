@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.9 - Database uninstall execution correction
+- Removed the arbitrary 10-second dpkg-lock wait and 180-second database-uninstall wall-clock limit. A real MariaDB/PostgreSQL package removal or large opted-in data deletion is allowed to take as long as the system legitimately needs.
+- Database APT removal is explicitly non-interactive (`DEBIAN_FRONTEND=noninteractive`, no apt-listchanges/needrestart prompt) and uses `DPkg::Lock::Timeout=0`: if another apt/dpkg process already owns the lock, NativeDev fails that mutation immediately instead of sitting behind the lock with a spinner. Once APT actually starts the requested removal, NativeDev does not impose an artificial timeout.
+- The optional **Delete all database data and accounts** operation likewise has no arbitrary wall-clock timeout; it remains a fixed-path semantic root operation and runs only after package removal succeeds.
+- Privileged RPC advanced to protocol 17 so the client/helper can represent an intentional no-wall-clock-timeout operation; re-run `./install.sh` after applying this patch.
+
+## 0.1.9 - Database uninstall reset option
+- Added an explicit, default-unchecked **Delete all database data and accounts** checkbox to MariaDB/MySQL and PostgreSQL uninstall confirmation. Normal uninstall still preserves database data/accounts; opting in removes the complete default database state so root/developer passwords do not survive reinstall.
+- Destructive database reset is a fixed semantic privileged operation: MariaDB removes only `/var/lib/mysql`; PostgreSQL removes `/var/lib/postgresql` plus `/etc/postgresql` cluster metadata so a future package install can initialize a fresh cluster. No client-supplied filesystem path is accepted.
+- Database APT removal now uses a 10-second dpkg lock wait and a bounded 180-second database-uninstall timeout, so a competing apt/dpkg process or stuck removal returns an error instead of leaving the Services spinner running indefinitely.
+- Privileged RPC advanced to protocol 16 for the database data-reset operation; re-run `./install.sh` after applying this patch.
+
 ## 0.1.9 - Debian/Ubuntu Multi-PHP provider refinement
 - Multi-PHP repository setup is now distro-aware. Debian uses `packages.sury.org/php`; Ubuntu uses the Ondřej PHP PPA, and Ubuntu derivatives resolve their parent suite from `UBUNTU_CODENAME` instead of using the derivative codename.
 - The privileged helper independently re-detects the host family and suite before accepting a Multi-PHP repository request. Ubuntu-family setup uses the fixed Ondřej Launchpad PPA URI with the resolved Ubuntu suite, so derivatives such as Linux Mint do not accidentally request a non-Ubuntu PPA series.

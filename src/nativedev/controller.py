@@ -141,14 +141,25 @@ class NativeDevController:
                         f"{spec.title} was installed, but NativeDev local database access could not be configured: {exc}"
                     ) from exc
 
-    def uninstall_component(self, spec: ComponentSpec) -> None:
-        """Uninstall runtime packages and forget NativeDev's saved DB credential."""
+    def uninstall_component(self, spec: ComponentSpec, *, delete_database_data: bool = False) -> None:
+        """Uninstall runtime packages and optionally reset all local DB state.
+
+        Normal uninstall preserves database data/accounts. The destructive path
+        is explicit from the confirmation checkbox and runs only after APT
+        package removal succeeds. NativeDev's saved credential is forgotten for
+        every successful database package removal.
+        """
         with self._mutation_lock:
             if self.services is None:
                 raise RuntimeError("Service manager is not available")
             self.services.uninstall(spec)
-            if spec.key in {"mariadb", "postgresql"} and self.database_access is not None:
-                self.database_access.forget(spec.key)
+            if spec.key in {"mariadb", "postgresql"}:
+                try:
+                    if delete_database_data:
+                        self.services.delete_database_data(spec)
+                finally:
+                    if self.database_access is not None:
+                        self.database_access.forget(spec.key)
 
     def use_existing_database_access(self, key: str, password: str):
         with self._mutation_lock:

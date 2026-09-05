@@ -8,6 +8,7 @@ from typing import Callable, TypeVar
 from .managers.localdev import LocalDevManager
 from .managers.php import PhpManager
 from .managers.php_ini import PhpIniManager
+from .managers.application import ApplicationManager
 from .managers.database_access import DatabaseAccessManager
 from .managers.developer_tools import DeveloperToolManager, DeveloperToolSpec
 from .services import ComponentSpec, ServiceManager
@@ -38,6 +39,7 @@ class NativeDevController:
         services: ServiceManager | None = None,
         database_access: DatabaseAccessManager | None = None,
         developer_tools: DeveloperToolManager | None = None,
+        application: ApplicationManager | None = None,
     ):
         self.php = php
         self.localdev = localdev
@@ -46,11 +48,19 @@ class NativeDevController:
         self.services = services
         self.database_access = database_access
         self.developer_tools = developer_tools
+        self.application = application
         self._mutation_lock = threading.RLock()
 
     def run_mutation(self, fn: Callable[..., T], *args, **kwargs) -> T:
         with self._mutation_lock:
             return fn(*args, **kwargs)
+
+    def update_application(self) -> None:
+        """Upgrade the NativeDev package through the active Linux backend."""
+        with self._mutation_lock:
+            if self.application is None:
+                raise RuntimeError("Application update manager is not available")
+            self.application.update()
 
     def _reconcile_managed_nginx(self) -> None:
         """Refresh NativeDev-owned Nginx state without creating it implicitly."""

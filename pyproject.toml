@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nativedev"
 version = "0.1.9"
-description = "Graphical control plane for a native PHP development stack on Debian-based Linux"
+description = "Graphical control plane for a native PHP development stack on Linux"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "NativeDev contributors"}]
-keywords = ["linux", "gtk4", "php", "nginx", "nvm", "debian"]
+keywords = ["linux", "gtk4", "php", "nginx", "nvm", "development"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: X11 Applications :: GTK",

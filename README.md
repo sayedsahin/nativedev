@@ -1,6 +1,6 @@
 # NativeDev
 
-**NativeDev provides a graphical control plane for a native PHP development stack on Debian/Ubuntu-family Linux.**
+**NativeDev provides a graphical control plane for a native PHP development stack on Linux.**
 
 It is a minimal **Python + PyGObject + GTK4** desktop manager that orchestrates native host services instead of replacing them with a private container/runtime stack.
 
@@ -10,7 +10,7 @@ NativeDev deliberately manages the services already provided by your Linux syste
 
 ## Current target
 
-The distro detector accepts Debian/Ubuntu families through `/etc/os-release`. Ubuntu derivatives are resolved through `UBUNTU_CODENAME` when available, so their parent Ubuntu suite is used for repository decisions. The practical GTK4/Python baseline is:
+NativeDev is designed as a Linux application with distro-specific backends. The currently implemented package/service backend supports Debian/Ubuntu families through `/etc/os-release`; Ubuntu derivatives are resolved through `UBUNTU_CODENAME` when available so their parent Ubuntu suite is used for repository decisions. Additional Linux distro backends can be added without changing the GUI/update model. The current practical GTK4/Python baseline is:
 
 - Debian 12 (Bookworm) and Debian 13 (Trixie)
 - Ubuntu 22.04 (Jammy) and 24.04 (Noble), plus derivatives based on those suites such as Linux Mint, Pop!_OS and Zorin when their base repositories provide the required GTK4 packages
@@ -97,10 +97,10 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 
 ### Safety / ownership
 - GUI runs as the normal user
-- A normal `./install.sh` installation places the privileged helper at `/usr/lib/nativedev/privileged_helper.py` as a root-owned, non-user-writable file
+- Packaged installation places the privileged helper at `/usr/lib/nativedev/privileged_helper.py` as a root-owned, non-user-writable file
 - The first privileged action launches that restricted helper through a dedicated installed Polkit action; authorization is reused for the rest of the app session. `./run.sh` explicitly opts into the source-tree helper for development only.
 - The privileged helper accepts **structured NativeDev operations**, not client-supplied command argv. Package/service/file targets are validated again on the root side; it is not an arbitrary root shell.
-- GUI and helper use privileged RPC protocol **15** in this release; `install.sh` installs the matching root-owned helper so stale protocol versions fail closed instead of executing an incompatible privileged request.
+- GUI and helper use privileged RPC protocol **23** in this tree. The native package updates the GUI and root-owned helper together, so stale protocol versions fail closed instead of executing an incompatible privileged request.
 - `subprocess` calls use argv lists; no generic `shell=True`
 - NVM is the only shell-sourced integration, with shell-quoted arguments
 - NativeDev writes distinct, named configuration files instead of editing unrelated user configs
@@ -138,23 +138,51 @@ Then:
 ./run.sh
 ```
 
-## Local desktop install
+## Native package install
+
+NativeDev is distributed as a native Linux package. The current release builder produces one architecture-independent Debian package because the NativeDev application itself is Python/GTK:
 
 ```bash
-./install.sh
+./packaging/build-deb.sh --output-dir dist
 ```
 
-This installs the GTK/Python runtime packages through APT, installs the restricted privileged helper as a root-owned file under `/usr/lib/nativedev`, then copies the GUI/application source into your user directories:
+Install the resulting package with your normal Debian/Ubuntu package manager:
 
-- `~/.local/share/nativedev`
-- `~/.local/bin/nativedev`
-- `~/.local/share/applications/io.github.nativedev.Manager.desktop`
+```bash
+sudo apt install ./dist/nativedev_0.1.9_all.deb
+```
+
+For source-tree convenience, `./install.sh` builds that same `.deb` and installs it. It no longer copies application source into `~/.local`. The package owns `/usr/bin/nativedev`, `/usr/lib/nativedev/app`, the root-owned privileged helper, desktop file and Polkit policy.
 
 Run:
 
 ```bash
 nativedev
 ```
+
+Production release builds can embed a signed NativeDev APT repository by supplying `NATIVEDEV_APT_REPO_URL` and `NATIVEDEV_APT_REPO_KEYRING` to `packaging/build-deb.sh`. The generated DEB refuses to configure an unsigned repository.
+
+## Application updates
+
+NativeDev has one release channel. When installed as a native package, the application checks the native package metadata in the background at most once every 24 hours. The background probe is read-only and never opens a Polkit prompt. When a newer package candidate is visible, NativeDev shows an update dialog.
+
+Choosing **Update** performs a fixed semantic privileged operation: NativeDev refreshes APT metadata and upgrades only the `nativedev` package. Package names, repositories, URLs and arbitrary commands are never supplied by the GUI. After the package is replaced, NativeDev offers **Restart NativeDev** so the new application code and privileged helper are loaded together.
+
+Debian/Ubuntu is the first package backend; the update manager is intentionally backend-oriented so DNF/RPM or Pacman support can be added later without changing the 24-hour UI policy.
+
+## Uninstall
+
+```bash
+sudo apt remove nativedev
+```
+
+or from a source checkout:
+
+```bash
+./uninstall.sh
+```
+
+Application/package files are removed. User projects, database data/accounts and NativeDev-managed service configuration are preserved by default.
 
 ## Development
 

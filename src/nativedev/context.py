@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from .config import AppConfig
 from .controller import NativeDevController
-from .managers import DatabaseAccessManager, DeveloperToolManager, Doctor, LocalDevManager, NodeManager, PhpExtensionManager, PhpIniManager, PhpManager
+from .managers import ApplicationManager, DatabaseAccessManager, DeveloperToolManager, Doctor, LocalDevManager, NodeManager, PhpExtensionManager, PhpIniManager, PhpManager
 from .services import ServiceManager
 from .system import AptManager, CommandRunner, DistroInfo, SystemdManager, read_os_release
 
@@ -21,6 +21,7 @@ class AppContext:
     php_ini: PhpIniManager
     node: NodeManager
     database_access: DatabaseAccessManager
+    application: ApplicationManager
     developer_tools: DeveloperToolManager
     services: ServiceManager
     localdev: LocalDevManager
@@ -39,9 +40,10 @@ class AppContext:
         php_ini = PhpIniManager(runner, systemd, php)
         node = NodeManager(runner, apt)
         database_access = DatabaseAccessManager(runner)
+        application = ApplicationManager(runner, distro)
         developer_tools = DeveloperToolManager(runner, apt, php, config)
         services = ServiceManager(runner, apt, systemd)
         localdev = LocalDevManager(runner, apt, systemd, config, php)
         doctor = Doctor(distro, apt, systemd, php, node, developer_tools, services, localdev)
-        controller = NativeDevController(php, localdev, node, php_ini, services, database_access, developer_tools)
-        return cls(distro, config, runner, apt, systemd, php, php_extensions, php_ini, node, database_access, developer_tools, services, localdev, doctor, controller)
+        controller = NativeDevController(php, localdev, node, php_ini, services, database_access, developer_tools, application)
+        return cls(distro, config, runner, apt, systemd, php, php_extensions, php_ini, node, database_access, application, developer_tools, services, localdev, doctor, controller)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import html
+import shutil
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
@@ -15,6 +17,7 @@ from . import __version__
 from .context import AppContext
 from .services import COMPONENTS, ComponentSpec
 from .managers.database_access import DatabaseAdminPasswordRequired, DatabaseAccessManager, DEFAULT_DATABASE_PASSWORD
+from .managers.application import ApplicationUpdate
 from .managers.developer_tools import DEVELOPER_WEB_TOOLS
 
 
@@ -2555,6 +2558,9 @@ class MainWindow(Gtk.ApplicationWindow):
         super().__init__(application=application)
         self.context = context
         self.worker = Worker()
+        self._update_check_in_flight = False
+        self._update_dialog_visible = False
+        self._update_timer_id = GLib.timeout_add_seconds(60 * 60, self._update_timer_tick)
         self.set_title(f"NativeDev {__version__}")
         self.set_default_size(1040, 700)
         self.set_size_request(760, 520)
@@ -2650,6 +2656,133 @@ class MainWindow(Gtk.ApplicationWindow):
         # the parent page, so avoid an unnecessary asynchronous refresh.
         self.stack.set_visible_child_name("php")
 
+    def _update_timer_tick(self) -> bool:
+        # The lightweight hourly timer only checks the local timestamp. The
+        # package metadata probe itself still runs at most once per 24 hours.
+        self.check_for_updates()
+        return GLib.SOURCE_CONTINUE
+
+    def check_for_updates(self) -> None:
+        """Run the 24-hour package update probe without blocking GTK."""
+        if self._update_check_in_flight or not self.context.application.check_due():
+            return
+        self._update_check_in_flight = True
+
+        def done(update: ApplicationUpdate | None):
+            self._update_check_in_flight = False
+            if update is not None:
+                self._show_update_dialog(update)
+            return False
+
+        def failed(_exc):
+            self._update_check_in_flight = False
+            return False
+
+        # Background update checks are intentionally silent on package metadata
+        # failures. They must never turn app startup into an error or
+        # authorization prompt. The manager records the attempt so the 24-hour
+        # policy is still respected.
+        self.worker.submit(
+            self.context.application.check_for_update,
+            done,
+            failed,
+        )
+
+    def _show_update_dialog(self, update: ApplicationUpdate) -> None:
+        if self._update_dialog_visible:
+            return
+        self._update_dialog_visible = True
+        dialog = Gtk.Dialog(title="NativeDev update available", transient_for=self, modal=True)
+        dialog.set_default_size(440, -1)
+        dialog.add_button("Later", Gtk.ResponseType.CANCEL)
+        update_button = dialog.add_button("Update", Gtk.ResponseType.OK)
+        update_button.add_css_class("suggested-action")
+
+        content = dialog.get_content_area()
+        content.set_spacing(10)
+        content.set_margin_top(14)
+        content.set_margin_bottom(14)
+        content.set_margin_start(16)
+        content.set_margin_end(16)
+        content.append(_constrain_dialog_text(label(
+            f"NativeDev {update.candidate_version} is available. "
+            f"You are using {update.installed_version}.",
+            wrap=True,
+        )))
+        content.append(_constrain_dialog_text(label(
+            "Update uses your Linux package manager and may ask for system authorization.",
+            "muted",
+            wrap=True,
+        )))
+
+        def response(_dialog, response_id):
+            self._update_dialog_visible = False
+            dialog.destroy()
+            if response_id == Gtk.ResponseType.OK:
+                self._install_application_update(update)
+
+        dialog.connect("response", response)
+        dialog.present()
+
+    def _install_application_update(self, update: ApplicationUpdate) -> None:
+        self.set_activity(True, "Working…")
+
+        def success(_value=None):
+            self.set_activity(False, f"NativeDev {update.candidate_version} installed. Restart to use the new version.")
+            self._show_restart_dialog(update.candidate_version)
+            return False
+
+        def error(exc):
+            self.set_activity(False, str(exc), error=True)
+            return False
+
+        self.worker.submit_mutation(
+            self.context.controller.update_application, success, error
+        )
+
+    def _show_restart_dialog(self, installed_version: str) -> None:
+        dialog = Gtk.Dialog(title="Update installed", transient_for=self, modal=True)
+        dialog.set_default_size(420, -1)
+        dialog.add_button("Later", Gtk.ResponseType.CANCEL)
+        restart = dialog.add_button("Restart NativeDev", Gtk.ResponseType.OK)
+        restart.add_css_class("suggested-action")
+        content = dialog.get_content_area()
+        content.set_spacing(10)
+        content.set_margin_top(14)
+        content.set_margin_bottom(14)
+        content.set_margin_start(16)
+        content.set_margin_end(16)
+        content.append(_constrain_dialog_text(label(
+            f"NativeDev {installed_version} has been installed. Restart NativeDev to load the updated application and privileged helper.",
+            wrap=True,
+        )))
+
+        def response(_dialog, response_id):
+            dialog.destroy()
+            if response_id != Gtk.ResponseType.OK:
+                return
+            launcher = shutil.which("nativedev")
+            if not launcher:
+                self.set_activity(False, "Update installed. Restart NativeDev manually.")
+                return
+            try:
+                subprocess.Popen(
+                    [launcher],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                self.set_activity(False, f"Update installed, but restart failed: {exc}", error=True)
+                return
+            application = self.get_application()
+            if application:
+                application.quit()
+
+        dialog.connect("response", response)
+        dialog.present()
+
     def _copy_status_error(self, *_args) -> None:
         if not self._status_message:
             return
@@ -2680,6 +2813,9 @@ class MainWindow(Gtk.ApplicationWindow):
             self.status_copy.set_visible(bool(message))
 
     def _on_close(self, *_):
+        if self._update_timer_id:
+            GLib.source_remove(self._update_timer_id)
+            self._update_timer_id = 0
         self.worker.shutdown()
         self.context.runner.close()
         return False
@@ -2699,6 +2835,7 @@ class NativeDevApplication(Gtk.Application):
         if not self.window:
             self.window = MainWindow(self, self.context)
         self.window.present()
+        self.window.check_for_updates()
 
     @staticmethod
     def _load_css():

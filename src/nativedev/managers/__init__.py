@@ -1,3 +1,4 @@
+from .application import ApplicationManager
 from .database_access import DatabaseAccessManager
 from .developer_tools import DeveloperToolManager
 from .doctor import Doctor
@@ -7,4 +8,4 @@ from .php import PhpManager
 from .php_ini import PhpIniManager
 from .php_extensions import PhpExtensionManager
 
-__all__ = ["DatabaseAccessManager", "DeveloperToolManager", "Doctor", "LocalDevManager", "NodeManager", "PhpManager", "PhpExtensionManager", "PhpIniManager"]
+__all__ = ["ApplicationManager", "DatabaseAccessManager", "DeveloperToolManager", "Doctor", "LocalDevManager", "NodeManager", "PhpManager", "PhpExtensionManager", "PhpIniManager"]

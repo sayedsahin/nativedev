@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 
-PRIVILEGE_PROTOCOL_VERSION = 22
+PRIVILEGE_PROTOCOL_VERSION = 23
 PHP_FPM_COMMAND_RE = re.compile(r"^php-fpm(?P<version>\d+\.\d+)$")
 PHP_BINARY_PATH_RE = re.compile(r"^/usr/bin/php(?P<version>\d+\.\d+)$")
 
@@ -165,7 +165,7 @@ class PrivilegeSession:
         if os.environ.get("NATIVEDEV_ALLOW_SOURCE_HELPER") == "1":
             return Path(__file__).with_name("privileged_helper.py").resolve()
         raise RuntimeError(
-            "NativeDev's root-owned privileged helper is not installed. Run install.sh first. "
+            "NativeDev's root-owned privileged helper is not installed. Install or reinstall the NativeDev package. "
             "Source-tree helper execution is available only through explicit development mode."
         )
 
@@ -242,11 +242,11 @@ class PrivilegeSession:
             )
             if reply.get("ok") and reply.get("protocol") != PRIVILEGE_PROTOCOL_VERSION:
                 raise PrivilegeProtocolMismatch(
-                    "NativeDev privileged helper version mismatch. Re-run install.sh to update the root-owned helper."
+                    "NativeDev privileged helper version mismatch. Reinstall or update the NativeDev package so the GUI and root-owned helper match."
                 )
             if not reply.get("ok") and "protocol" in str(reply.get("error", "")).lower():
                 raise PrivilegeProtocolMismatch(
-                    "NativeDev privileged helper version mismatch. Re-run install.sh to update the root-owned helper."
+                    "NativeDev privileged helper version mismatch. Reinstall or update the NativeDev package so the GUI and root-owned helper match."
                 )
             return bool(reply.get("ok"))
         except PrivilegeProtocolMismatch:

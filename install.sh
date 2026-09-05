@@ -1,44 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_ID="nativedev"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="$HOME/.local/share/$APP_ID"
-BIN_DIR="$HOME/.local/bin"
-DESKTOP_DIR="$HOME/.local/share/applications"
 
-if ! command -v apt-get >/dev/null 2>&1; then
-  echo "NativeDev installer currently supports Debian-family systems with apt-get." >&2
+if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg-deb >/dev/null 2>&1; then
+  echo "NativeDev's packaged installer currently supports Debian/Ubuntu-family Linux." >&2
+  echo "The application update architecture is Linux-backend based; additional distro packages will be added later." >&2
   exit 1
 fi
 
-sudo apt-get update
-sudo apt-get install -y python3 python3-gi gir1.2-gtk-4.0 pkexec
-sudo install -d -m 0755 /usr/lib/nativedev
-sudo install -m 0755 "$ROOT/src/nativedev/privileged_helper.py" /usr/lib/nativedev/privileged_helper.py
-sudo install -d -m 0755 /usr/share/polkit-1/actions
-sudo install -m 0644 "$ROOT/data/io.github.nativedev.policy" /usr/share/polkit-1/actions/io.github.nativedev.policy
+run_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  elif command -v pkexec >/dev/null 2>&1; then
+    pkexec "$@"
+  else
+    echo "sudo or pkexec is required to install NativeDev" >&2
+    exit 1
+  fi
+}
 
-mkdir -p "$TARGET" "$BIN_DIR" "$DESKTOP_DIR"
-rm -rf "$TARGET/src"
-cp -a "$ROOT/src" "$TARGET/src"
-# Never install cached Python bytecode from a source archive.  This guarantees
-# the interpreter compiles exactly the source shipped by the current release.
-find "$TARGET/src" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
-find "$TARGET/src" -type f -name '*.pyc' -delete 2>/dev/null || true
-cp "$ROOT/data/io.github.nativedev.Manager.desktop" "$DESKTOP_DIR/io.github.nativedev.Manager.desktop"
+DEB="$("$ROOT/packaging/build-deb.sh" --output-dir "$ROOT/dist")"
+run_root apt-get update
+run_root apt-get install -y "$DEB"
 
-cat > "$BIN_DIR/nativedev" <<EOF
-#!/usr/bin/env bash
-export PYTHONPATH="$TARGET/src\${PYTHONPATH:+:\$PYTHONPATH}"
-exec python3 -m nativedev "\$@"
-EOF
-chmod +x "$BIN_DIR/nativedev"
-
-if command -v update-desktop-database >/dev/null 2>&1; then
-  update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+# Migrate the old source-copy installer safely. A stale ~/.local/bin/nativedev
+# takes PATH precedence over /usr/bin/nativedev, so remove it only when it is
+# recognisably NativeDev's generated legacy launcher.
+LEGACY_BIN="$HOME/.local/bin/nativedev"
+if [ -f "$LEGACY_BIN" ] && grep -q '/\.local/share/nativedev' "$LEGACY_BIN" 2>/dev/null; then
+  rm -f "$LEGACY_BIN"
+fi
+LEGACY_APP="$HOME/.local/share/nativedev/src"
+if [ -d "$LEGACY_APP" ]; then
+  rm -rf "$LEGACY_APP"
+fi
+LEGACY_DESKTOP="$HOME/.local/share/applications/io.github.nativedev.Manager.desktop"
+if [ -f "$LEGACY_DESKTOP" ]; then
+  rm -f "$LEGACY_DESKTOP"
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true
+  fi
 fi
 
-printf '\nInstalled NativeDev.\n'
-printf 'Run: %s\n' "$BIN_DIR/nativedev"
-printf 'If ~/.local/bin is not on PATH, log out/in or add it to your shell PATH.\n'
+printf '\nInstalled NativeDev %s as a native Debian package.\n' "$(PYTHONPATH="$ROOT/src" python3 -c 'from nativedev import __version__; print(__version__)')"
+printf 'Run: nativedev\n'

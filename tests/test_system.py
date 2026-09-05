@@ -275,7 +275,7 @@ class PrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=uid)[0]
 
     def test_allows_structured_native_operations(self):
-        protocol = 22
+        protocol = 23
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "restart", "now": False, "service": "nginx"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "disable", "now": True, "service": "php8.4-fpm"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["redis-tools"]}))
@@ -297,7 +297,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/php/8.4/fpm/pool.d/nativedev-1001.conf"]}, uid=1000))
 
     def test_rejects_raw_commands_and_outside_packages(self):
-        protocol = 22
+        protocol = 23
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "run", "argv": ["bash", "-c", "id"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["openssh-server"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["/tmp/nativedev-test/debsuryorg-archive-keyring.deb"]}))
@@ -348,7 +348,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         import subprocess
 
         request = {
-            "protocol": 22,
+            "protocol": 23,
             "action": "php.multi_repo.configure",
             "backend": "ondrej",
             "codename": "noble",
@@ -372,7 +372,7 @@ class PrivilegedHelperTests(unittest.TestCase):
 
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
             argv = command_for_operation({
-                "protocol": 22,
+                "protocol": 23,
                 "action": "apt.remove",
                 "packages": ["mariadb-server"],
             }, uid=1000)
@@ -387,7 +387,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {
-            "protocol": 22,
+            "protocol": 23,
             "action": "apt.remove",
             "packages": ["mariadb-server"],
             "timeout": None,
@@ -412,7 +412,7 @@ class PrivilegedHelperTests(unittest.TestCase):
     def test_client_and_helper_protocol_versions_match(self):
         from nativedev.system import PRIVILEGE_PROTOCOL_VERSION
         from nativedev.privileged_helper import PROTOCOL_VERSION
-        self.assertEqual(PRIVILEGE_PROTOCOL_VERSION, 22)
+        self.assertEqual(PRIVILEGE_PROTOCOL_VERSION, 23)
         self.assertEqual(PROTOCOL_VERSION, PRIVILEGE_PROTOCOL_VERSION)
 
     def test_client_translates_to_semantic_rpc_without_argv(self):
@@ -428,7 +428,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {
-            "protocol": 22,
+            "protocol": 23,
             "action": "php.install_packages",
             "packages": ["php8.4-cli", "php8.4-gd", "php8.4-opcache"],
         }
@@ -449,7 +449,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         from nativedev.system import CommandResult
 
-        request = {"protocol": 22, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
+        request = {"protocol": 23, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("nativedev.privileged_helper.subprocess.run") as run, \
              patch("nativedev.privileged_helper._run_extension_module_pair") as modules:
@@ -615,7 +615,7 @@ class ServiceCleanupTests(unittest.TestCase):
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
             self.assertEqual(
                 command_for_operation({
-                    "protocol": 22,
+                    "protocol": 23,
                     "action": "apt.install",
                     "packages": ["rabbitmq-server"],
                 }, uid=1000),
@@ -623,7 +623,7 @@ class ServiceCleanupTests(unittest.TestCase):
             )
             self.assertEqual(
                 command_for_operation({
-                    "protocol": 22,
+                    "protocol": 23,
                     "action": "systemd.service",
                     "verb": "start",
                     "now": False,
@@ -633,7 +633,7 @@ class ServiceCleanupTests(unittest.TestCase):
             )
             self.assertEqual(
                 command_for_operation({
-                    "protocol": 22,
+                    "protocol": 23,
                     "action": "systemd.service",
                     "verb": "restart",
                     "now": False,
@@ -642,15 +642,15 @@ class ServiceCleanupTests(unittest.TestCase):
                 ["/usr/bin/systemctl", "restart", "mailpit"],
             )
 
-        self.assertTrue(validate_operation({"protocol": 22, "action": "mailpit.install"})[0])
-        self.assertTrue(validate_operation({"protocol": 22, "action": "mailpit.uninstall"})[0])
+        self.assertTrue(validate_operation({"protocol": 23, "action": "mailpit.install"})[0])
+        self.assertTrue(validate_operation({"protocol": 23, "action": "mailpit.uninstall"})[0])
         self.assertFalse(validate_operation({
-            "protocol": 22,
+            "protocol": 23,
             "action": "mailpit.install",
             "url": "https://example.invalid/mailpit",
         })[0])
         self.assertFalse(validate_operation({
-            "protocol": 22,
+            "protocol": 23,
             "action": "mailpit.uninstall",
             "path": "/tmp/mailpit",
         })[0])
@@ -689,11 +689,11 @@ class ServiceCleanupTests(unittest.TestCase):
         from nativedev.privileged_helper import validate_operation
 
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"):
-            self.assertTrue(validate_operation({"protocol": 22, "action": "database.delete_all_data", "key": "mariadb"})[0])
-            self.assertTrue(validate_operation({"protocol": 22, "action": "database.delete_all_data", "key": "postgresql"})[0])
-            self.assertFalse(validate_operation({"protocol": 22, "action": "database.delete_all_data", "key": "redis"})[0])
-            self.assertFalse(validate_operation({"protocol": 22, "action": "database.delete_all_data", "key": "mariadb", "path": "/tmp/evil"})[0])
-            self.assertFalse(validate_operation({"protocol": 22, "action": "database.cleanup_component", "key": "mariadb"})[0])
+            self.assertTrue(validate_operation({"protocol": 23, "action": "database.delete_all_data", "key": "mariadb"})[0])
+            self.assertTrue(validate_operation({"protocol": 23, "action": "database.delete_all_data", "key": "postgresql"})[0])
+            self.assertFalse(validate_operation({"protocol": 23, "action": "database.delete_all_data", "key": "redis"})[0])
+            self.assertFalse(validate_operation({"protocol": 23, "action": "database.delete_all_data", "key": "mariadb", "path": "/tmp/evil"})[0])
+            self.assertFalse(validate_operation({"protocol": 23, "action": "database.cleanup_component", "key": "mariadb"})[0])
 
 
 class ManagerPackageExportTests(unittest.TestCase):
@@ -1018,7 +1018,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=1000)[0]
 
     def test_database_rpc_derives_username_from_peer_and_rejects_client_user_or_sql_selectors(self):
-        protocol = 22
+        protocol = 23
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.account_status"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "nativedev", "admin_password": "root secret !@#"}))
@@ -1037,7 +1037,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 22, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 23, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
         calls = []
 
         def run_admin(sql, admin_password, timeout, env):
@@ -1062,7 +1062,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 22, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 23, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
              patch("nativedev.privileged_helper._run_mysql_admin") as run_admin:
             run_admin.return_value = subprocess.CompletedProcess(["mariadb"], 1, "", "ERROR 1045")
@@ -1077,7 +1077,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         import subprocess
 
         request = {
-            "protocol": 22,
+            "protocol": 23,
             "action": "database.mysql.ensure_dev_account",
             "password": "nativedev",
             "admin_password": "Root secret !@#",
@@ -1126,7 +1126,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 22, "action": "database.postgresql.ensure_cluster"}
+        request = {"protocol": 23, "action": "database.postgresql.ensure_cluster"}
         calls = []
 
         def fake_run(argv, **kwargs):
@@ -1156,7 +1156,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 22, "action": "database.postgresql.ensure_cluster"}
+        request = {"protocol": 23, "action": "database.postgresql.ensure_cluster"}
         calls = []
 
         def fake_run(argv, **kwargs):
@@ -1188,7 +1188,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 22, "action": "database.postgresql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 23, "action": "database.postgresql.ensure_dev_account", "password": "nativedev"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
              patch("nativedev.privileged_helper._postgres_admin_argv", return_value=["/usr/bin/runuser", "psql"]), \
              patch("nativedev.privileged_helper.subprocess.run") as run:
@@ -1208,7 +1208,7 @@ class DatabaseDataResetHelperTests(unittest.TestCase):
         from unittest.mock import patch, call
         from nativedev.privileged_helper import execute_operation
 
-        request = {"protocol": 22, "action": "database.delete_all_data", "key": "mariadb"}
+        request = {"protocol": 23, "action": "database.delete_all_data", "key": "mariadb"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
              patch("nativedev.privileged_helper._remove_fixed_tree") as remove:
             result = execute_operation(request, uid=1000, timeout=90)
@@ -1219,7 +1219,7 @@ class DatabaseDataResetHelperTests(unittest.TestCase):
         from unittest.mock import patch, call
         from nativedev.privileged_helper import execute_operation
 
-        request = {"protocol": 22, "action": "database.delete_all_data", "key": "postgresql"}
+        request = {"protocol": 23, "action": "database.delete_all_data", "key": "postgresql"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
              patch("nativedev.privileged_helper._remove_fixed_tree") as remove:
             result = execute_operation(request, uid=1000, timeout=90)
@@ -2500,7 +2500,7 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
             self.assertEqual(
                 command_for_operation(
-                    {"protocol": 22, "action": "developer_tool.install", "tool": "phpmyadmin"},
+                    {"protocol": 23, "action": "developer_tool.install", "tool": "phpmyadmin"},
                     uid=1000,
                 ),
                 [
@@ -2510,7 +2510,7 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(
                 command_for_operation(
-                    {"protocol": 22, "action": "developer_tool.uninstall", "tool": "adminer"},
+                    {"protocol": 23, "action": "developer_tool.uninstall", "tool": "adminer"},
                     uid=1000,
                 ),
                 [
@@ -2519,16 +2519,16 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
                 ],
             )
 
-        self.assertTrue(validate_operation({"protocol": 22, "action": "developer_tool.install", "tool": "adminer"})[0])
-        self.assertFalse(validate_operation({"protocol": 22, "action": "developer_tool.install", "tool": "evil"})[0])
+        self.assertTrue(validate_operation({"protocol": 23, "action": "developer_tool.install", "tool": "adminer"})[0])
+        self.assertFalse(validate_operation({"protocol": 23, "action": "developer_tool.install", "tool": "evil"})[0])
         self.assertFalse(validate_operation({
-            "protocol": 22,
+            "protocol": 23,
             "action": "developer_tool.install",
             "tool": "adminer",
             "package": "openssh-server",
         })[0])
         self.assertFalse(validate_operation({
-            "protocol": 22,
+            "protocol": 23,
             "action": "developer_tool.install",
             "tool": "phpmyadmin",
             "url": "https://example.invalid/tool.deb",
@@ -2539,7 +2539,7 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
         import subprocess
         from nativedev.privileged_helper import execute_operation
 
-        request = {"protocol": 22, "action": "developer_tool.install", "tool": "phpmyadmin"}
+        request = {"protocol": 23, "action": "developer_tool.install", "tool": "phpmyadmin"}
         completed = subprocess.CompletedProcess([], 0, "", "")
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("nativedev.privileged_helper.subprocess.run", return_value=completed) as run, \
@@ -2740,13 +2740,13 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
         from unittest.mock import patch
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"):
             self.assertTrue(validate_operation({
-                "protocol": 22, "action": "developer_tool.reconcile", "tool": "phpmyadmin"
+                "protocol": 23, "action": "developer_tool.reconcile", "tool": "phpmyadmin"
             })[0])
             self.assertFalse(validate_operation({
-                "protocol": 22, "action": "developer_tool.reconcile", "tool": "adminer"
+                "protocol": 23, "action": "developer_tool.reconcile", "tool": "adminer"
             })[0])
             self.assertFalse(validate_operation({
-                "protocol": 22, "action": "developer_tool.reconcile", "tool": "phpmyadmin",
+                "protocol": 23, "action": "developer_tool.reconcile", "tool": "phpmyadmin",
                 "path": "/tmp/evil",
             })[0])
 
@@ -2754,17 +2754,17 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
         from nativedev.privileged_helper import validate_operation
 
         self.assertTrue(validate_operation({
-            "protocol": 22, "action": "developer_tool.adminer_sqlite.install"
+            "protocol": 23, "action": "developer_tool.adminer_sqlite.install"
         })[0])
         self.assertTrue(validate_operation({
-            "protocol": 22, "action": "developer_tool.adminer_sqlite.uninstall"
+            "protocol": 23, "action": "developer_tool.adminer_sqlite.uninstall"
         })[0])
         self.assertFalse(validate_operation({
-            "protocol": 22, "action": "developer_tool.adminer_sqlite.install",
+            "protocol": 23, "action": "developer_tool.adminer_sqlite.install",
             "path": "/tmp/wrapper.php",
         })[0])
         self.assertFalse(validate_operation({
-            "protocol": 22, "action": "developer_tool.adminer_sqlite.install",
+            "protocol": 23, "action": "developer_tool.adminer_sqlite.install",
             "password": "changed",
         })[0])
 
@@ -2951,3 +2951,159 @@ class DeveloperToolManagerExportTests(unittest.TestCase):
         from nativedev.managers.developer_tools import DeveloperToolManager as DirectDeveloperToolManager
 
         self.assertIs(DeveloperToolManager, DirectDeveloperToolManager)
+
+
+class ApplicationUpdateManagerTests(unittest.TestCase):
+    class Runner:
+        def __init__(self, *, installed="0.1.9", candidate="0.2.0"):
+            self.installed = installed
+            self.candidate = candidate
+            self.commands = []
+            self.privileged = []
+
+        def run(self, argv, **_kwargs):
+            from nativedev.system import CommandResult
+
+            argv = list(argv)
+            self.commands.append(argv)
+            if argv[:2] == ["dpkg-query", "-W"]:
+                if self.installed is None:
+                    return CommandResult(argv, 1, "", "not installed")
+                return CommandResult(argv, 0, f"ii \t{self.installed}", "")
+            if argv[:2] == ["apt-cache", "policy"]:
+                candidate = self.candidate if self.candidate is not None else "(none)"
+                return CommandResult(argv, 0, f"Installed: {self.installed or '(none)'}\nCandidate: {candidate}\n", "")
+            if argv[:2] == ["dpkg", "--compare-versions"]:
+                def key(value):
+                    return tuple(int(part) for part in value.split("."))
+                return CommandResult(argv, 0 if key(argv[2]) > key(argv[4]) else 1, "", "")
+            return CommandResult(argv, 1, "", "unexpected")
+
+        def privileged_operation(self, action, **kwargs):
+            from nativedev.system import CommandResult
+
+            self.privileged.append((action, kwargs))
+            return CommandResult([f"nativedev:{action}"], 0, "updated", "")
+
+    @staticmethod
+    def distro():
+        from nativedev.system import DistroInfo
+
+        return DistroInfo("debian", "Debian", "13", "trixie", (), "Debian 13")
+
+    def test_background_update_check_is_due_only_every_24_hours(self):
+        from nativedev.managers.application import ApplicationManager, UPDATE_CHECK_INTERVAL_SECONDS
+
+        with tempfile.TemporaryDirectory() as td:
+            now = [1_000_000.0]
+            manager = ApplicationManager(
+                self.Runner(), self.distro(), state_file=Path(td) / "update.json", clock=lambda: now[0]
+            )
+            self.assertTrue(manager.check_due())
+            update = manager.check_for_update()
+            self.assertEqual(update.candidate_version, "0.2.0")
+            self.assertFalse(manager.check_due())
+            now[0] += UPDATE_CHECK_INTERVAL_SECONDS - 1
+            self.assertFalse(manager.check_due())
+            now[0] += 1
+            self.assertTrue(manager.check_due())
+
+    def test_update_check_does_not_install_or_refresh_packages(self):
+        from nativedev.managers.application import ApplicationManager
+
+        with tempfile.TemporaryDirectory() as td:
+            runner = self.Runner()
+            manager = ApplicationManager(runner, self.distro(), state_file=Path(td) / "update.json")
+            manager.check_for_update(force=True)
+            self.assertEqual(runner.privileged, [])
+            self.assertFalse(any(command[:2] == ["apt-get", "update"] for command in runner.commands))
+
+    def test_update_action_is_fixed_semantic_rpc(self):
+        from nativedev.managers.application import ApplicationManager
+
+        with tempfile.TemporaryDirectory() as td:
+            runner = self.Runner()
+            manager = ApplicationManager(runner, self.distro(), state_file=Path(td) / "update.json")
+            manager.update()
+            self.assertEqual(runner.privileged[0][0], "application.update")
+            self.assertNotIn("package", runner.privileged[0][1])
+            self.assertIsNone(runner.privileged[0][1]["timeout"])
+
+    def test_source_copy_install_does_not_offer_self_update(self):
+        from nativedev.managers.application import ApplicationManager
+
+        with tempfile.TemporaryDirectory() as td:
+            manager = ApplicationManager(
+                self.Runner(installed=None), self.distro(), state_file=Path(td) / "update.json"
+            )
+            self.assertIsNone(manager.check_for_update(force=True))
+            with self.assertRaisesRegex(RuntimeError, "native system package"):
+                manager.update()
+
+    def test_application_manager_export(self):
+        from nativedev.managers import ApplicationManager
+        from nativedev.managers.application import ApplicationManager as DirectApplicationManager
+
+        self.assertIs(ApplicationManager, DirectApplicationManager)
+
+
+class ApplicationPackageSecurityTests(unittest.TestCase):
+    def test_application_update_rpc_has_no_client_controlled_package_or_repository(self):
+        from nativedev.privileged_helper import validate_operation
+
+        self.assertTrue(validate_operation({"protocol": 23, "action": "application.update"})[0])
+        self.assertFalse(validate_operation({
+            "protocol": 23,
+            "action": "application.update",
+            "package": "openssh-server",
+        })[0])
+        self.assertFalse(validate_operation({
+            "protocol": 23,
+            "action": "application.update",
+            "repository": "https://example.invalid/",
+        })[0])
+
+    def test_root_side_update_is_native_package_only(self):
+        helper = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "privileged_helper.py").read_text()
+        start = helper.index("def _execute_application_update")
+        end = helper.index("def execute_operation", start)
+        implementation = helper[start:end]
+        self.assertIn('"--only-upgrade"', implementation)
+        self.assertIn('"nativedev"', implementation)
+        self.assertIn('"DPkg::Lock::Timeout=0"', implementation)
+        self.assertNotIn('request.get("package")', implementation)
+
+
+class NativePackageWorkflowTests(unittest.TestCase):
+    def test_deb_build_is_architecture_independent_and_installs_root_owned_helper(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "packaging" / "build-deb.sh").read_text()
+        self.assertIn("Architecture: all", script)
+        self.assertIn("/usr/lib/nativedev/privileged_helper.py", script)
+        self.assertIn("dpkg-deb --root-owner-group --build", script)
+        self.assertIn("NATIVEDEV_APT_REPO_KEYRING", script)
+        self.assertIn("Signed-By: /usr/share/keyrings/nativedev-archive-keyring.gpg", script)
+
+    def test_install_script_uses_native_deb_not_user_source_copy(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "install.sh").read_text()
+        self.assertIn("packaging/build-deb.sh", script)
+        self.assertIn("apt-get install -y", script)
+        self.assertNotIn('cp -a "$ROOT/src" "$TARGET/src"', script)
+
+    def test_uninstall_uses_package_manager_and_preserves_development_state(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "uninstall.sh").read_text()
+        self.assertIn("apt-get remove -y nativedev", script)
+        self.assertNotIn("/var/lib/mysql", script)
+        self.assertNotIn("/var/lib/postgresql", script)
+        self.assertIn("intentionally preserved", script)
+
+    def test_gui_starts_background_update_check_and_shows_dialog(self):
+        gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
+        self.assertIn("self.window.check_for_updates()", gui)
+        self.assertIn("GLib.timeout_add_seconds(60 * 60, self._update_timer_tick)", gui)
+        self.assertIn('title="NativeDev update available"', gui)
+        self.assertIn('dialog.add_button("Later"', gui)
+        self.assertIn('dialog.add_button("Update"', gui)
+        self.assertIn('dialog.add_button("Restart NativeDev"', gui)

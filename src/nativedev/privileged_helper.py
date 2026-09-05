@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-PROTOCOL_VERSION = 22
+PROTOCOL_VERSION = 23
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 MANAGED_FILES = {
@@ -972,6 +972,13 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
         _database_username_for_uid(uid)
         return []
 
+    if action == "application.update":
+        if set(request).difference({"protocol", "action", "timeout"}):
+            raise RuntimeError("NativeDev application update contains unsupported fields")
+        # The client never supplies a package name, repository, URL or command.
+        # Root-side execution is fixed to NativeDev's own native package.
+        return []
+
     if action in {"mailpit.install", "mailpit.uninstall"}:
         if set(request).difference({"protocol", "action", "timeout"}):
             raise RuntimeError("Mailpit operation contains unsupported fields")
@@ -1625,8 +1632,72 @@ def _execute_database_delete_all_data(request: dict) -> subprocess.CompletedProc
     return subprocess.CompletedProcess([], 0, "", "")
 
 
+def _execute_application_update(timeout: int | None) -> subprocess.CompletedProcess:
+    """Refresh APT metadata and upgrade only the installed NativeDev package."""
+    try:
+        apt_get = _binary("apt-get")
+        dpkg_query = _binary("dpkg-query")
+    except RuntimeError as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
+
+    env = dict(os.environ)
+    env["PATH"] = SAFE_PATH
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    env["APT_LISTCHANGES_FRONTEND"] = "none"
+    env["NEEDRESTART_MODE"] = "a"
+
+    installed = subprocess.run(
+        [dpkg_query, "-W", "-f=${db:Status-Abbrev}\t${Version}", "nativedev"],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env=env,
+    )
+    if installed.returncode != 0 or not installed.stdout.startswith("ii "):
+        return subprocess.CompletedProcess(
+            installed.args,
+            1,
+            installed.stdout,
+            installed.stderr or "NativeDev is not installed as a Debian/Ubuntu package.",
+        )
+
+    refreshed = subprocess.run(
+        [apt_get, "-o", "DPkg::Lock::Timeout=0", "update"],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        env=env,
+    )
+    if refreshed.returncode != 0:
+        return refreshed
+
+    upgraded = subprocess.run(
+        [
+            apt_get,
+            "-o", "DPkg::Lock::Timeout=0",
+            "install",
+            "--only-upgrade",
+            "-y",
+            "nativedev",
+        ],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        env=env,
+    )
+    if refreshed.stdout:
+        upgraded.stdout = refreshed.stdout + upgraded.stdout
+    if refreshed.stderr:
+        upgraded.stderr = refreshed.stderr + upgraded.stderr
+    return upgraded
+
+
 def execute_operation(request: dict, uid: int, timeout: int | None) -> subprocess.CompletedProcess:
     action = request.get("action")
+
+    if action == "application.update":
+        command_for_operation(request, uid)
+        return _execute_application_update(timeout)
 
     if action == "mailpit.install":
         command_for_operation(request, uid)

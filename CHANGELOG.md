@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased - Native package install/update/uninstall
+- Replaced the legacy per-user source-copy installer with a native Debian package builder. NativeDev itself is packaged as `Architecture: all`; distro-specific third-party binaries remain architecture-aware at their own install boundary.
+- Added a Linux-backend-oriented application update manager. Debian/Ubuntu currently uses APT; the GTK app performs a read-only background update check at most once every 24 hours and shows a dialog only when a newer candidate exists.
+- Added the fixed semantic `application.update` privileged operation. The root helper refreshes APT metadata and upgrades only the installed `nativedev` package; the client cannot choose a package name, repository, URL or command. Privileged RPC advanced to protocol 23.
+- Added restart-after-update UI so the updated application and root-owned helper are loaded together.
+- `./install.sh` now builds/installs the native DEB and safely removes only NativeDev's recognisable legacy user launcher/source copy. `./uninstall.sh` removes the package while preserving projects, databases/accounts and existing NativeDev-managed service configuration.
+- Production DEB builds can optionally embed a signed NativeDev APT source/key supplied by the release pipeline; unsigned repository configuration is rejected. CI now validates shell scripts and builds the architecture-independent DEB artifact.
+
 ## 0.1.9 - PostgreSQL fresh-cluster reinstall repair
 - Fixed destructive PostgreSQL uninstall/reinstall: when **Delete all database data and accounts** removes the cluster data/config, NativeDev now explicitly ensures a usable PostgreSQL cluster exists before provisioning the current-user database role. If no cluster exists, the helper creates and starts the newest installed server version's `main` cluster; if the port-5432 cluster exists but is down, it starts that cluster.
 - PostgreSQL default-user setup also repairs the missing/down default cluster first, so an already-installed but clusterless PostgreSQL can recover without another package reinstall. **Use existing user** and later self-service password changes remain non-privileged and do not gain a new root dependency.

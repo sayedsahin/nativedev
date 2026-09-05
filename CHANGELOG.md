@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.9 - PostgreSQL fresh-cluster reinstall repair
+- Fixed destructive PostgreSQL uninstall/reinstall: when **Delete all database data and accounts** removes the cluster data/config, NativeDev now explicitly ensures a usable PostgreSQL cluster exists before provisioning the current-user database role. If no cluster exists, the helper creates and starts the newest installed server version's `main` cluster; if the port-5432 cluster exists but is down, it starts that cluster.
+- PostgreSQL default-user setup also repairs the missing/down default cluster first, so an already-installed but clusterless PostgreSQL can recover without another package reinstall. **Use existing user** and later self-service password changes remain non-privileged and do not gain a new root dependency.
+- Failed mutations now run their page refresh callback as well as successful mutations. This fixes the stale **Install** state when APT succeeds but a later provisioning step reports an error.
+- Privileged RPC advanced to protocol 18 for the fixed semantic `database.postgresql.ensure_cluster` operation; re-run `./install.sh` after applying this patch.
+
 ## 0.1.9 - Database uninstall execution correction
 - Removed the arbitrary 10-second dpkg-lock wait and 180-second database-uninstall wall-clock limit. A real MariaDB/PostgreSQL package removal or large opted-in data deletion is allowed to take as long as the system legitimately needs.
 - Database APT removal is explicitly non-interactive (`DEBIAN_FRONTEND=noninteractive`, no apt-listchanges/needrestart prompt) and uses `DPkg::Lock::Timeout=0`: if another apt/dpkg process already owns the lock, NativeDev fails that mutation immediately instead of sitting behind the lock with a spinner. Once APT actually starts the requested removal, NativeDev does not impose an artificial timeout.

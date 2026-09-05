@@ -252,7 +252,7 @@ class PrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=uid)[0]
 
     def test_allows_structured_native_operations(self):
-        protocol = 17
+        protocol = 18
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "restart", "now": False, "service": "nginx"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "disable", "now": True, "service": "php8.4-fpm"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["redis-tools"]}))
@@ -274,7 +274,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/php/8.4/fpm/pool.d/nativedev-1001.conf"]}, uid=1000))
 
     def test_rejects_raw_commands_and_outside_packages(self):
-        protocol = 17
+        protocol = 18
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "run", "argv": ["bash", "-c", "id"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["openssh-server"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["/tmp/nativedev-test/debsuryorg-archive-keyring.deb"]}))
@@ -323,7 +323,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         import subprocess
 
         request = {
-            "protocol": 17,
+            "protocol": 18,
             "action": "php.multi_repo.configure",
             "backend": "ondrej",
             "codename": "noble",
@@ -347,7 +347,7 @@ class PrivilegedHelperTests(unittest.TestCase):
 
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
             argv = command_for_operation({
-                "protocol": 17,
+                "protocol": 18,
                 "action": "apt.remove",
                 "packages": ["mariadb-server"],
             }, uid=1000)
@@ -362,7 +362,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {
-            "protocol": 17,
+            "protocol": 18,
             "action": "apt.remove",
             "packages": ["mariadb-server"],
             "timeout": None,
@@ -387,7 +387,7 @@ class PrivilegedHelperTests(unittest.TestCase):
     def test_client_and_helper_protocol_versions_match(self):
         from nativedev.system import PRIVILEGE_PROTOCOL_VERSION
         from nativedev.privileged_helper import PROTOCOL_VERSION
-        self.assertEqual(PRIVILEGE_PROTOCOL_VERSION, 17)
+        self.assertEqual(PRIVILEGE_PROTOCOL_VERSION, 18)
         self.assertEqual(PROTOCOL_VERSION, PRIVILEGE_PROTOCOL_VERSION)
 
     def test_client_translates_to_semantic_rpc_without_argv(self):
@@ -403,7 +403,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {
-            "protocol": 17,
+            "protocol": 18,
             "action": "php.install_packages",
             "packages": ["php8.4-cli", "php8.4-gd", "php8.4-opcache"],
         }
@@ -424,7 +424,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         from nativedev.system import CommandResult
 
-        request = {"protocol": 17, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
+        request = {"protocol": 18, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("nativedev.privileged_helper.subprocess.run") as run, \
              patch("nativedev.privileged_helper._run_extension_module_pair") as modules:
@@ -577,11 +577,11 @@ class ServiceCleanupTests(unittest.TestCase):
         from nativedev.privileged_helper import validate_operation
 
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"):
-            self.assertTrue(validate_operation({"protocol": 17, "action": "database.delete_all_data", "key": "mariadb"})[0])
-            self.assertTrue(validate_operation({"protocol": 17, "action": "database.delete_all_data", "key": "postgresql"})[0])
-            self.assertFalse(validate_operation({"protocol": 17, "action": "database.delete_all_data", "key": "redis"})[0])
-            self.assertFalse(validate_operation({"protocol": 17, "action": "database.delete_all_data", "key": "mariadb", "path": "/tmp/evil"})[0])
-            self.assertFalse(validate_operation({"protocol": 17, "action": "database.cleanup_component", "key": "mariadb"})[0])
+            self.assertTrue(validate_operation({"protocol": 18, "action": "database.delete_all_data", "key": "mariadb"})[0])
+            self.assertTrue(validate_operation({"protocol": 18, "action": "database.delete_all_data", "key": "postgresql"})[0])
+            self.assertFalse(validate_operation({"protocol": 18, "action": "database.delete_all_data", "key": "redis"})[0])
+            self.assertFalse(validate_operation({"protocol": 18, "action": "database.delete_all_data", "key": "mariadb", "path": "/tmp/evil"})[0])
+            self.assertFalse(validate_operation({"protocol": 18, "action": "database.cleanup_component", "key": "mariadb"})[0])
 
 
 class ManagerPackageExportTests(unittest.TestCase):
@@ -670,6 +670,7 @@ class DatabaseAccessManagerTests(unittest.TestCase):
             self.assertEqual(state.username, "sayed")
             self.assertEqual(state.password, "nativedev")
             self.assertEqual([action for action, _ in runner.operations], [
+                "database.postgresql.ensure_cluster",
                 "database.postgresql.account_status",
                 "database.postgresql.ensure_dev_account",
             ])
@@ -690,7 +691,10 @@ class DatabaseAccessManagerTests(unittest.TestCase):
             state = manager.ensure_after_install("postgresql")
             self.assertFalse(state.managed)
             self.assertTrue(state.conflict)
-            self.assertEqual([action for action, _ in runner.operations], ["database.postgresql.account_status"])
+            self.assertEqual([action for action, _ in runner.operations], [
+                "database.postgresql.ensure_cluster",
+                "database.postgresql.account_status",
+            ])
 
     def test_use_existing_mariadb_user_verifies_then_stores_without_changing_password(self):
         from unittest.mock import patch
@@ -902,12 +906,14 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=1000)[0]
 
     def test_database_rpc_derives_username_from_peer_and_rejects_client_user_or_sql_selectors(self):
-        protocol = 17
+        protocol = 18
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.account_status"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "nativedev", "admin_password": "root secret !@#"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.postgresql.account_status"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.postgresql.ensure_dev_account", "password": "Dev-123!"}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.postgresql.ensure_cluster"}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "database.postgresql.ensure_cluster", "version": "17"}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "x", "user": "root"}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "x", "sql": "GRANT ALL"}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "bad'quote"}))
@@ -919,7 +925,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 17, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 18, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
         calls = []
 
         def run_admin(sql, admin_password, timeout, env):
@@ -944,7 +950,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 17, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 18, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
              patch("nativedev.privileged_helper._run_mysql_admin") as run_admin:
             run_admin.return_value = subprocess.CompletedProcess(["mariadb"], 1, "", "ERROR 1045")
@@ -959,7 +965,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         import subprocess
 
         request = {
-            "protocol": 17,
+            "protocol": 18,
             "action": "database.mysql.ensure_dev_account",
             "password": "nativedev",
             "admin_password": "Root secret !@#",
@@ -1003,12 +1009,74 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(any("Root" in item for item in seen["argv"]))
         self.assertIn('password="Root \\"secret\\" \\\\ value"', seen["contents"])
 
+    def test_postgresql_cluster_helper_creates_main_cluster_when_reset_left_none(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import execute_operation
+        import subprocess
+
+        request = {"protocol": 18, "action": "database.postgresql.ensure_cluster"}
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            if "pg_lsclusters" in argv[0]:
+                return subprocess.CompletedProcess(list(argv), 0, "", "")
+            if "pg_createcluster" in argv[0]:
+                return subprocess.CompletedProcess(list(argv), 0, "", "")
+            return subprocess.CompletedProcess(list(argv), 1, "", "unexpected command")
+
+        binaries = {
+            "pg_lsclusters": "/usr/bin/pg_lsclusters",
+            "pg_createcluster": "/usr/bin/pg_createcluster",
+        }
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+             patch("nativedev.privileged_helper._binary", side_effect=lambda name: binaries[name]), \
+             patch("nativedev.privileged_helper._installed_postgresql_versions", return_value=["17"]), \
+             patch("nativedev.privileged_helper.subprocess.run", side_effect=fake_run):
+            result = execute_operation(request, uid=1000, timeout=120)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(calls[0], ["/usr/bin/pg_lsclusters", "--no-header"])
+        self.assertEqual(calls[1], ["/usr/bin/pg_createcluster", "--start", "17", "main"])
+
+    def test_postgresql_cluster_helper_starts_existing_default_cluster(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import execute_operation
+        import subprocess
+
+        request = {"protocol": 18, "action": "database.postgresql.ensure_cluster"}
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            if "pg_lsclusters" in argv[0]:
+                return subprocess.CompletedProcess(
+                    list(argv), 0,
+                    "17 main 5432 down postgres /var/lib/postgresql/17/main /var/log/postgresql/postgresql-17-main.log\n",
+                    "",
+                )
+            if "pg_ctlcluster" in argv[0]:
+                return subprocess.CompletedProcess(list(argv), 0, "", "")
+            return subprocess.CompletedProcess(list(argv), 1, "", "unexpected command")
+
+        binaries = {
+            "pg_lsclusters": "/usr/bin/pg_lsclusters",
+            "pg_ctlcluster": "/usr/bin/pg_ctlcluster",
+        }
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+             patch("nativedev.privileged_helper._binary", side_effect=lambda name: binaries[name]), \
+             patch("nativedev.privileged_helper.subprocess.run", side_effect=fake_run):
+            result = execute_operation(request, uid=1000, timeout=120)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(calls[-1], ["/usr/bin/pg_ctlcluster", "17", "main", "start"])
+
     def test_postgresql_helper_role_is_createdb_but_not_superuser_or_createrole(self):
         from unittest.mock import patch
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 17, "action": "database.postgresql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 18, "action": "database.postgresql.ensure_dev_account", "password": "nativedev"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
              patch("nativedev.privileged_helper._postgres_admin_argv", return_value=["/usr/bin/runuser", "psql"]), \
              patch("nativedev.privileged_helper.subprocess.run") as run:
@@ -1028,7 +1096,7 @@ class DatabaseDataResetHelperTests(unittest.TestCase):
         from unittest.mock import patch, call
         from nativedev.privileged_helper import execute_operation
 
-        request = {"protocol": 17, "action": "database.delete_all_data", "key": "mariadb"}
+        request = {"protocol": 18, "action": "database.delete_all_data", "key": "mariadb"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
              patch("nativedev.privileged_helper._remove_fixed_tree") as remove:
             result = execute_operation(request, uid=1000, timeout=90)
@@ -1039,7 +1107,7 @@ class DatabaseDataResetHelperTests(unittest.TestCase):
         from unittest.mock import patch, call
         from nativedev.privileged_helper import execute_operation
 
-        request = {"protocol": 17, "action": "database.delete_all_data", "key": "postgresql"}
+        request = {"protocol": 18, "action": "database.delete_all_data", "key": "postgresql"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
              patch("nativedev.privileged_helper._remove_fixed_tree") as remove:
             result = execute_operation(request, uid=1000, timeout=90)
@@ -1051,6 +1119,12 @@ class DatabaseDataResetHelperTests(unittest.TestCase):
 
 
 class DatabaseAccessUiTests(unittest.TestCase):
+    def test_page_action_refreshes_after_partial_mutation_failure(self):
+        gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
+        page = gui[gui.index("class Page(Gtk.ScrolledWindow):"):gui.index("class DashboardPage(Page):")]
+        self.assertEqual(page.count("if after:"), 2)
+        self.assertGreaterEqual(page.count("after()"), 2)
+
     def test_services_page_uses_controller_install_and_shows_database_credentials_controls(self):
         gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
         services = gui[gui.index("class ServicesPage"):gui.index("class ProjectsPage")]
@@ -2002,6 +2076,13 @@ class PhpExtensionManagerTests(unittest.TestCase):
         self.assertIn(".extension-status", style)
         self.assertIn("padding: 1px 6px", style)
         self.assertIn("button {\n  min-height: 15px;", style)
+
+    def test_status_pills_keep_natural_height(self):
+        gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text(encoding="utf-8")
+        start = gui.index("def status_pill")
+        end = gui.index("\ndef confirm(", start)
+        helper = gui[start:end]
+        self.assertIn("widget.set_valign(Gtk.Align.CENTER)", helper)
         main_window = gui[gui.index("class MainWindow"):gui.index("class NativeDevApplication")]
         self.assertIn("self.activity_spinner = Gtk.Spinner()", main_window)
         self.assertIn("self.activity_spinner.start()", main_window)
@@ -2189,6 +2270,8 @@ class PhpIniManagerTests(unittest.TestCase):
         self.assertIn("self.stack.add_named(page, key)", main)
         self.assertIn("def open_php_subpage(self, key: str)", main)
         self.assertIn('self.stack.set_visible_child_name("php")', main)
+        open_php_page = main[main.index("def open_php_page(self) -> None:"):main.index("def set_activity", main.index("def open_php_page(self) -> None:"))]
+        self.assertNotIn(".refresh()", open_php_page)
         # Sidebar rows are created only by the top-level PAGES loop.
         sidebar_loop = main[main.index("for key, title_text, klass in self.PAGES:"):main.index("for key, klass in self.PHP_SUBPAGES:")]
         self.assertIn("self.sidebar.append(row)", sidebar_loop)

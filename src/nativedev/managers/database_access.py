@@ -158,6 +158,7 @@ class DatabaseAccessManager:
     def ensure_after_install(self, key: str) -> DatabaseAccessState:
         """Provision/reconcile the current-user account after NativeDev installs a DB."""
         self._require_key(key)
+        self._ensure_database_runtime(key)
         record = self._record(key)
         if record and record.get("managed") is True and record.get("username") == self.developer_username:
             password = self.validate_password(str(record.get("password") or DEFAULT_DATABASE_PASSWORD))
@@ -217,6 +218,7 @@ class DatabaseAccessManager:
         PostgreSQL continues to use its local ``postgres`` administrator context.
         """
         self._require_key(key)
+        self._ensure_database_runtime(key)
         current = self.state(key)
         if current.managed and current.password == DEFAULT_DATABASE_PASSWORD:
             self._verify_current_user_login(key, current.password)
@@ -413,6 +415,15 @@ class DatabaseAccessManager:
             raise RuntimeError(result.output or "MariaDB/MySQL root password was rejected")
         raise RuntimeError(result.output or "Could not configure NativeDev database account")
 
+
+    def _ensure_database_runtime(self, key: str) -> None:
+        if DATABASES[key]["family"] != "postgresql":
+            return
+        self.runner.privileged_operation(
+            "database.postgresql.ensure_cluster",
+            check=True,
+            timeout=120,
+        )
 
     @staticmethod
     def _action(key: str, suffix: str) -> str:

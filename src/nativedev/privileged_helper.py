@@ -15,7 +15,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-PROTOCOL_VERSION = 17
+PROTOCOL_VERSION = 18
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 MANAGED_FILES = {
@@ -781,12 +781,122 @@ def _execute_database_operation(request: dict, uid: int, timeout: int) -> subpro
         env=env,
     )
 
+
+def _installed_postgresql_versions() -> list[str]:
+    """Return installed PostgreSQL server major versions, newest first."""
+    base = Path("/usr/lib/postgresql")
+    try:
+        children = list(base.iterdir())
+    except FileNotFoundError:
+        return []
+
+    versions: list[tuple[tuple[int, ...], str]] = []
+    for child in children:
+        if not child.is_dir() or not re.fullmatch(r"\d+(?:\.\d+)?", child.name):
+            continue
+        if not (child / "bin" / "postgres").is_file():
+            continue
+        versions.append((tuple(int(part) for part in child.name.split(".")), child.name))
+    versions.sort(reverse=True)
+    return [version for _parts, version in versions]
+
+
+def _execute_postgresql_ensure_cluster(timeout: int | None) -> subprocess.CompletedProcess:
+    """Ensure the default local PostgreSQL cluster exists and is online.
+
+    NativeDev's connection profile is intentionally the conventional local
+    port 5432. A destructive database reset removes both /var/lib/postgresql
+    and /etc/postgresql after the server packages are removed, so package
+    reinstallation cannot be allowed to depend on postinst heuristics alone.
+    This operation repairs that lifecycle explicitly with postgresql-common's
+    own cluster tools.
+    """
+    env = dict(os.environ)
+    env["PATH"] = SAFE_PATH
+    effective_timeout = timeout if timeout is not None else 120
+
+    try:
+        list_argv = [_binary("pg_lsclusters"), "--no-header"]
+    except RuntimeError as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
+
+    listed = subprocess.run(
+        list_argv,
+        text=True,
+        capture_output=True,
+        timeout=effective_timeout,
+        env=env,
+    )
+    if listed.returncode != 0:
+        return listed
+
+    clusters: list[tuple[str, str, str, str]] = []
+    for raw in listed.stdout.splitlines():
+        parts = raw.split()
+        if len(parts) < 4:
+            continue
+        version, name, port, status = parts[:4]
+        clusters.append((version, name, port, status))
+
+    if not clusters:
+        versions = _installed_postgresql_versions()
+        if not versions:
+            return subprocess.CompletedProcess(
+                list_argv,
+                1,
+                listed.stdout,
+                "PostgreSQL server packages are installed, but no server runtime version was found.",
+            )
+        version = versions[0]
+        try:
+            create_argv = [_binary("pg_createcluster"), "--start", version, "main"]
+        except RuntimeError as exc:
+            return subprocess.CompletedProcess([], 1, "", str(exc))
+        return subprocess.run(
+            create_argv,
+            text=True,
+            capture_output=True,
+            timeout=effective_timeout,
+            env=env,
+        )
+
+    default = next((row for row in clusters if row[2] == "5432"), None)
+    if default is None:
+        return subprocess.CompletedProcess(
+            list_argv,
+            1,
+            listed.stdout,
+            "PostgreSQL is installed, but no cluster is configured on the NativeDev local port 5432.",
+        )
+
+    version, name, _port, status = default
+    if status.startswith("online"):
+        return subprocess.CompletedProcess(list_argv, 0, listed.stdout, "")
+
+    try:
+        start_argv = [_binary("pg_ctlcluster"), version, name, "start"]
+    except RuntimeError as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
+    return subprocess.run(
+        start_argv,
+        text=True,
+        capture_output=True,
+        timeout=effective_timeout,
+        env=env,
+    )
+
+
 def command_for_operation(request: dict, uid: int) -> list[str]:
     """Validate one structured RPC and build the root-side argv internally."""
     if request.get("protocol") != PROTOCOL_VERSION:
         raise RuntimeError("NativeDev privileged protocol version mismatch")
 
     action = request.get("action")
+    if action == "database.postgresql.ensure_cluster":
+        if set(request).difference({"protocol", "action", "timeout"}):
+            raise RuntimeError("PostgreSQL cluster operation contains unsupported fields")
+        _database_username_for_uid(uid)
+        return []
     if action == "database.delete_all_data":
         if set(request).difference({"protocol", "action", "timeout", "key"}):
             raise RuntimeError("Database reset operation contains unsupported fields")
@@ -995,6 +1105,10 @@ def _execute_database_delete_all_data(request: dict) -> subprocess.CompletedProc
 
 def execute_operation(request: dict, uid: int, timeout: int | None) -> subprocess.CompletedProcess:
     action = request.get("action")
+
+    if action == "database.postgresql.ensure_cluster":
+        command_for_operation(request, uid)
+        return _execute_postgresql_ensure_cluster(timeout)
 
     if action == "database.delete_all_data":
         command_for_operation(request, uid)

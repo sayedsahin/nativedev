@@ -93,6 +93,11 @@ def card() -> Gtk.Box:
 
 def status_pill(text: str, ok: bool | None = None) -> Gtk.Label:
     widget = label(text, "pill")
+    # Gtk.Box gives children FILL vertical alignment by default.  A status
+    # pill beside a multi-line title/subtitle would therefore stretch to the
+    # full row height and make its CSS padding look much larger.  Keep pills
+    # at their natural height regardless of sibling content.
+    widget.set_valign(Gtk.Align.CENTER)
     if ok is True:
         widget.add_css_class("status-ok")
     elif ok is False:
@@ -338,6 +343,13 @@ class Page(Gtk.ScrolledWindow):
         def error(exc):
             self.busy(button, False)
             self.window.set_activity(False, str(exc), error=True)
+            # Mutations can legitimately fail after a partial system change
+            # (for example, APT installation succeeded but post-install database
+            # provisioning failed). Refresh the page on error too so the UI
+            # reflects the real system state instead of leaving a stale Install
+            # button until the user refreshes manually.
+            if after:
+                after()
             return False
 
         self.worker.submit_mutation(
@@ -2318,8 +2330,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.stack.set_visible_child_name(key)
 
     def open_php_page(self) -> None:
-        page = self.pages["php"]
-        page.refresh()
+        # Returning from PHP Extensions/Settings is navigation only. Those
+        # subpages do not mutate the PHP runtime/provider inventory shown on
+        # the parent page, so avoid an unnecessary asynchronous refresh.
         self.stack.set_visible_child_name("php")
 
     def set_activity(self, active: bool, message: str, *, error: bool = False):

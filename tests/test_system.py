@@ -2668,9 +2668,12 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
 
     def test_services_ui_groups_developer_tools_and_puts_php_selector_before_uninstall(self):
         gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
-        self.assertIn('label("SYSTEM SERVICES", "section-title")', gui)
-        self.assertIn('label("SYSTEM TOOLS", "section-title")', gui)
-        self.assertIn('label("DEVELOPER TOOLS", "section-title")', gui)
+        self.assertIn('self._section_panel(\n                "SYSTEM SERVICES"', gui)
+        self.assertIn('self._section_panel(\n                "SYSTEM TOOLS"', gui)
+        self.assertIn('self._section_panel(\n                "DEVELOPER TOOLS"', gui)
+        self.assertIn('section.add_css_class("services-section")', gui)
+        self.assertIn('Generate *.{self.context.config.domain} certificate', gui)
+        self.assertIn('button {\n  min-height: 15px;', (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "style.css").read_text())
         developer_card = gui[gui.index("def _developer_web_tool_card"):gui.index("def _use_default_database_user")]
         self.assertLess(developer_card.index("actions.append(php_dropdown)"), developer_card.index("actions.append(uninstall)"))
 

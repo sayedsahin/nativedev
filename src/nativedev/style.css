@@ -47,6 +47,46 @@ window {
   background: alpha(@theme_fg_color, 0.025);
 }
 
+.services-section {
+  padding: 14px;
+  border: 1px solid alpha(@theme_fg_color, 0.11);
+  /* border-left: 3px solid alpha(@theme_selected_bg_color, 0.55); */
+  border-radius: 14px;
+  background: alpha(@theme_fg_color, 0.018);
+}
+
+.services-section-header {
+  padding: 1px 2px 3px 2px;
+}
+
+.services-section-title {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.services-section-description {
+  font-size: 12px;
+  opacity: 0.62;
+}
+
+.services-section-separator {
+  margin: 0 2px 2px 2px;
+  opacity: 0.55;
+}
+
+.services-section .card {
+  background-color: transparent;
+  padding: 16px;
+  border-bottom: 1px solid alpha(@theme_fg_color, 0.12);
+  border-top: 0;
+  border-left: 0;
+  border-right: 0;
+  border-radius: 0;
+}
+.services-section .card:last-child {
+  border-bottom: 0;
+}
+
 .service-row {
   padding: 9px 0;
   border-top: 1px solid alpha(@theme_fg_color, 0.08);

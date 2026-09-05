@@ -1575,25 +1575,53 @@ class ServicesPage(Page):
             components, developer_tools = data
             self._clear()
 
-            self.list_box.append(label("SYSTEM SERVICES", "section-title"))
+            system_services = self._section_panel(
+                "SYSTEM SERVICES",
+                "Native background services managed through systemd.",
+            )
+            self.list_box.append(system_services)
             for key in ("nginx", "mariadb", "postgresql", "redis", "memcached", "rabbitmq"):
                 state, database = components[key]
-                self.list_box.append(self._service_component_card(state, database))
+                system_services.append(self._service_component_card(state, database))
 
-            self.list_box.append(label("SYSTEM TOOLS", "section-title"))
+            system_tools = self._section_panel(
+                "SYSTEM TOOLS",
+                "System-wide command-line tools installed from trusted package sources.",
+            )
+            self.list_box.append(system_tools)
             for key in ("composer", "mkcert"):
                 state, database = components[key]
-                self.list_box.append(self._service_component_card(state, database))
+                system_tools.append(self._service_component_card(state, database))
 
-            self.list_box.append(label("DEVELOPER TOOLS", "section-title"))
+            developer_tools_box = self._section_panel(
+                "DEVELOPER TOOLS",
+                "Local utilities for database administration, mail testing and development workflows.",
+            )
+            self.list_box.append(developer_tools_box)
             nginx_installed = components["nginx"][0].installed
             for state in developer_tools:
-                self.list_box.append(self._developer_web_tool_card(state, nginx_installed))
+                developer_tools_box.append(self._developer_web_tool_card(state, nginx_installed))
             mailpit_state, mailpit_database = components["mailpit"]
-            self.list_box.append(self._service_component_card(mailpit_state, mailpit_database))
+            developer_tools_box.append(self._service_component_card(mailpit_state, mailpit_database))
             return False
 
         self.worker.submit(collect, done, lambda exc: self.window.set_activity(False, str(exc), error=True))
+
+    @staticmethod
+    def _section_panel(title: str, description: str) -> Gtk.Box:
+        section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        section.add_css_class("services-section")
+
+        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        header.add_css_class("services-section-header")
+        header.append(label(title, "services-section-title"))
+        header.append(label(description, "services-section-description", wrap=True))
+        section.append(header)
+
+        separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        separator.add_css_class("services-section-separator")
+        section.append(separator)
+        return section
 
     def _service_component_card(self, state, database):
         spec = state.spec
@@ -2289,7 +2317,7 @@ class LocalDevPage(Page):
             if data["mkcert"]:
                 trust = Gtk.Button(label="Trust local CA")
                 trust.connect("clicked", lambda *_: self.action(trust, self.context.localdev.trust_mkcert_ca, success_message="Local CA trust configured"))
-                enable = Gtk.Button(label="Generate *.test certificate")
+                enable = Gtk.Button(label=(f"Generate *.{self.context.config.domain} certificate"))
                 enable.add_css_class("suggested-action")
                 enable.connect(
                     "clicked",

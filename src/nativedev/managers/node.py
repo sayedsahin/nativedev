@@ -187,7 +187,10 @@ class NodeManager:
         latest: dict[str, str] = {}
         cleaned = ANSI_RE.sub("", output)
         for raw in cleaned.splitlines():
-            match = re.search(r"(v\d+\.\d+\.\d+).*\(LTS:\s*([^\)]+)\)", raw)
+            match = re.search(
+                r"(v\d+\.\d+.\d+).*?\((?:Latest\s+)?LTS:\s*([^\)]+)\)",
+                raw,
+            )
             if not match:
                 continue
             version, codename = match.group(1), match.group(2).strip()

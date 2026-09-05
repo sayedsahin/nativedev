@@ -42,6 +42,6 @@ class AppContext:
         developer_tools = DeveloperToolManager(runner, apt, php, config)
         services = ServiceManager(runner, apt, systemd)
         localdev = LocalDevManager(runner, apt, systemd, config, php)
-        doctor = Doctor(distro, apt, systemd, php, node, services, localdev)
+        doctor = Doctor(distro, apt, systemd, php, node, developer_tools, services, localdev)
         controller = NativeDevController(php, localdev, node, php_ini, services, database_access, developer_tools)
         return cls(distro, config, runner, apt, systemd, php, php_extensions, php_ini, node, database_access, developer_tools, services, localdev, doctor, controller)

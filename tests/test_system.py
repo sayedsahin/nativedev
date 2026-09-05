@@ -301,6 +301,8 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"foo=bar": "1"}}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"extension": "redis.so"}}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"zend_extension": "xdebug.so"}}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"auto_prepend_file": "/tmp/bootstrap.php"}}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"auto_append_file": "/tmp/footer.php"}}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"memory_limit": "512M"}, "path": "/etc/php/8.4/php.ini"}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.reset", "version": "8.4", "settings": {"memory_limit": "512M"}}))
 
@@ -2188,6 +2190,76 @@ class PhpExtensionManagerTests(unittest.TestCase):
         self.assertIn('self.status.set_text("")', main_window)
 
 
+class DoctorTests(unittest.TestCase):
+    def test_doctor_reports_phpmyadmin_and_adminer_runtime_state(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nativedev.managers.doctor import Doctor
+
+        class Distro:
+            is_debian_family = True
+            pretty_name = "Debian 13"
+
+        class Apt:
+            available = True
+
+        class Systemd:
+            available = True
+
+        class Php:
+            developer_user = "developer"
+            multi_php_repository_name = "Multi-PHP"
+            def multi_php_configured(self): return True
+            def installed_versions(self): return ["8.4"]
+            def fpm_config_ready(self, version): return version == "8.4"
+            def developer_pool_configured(self, version): return version == "8.4"
+
+        class Node:
+            def provider(self): return "nvm"
+
+        class DeveloperTools:
+            def state(self, spec):
+                if spec.key == "phpmyadmin":
+                    return SimpleNamespace(
+                        installed=True, document_root_ready=True, php_version="8.4",
+                        runtime_ready=True, runtime_note="", url="http://phpmyadmin.localhost",
+                    )
+                return SimpleNamespace(
+                    installed=False, document_root_ready=False, php_version="8.4",
+                    runtime_ready=True, runtime_note="", url="http://adminer.localhost",
+                )
+
+        class Services:
+            def state(self, _spec):
+                return SimpleNamespace(installed=True, running=False)
+
+        class LocalDev:
+            config = SimpleNamespace(domain="dev")
+            def dns_ready(self): return True
+            def dns_strategy(self): return "NetworkManager/dnsmasq"
+            def nginx_ready(self): return True
+            def projects(self): return []
+
+        doctor = Doctor(Distro(), Apt(), Systemd(), Php(), Node(), DeveloperTools(), Services(), LocalDev())
+        with patch("nativedev.managers.doctor.shutil.which", return_value="/usr/bin/pkexec"):
+            checks = doctor.run()
+
+        by_name = {item.name: item for item in checks}
+        self.assertTrue(by_name["phpMyAdmin"].ok)
+        self.assertIn("PHP 8.4", by_name["phpMyAdmin"].detail)
+        self.assertIn("http://phpmyadmin.localhost", by_name["phpMyAdmin"].detail)
+        self.assertFalse(by_name["Adminer"].ok)
+        self.assertEqual(by_name["Adminer"].detail, "not installed")
+
+    def test_context_wires_developer_tools_into_doctor(self):
+        context = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "context.py").read_text()
+        self.assertIn(
+            "Doctor(distro, apt, systemd, php, node, developer_tools, services, localdev)",
+            context,
+        )
+
+
 class PhpIniManagerTests(unittest.TestCase):
     def _manager(self, root: Path):
         from nativedev.managers.php_ini import PhpIniManager
@@ -2245,6 +2317,9 @@ class PhpIniManagerTests(unittest.TestCase):
         for directive in ("extension", "zend_extension", "extension_dir"):
             with self.assertRaisesRegex(RuntimeError, "PHP Extensions"):
                 PhpIniManager.validate_setting(directive, "anything")
+        for directive in ("auto_prepend_file", "auto_append_file"):
+            with self.assertRaisesRegex(RuntimeError, "inject PHP files"):
+                PhpIniManager.validate_setting(directive, "/tmp/bootstrap.php")
 
     def test_reads_only_nativedev_owned_override_file(self):
         with tempfile.TemporaryDirectory() as td:

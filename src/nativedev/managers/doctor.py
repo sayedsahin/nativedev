@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from ..services import COMPONENTS, ServiceManager
 from ..system import AptManager, DistroInfo, SystemdManager
+from .developer_tools import DEVELOPER_WEB_TOOLS, DeveloperToolManager
 from .localdev import LocalDevManager
 from .node import NodeManager
 from .php import PhpManager
@@ -25,6 +26,7 @@ class Doctor:
         systemd: SystemdManager,
         php: PhpManager,
         node: NodeManager,
+        developer_tools: DeveloperToolManager,
         services: ServiceManager,
         localdev: LocalDevManager,
     ):
@@ -33,6 +35,7 @@ class Doctor:
         self.systemd = systemd
         self.php = php
         self.node = node
+        self.developer_tools = developer_tools
         self.services = services
         self.localdev = localdev
 
@@ -59,13 +62,35 @@ class Doctor:
                 Check(
                     self.php.developer_pool_configured(version),
                     f"PHP {version} NativeDev developer pool",
-                    f"*.test PHP runs as {self.php.developer_user}",
+                    f"*.{self.localdev.config.domain} PHP runs as {self.php.developer_user}",
                 )
             )
         for spec in COMPONENTS:
             state = self.services.state(spec)
             detail = "running" if state.running else ("installed" if state.installed else "not installed")
             checks.append(Check(state.installed, spec.title, detail))
+
+        for spec in DEVELOPER_WEB_TOOLS:
+            state = self.developer_tools.state(spec)
+            if not state.installed:
+                checks.append(Check(False, spec.title, "not installed"))
+                continue
+
+            problems: list[str] = []
+            if not state.document_root_ready:
+                problems.append("application entry point missing")
+            if not state.php_version:
+                problems.append("no PHP-FPM runtime available")
+            else:
+                if not self.php.fpm_config_ready(state.php_version):
+                    problems.append(f"PHP {state.php_version} FPM configuration missing")
+                elif not self.php.developer_pool_configured(state.php_version):
+                    problems.append(f"PHP {state.php_version} NativeDev developer pool missing")
+            if not state.runtime_ready:
+                problems.append(state.runtime_note or "NativeDev runtime integration needs repair")
+
+            detail = "; ".join(problems) if problems else f"PHP {state.php_version} — {state.url}"
+            checks.append(Check(not problems, spec.title, detail))
         return checks
 
     @staticmethod

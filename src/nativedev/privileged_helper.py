@@ -42,7 +42,9 @@ PHP_PACKAGE_RE = re.compile(r"^php\d+\.\d+(?:-[A-Za-z0-9][A-Za-z0-9.+~_-]*)?$")
 PHP_FPM_PACKAGE_RE = re.compile(r"^php\d+\.\d+-fpm$")
 VERSION_RE = re.compile(r"^\d+\.\d+$")
 PHP_INI_DIRECTIVE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_.]*$")
-PHP_INI_BLOCKED_DIRECTIVES = frozenset({"extension", "zend_extension", "extension_dir"})
+PHP_INI_EXTENSION_LOADING_DIRECTIVES = frozenset({"extension", "zend_extension", "extension_dir"})
+PHP_INI_EXECUTION_HOOK_DIRECTIVES = frozenset({"auto_prepend_file", "auto_append_file"})
+PHP_INI_BLOCKED_DIRECTIVES = PHP_INI_EXTENSION_LOADING_DIRECTIVES | PHP_INI_EXECUTION_HOOK_DIRECTIVES
 PHP_INI_MAX_SETTINGS = 128
 PHP_INI_MAX_DIRECTIVE_LENGTH = 128
 PHP_INI_MAX_VALUE_LENGTH = 4096
@@ -389,8 +391,13 @@ def _php_ini_request_details(request: dict, *, apply: bool) -> tuple[str, dict[s
             raise RuntimeError("PHP INI directive name is required")
         if len(directive) > PHP_INI_MAX_DIRECTIVE_LENGTH or not PHP_INI_DIRECTIVE_RE.fullmatch(directive):
             raise RuntimeError("Invalid PHP INI directive name")
-        if directive.casefold() in PHP_INI_BLOCKED_DIRECTIVES:
+        normalized_directive = directive.casefold()
+        if normalized_directive in PHP_INI_EXTENSION_LOADING_DIRECTIVES:
             raise RuntimeError(f"{directive} is managed by PHP Extensions, not PHP Settings")
+        if normalized_directive in PHP_INI_EXECUTION_HOOK_DIRECTIVES:
+            raise RuntimeError(
+                f"{directive} is blocked because NativeDev PHP Settings must not inject PHP files into every CLI/FPM execution"
+            )
         if not isinstance(value, str):
             raise RuntimeError("PHP INI value must be text")
         # Non-negotiable injection boundary: never strip or normalize these.

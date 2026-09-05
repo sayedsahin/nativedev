@@ -15,11 +15,13 @@ DIRECTIVE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_.]*$")
 MAX_SETTINGS = 128
 MAX_DIRECTIVE_LENGTH = 128
 MAX_VALUE_LENGTH = 4096
-BLOCKED_DIRECTIVES = frozenset({"extension", "zend_extension", "extension_dir"})
+EXTENSION_LOADING_DIRECTIVES = frozenset({"extension", "zend_extension", "extension_dir"})
+EXECUTION_HOOK_DIRECTIVES = frozenset({"auto_prepend_file", "auto_append_file"})
+BLOCKED_DIRECTIVES = EXTENSION_LOADING_DIRECTIVES | EXECUTION_HOOK_DIRECTIVES
 
 # These are suggestions only. NativeDev accepts other syntactically valid PHP
-# directives too, except extension-loading directives which belong exclusively
-# to the PHP Extensions page.
+# directives too, except explicitly blocked extension-loading and global
+# execution-hook directives.
 SUGGESTED_DIRECTIVES: tuple[str, ...] = (
     "memory_limit",
     "max_execution_time",
@@ -93,9 +95,14 @@ class PhpIniManager:
             raise RuntimeError(
                 "PHP INI directive names may contain only letters, numbers, underscores and dots, and must start with a letter"
             )
-        if directive.casefold() in BLOCKED_DIRECTIVES:
+        normalized_directive = directive.casefold()
+        if normalized_directive in EXTENSION_LOADING_DIRECTIVES:
             raise RuntimeError(
                 f"{directive} is managed by PHP Extensions; extension loading cannot be changed from PHP Settings"
+            )
+        if normalized_directive in EXECUTION_HOOK_DIRECTIVES:
+            raise RuntimeError(
+                f"{directive} is blocked because NativeDev PHP Settings must not inject PHP files into every CLI/FPM execution"
             )
         if not isinstance(value, str):
             raise RuntimeError("PHP INI value must be text")

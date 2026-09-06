@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pwd
@@ -14,12 +15,26 @@ import subprocess
 import shutil
 import tempfile
 import tarfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
 PROTOCOL_VERSION = 23
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+
+GITHUB_OWNER = "sayedsahin"
+GITHUB_REPOSITORY = "nativedev"
+GITHUB_LATEST_RELEASE_API = (
+    f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPOSITORY}/releases/latest"
+)
+GITHUB_RELEASE_DOWNLOAD_PREFIX = (
+    f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPOSITORY}/releases/download/"
+)
+GITHUB_RELEASE_VERSION_RE = re.compile(r"^v?(?P<version>\d+\.\d+\.\d+)$")
+GITHUB_RELEASE_DIGEST_RE = re.compile(r"^sha256:(?P<digest>[0-9a-fA-F]{64})$")
+GITHUB_RELEASE_MAX_METADATA = 2 * 1024 * 1024
+GITHUB_RELEASE_MAX_DEB = 64 * 1024 * 1024
 
 MANAGED_FILES = {
     "/etc/apt/sources.list.d/nativedev-sury-php.sources",
@@ -1634,10 +1649,115 @@ def _execute_database_delete_all_data(request: dict) -> subprocess.CompletedProc
     return subprocess.CompletedProcess([], 0, "", "")
 
 
+def _github_latest_native_release() -> tuple[str, str, str, str]:
+    """Return (version, asset_name, asset_url, sha256) for the fixed GitHub repo."""
+    request = urllib.request.Request(
+        GITHUB_LATEST_RELEASE_API,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "NativeDev privileged updater",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = response.read(GITHUB_RELEASE_MAX_METADATA + 1)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise RuntimeError("NativeDev has no published GitHub release yet") from exc
+        raise RuntimeError(f"GitHub release lookup failed: HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"GitHub release lookup failed: {exc}") from exc
+
+    if len(payload) > GITHUB_RELEASE_MAX_METADATA:
+        raise RuntimeError("GitHub release metadata is unexpectedly large")
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("GitHub returned invalid NativeDev release metadata") from exc
+    if not isinstance(data, dict) or data.get("draft") is True or data.get("prerelease") is True:
+        raise RuntimeError("GitHub did not return a stable NativeDev release")
+
+    tag_name = data.get("tag_name")
+    match = GITHUB_RELEASE_VERSION_RE.fullmatch(tag_name.strip()) if isinstance(tag_name, str) else None
+    if match is None:
+        raise RuntimeError("NativeDev GitHub release tag must be vX.Y.Z or X.Y.Z")
+    version = match.group("version")
+    asset_name = f"nativedev_{version}_all.deb"
+
+    assets = data.get("assets")
+    if not isinstance(assets, list):
+        raise RuntimeError("NativeDev GitHub release has no asset list")
+    asset = next(
+        (item for item in assets if isinstance(item, dict) and item.get("name") == asset_name and item.get("state") == "uploaded"),
+        None,
+    )
+    if asset is None:
+        raise RuntimeError(f"NativeDev {version} release is missing {asset_name}")
+
+    asset_url = asset.get("browser_download_url")
+    if not isinstance(asset_url, str) or not asset_url.startswith(GITHUB_RELEASE_DOWNLOAD_PREFIX):
+        raise RuntimeError("NativeDev release asset URL is outside the official GitHub repository")
+    if not asset_url.endswith("/" + asset_name):
+        raise RuntimeError("NativeDev release asset URL does not match the expected package name")
+
+    digest = asset.get("digest")
+    digest_match = GITHUB_RELEASE_DIGEST_RE.fullmatch(digest) if isinstance(digest, str) else None
+    if digest_match is None:
+        raise RuntimeError("NativeDev release asset is missing GitHub's SHA-256 digest")
+    return version, asset_name, asset_url, digest_match.group("digest").lower()
+
+
+def _download_native_release_asset(asset_url: str, destination: Path, expected_sha256: str) -> None:
+    request = urllib.request.Request(asset_url, headers={"User-Agent": "NativeDev privileged updater"})
+    hasher = hashlib.sha256()
+    total = 0
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response, destination.open("wb") as handle:
+            length = response.headers.get("Content-Length")
+            if length:
+                try:
+                    if int(length) > GITHUB_RELEASE_MAX_DEB:
+                        raise RuntimeError("NativeDev release package is unexpectedly large")
+                except ValueError:
+                    pass
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > GITHUB_RELEASE_MAX_DEB:
+                    raise RuntimeError("NativeDev release package is unexpectedly large")
+                handle.write(chunk)
+                hasher.update(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"NativeDev release download failed: {exc}") from exc
+
+    os.chmod(destination, 0o600)
+    if hasher.hexdigest().lower() != expected_sha256:
+        raise RuntimeError("NativeDev release package SHA-256 verification failed")
+
+
+def _deb_field(dpkg_deb: str, package_path: Path, field: str, env: dict[str, str]) -> str:
+    result = subprocess.run(
+        [dpkg_deb, "-f", str(package_path), field],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env=env,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"Unable to inspect NativeDev package field {field}")
+    return result.stdout.strip()
+
+
 def _execute_application_update(timeout: int | None) -> subprocess.CompletedProcess:
-    """Refresh APT metadata and upgrade only the installed NativeDev package."""
+    """Install only the latest verified NativeDev DEB from the fixed GitHub repo."""
     try:
         apt_get = _binary("apt-get")
+        dpkg = _binary("dpkg")
+        dpkg_deb = _binary("dpkg-deb")
         dpkg_query = _binary("dpkg-query")
     except RuntimeError as exc:
         return subprocess.CompletedProcess([], 1, "", str(exc))
@@ -1647,6 +1767,12 @@ def _execute_application_update(timeout: int | None) -> subprocess.CompletedProc
     env["DEBIAN_FRONTEND"] = "noninteractive"
     env["APT_LISTCHANGES_FRONTEND"] = "none"
     env["NEEDRESTART_MODE"] = "a"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+    try:
+        version, asset_name, asset_url, expected_sha256 = _github_latest_native_release()
+    except RuntimeError as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
 
     installed = subprocess.run(
         [dpkg_query, "-W", "-f=${db:Status-Abbrev}\t${Version}", "nativedev"],
@@ -1662,37 +1788,66 @@ def _execute_application_update(timeout: int | None) -> subprocess.CompletedProc
             installed.stdout,
             installed.stderr or "NativeDev is not installed as a Debian/Ubuntu package.",
         )
-
-    refreshed = subprocess.run(
-        [apt_get, "-o", "DPkg::Lock::Timeout=0", "update"],
+    _status, _separator, installed_version = installed.stdout.partition("\t")
+    installed_version = installed_version.strip()
+    newer = subprocess.run(
+        [dpkg, "--compare-versions", version, "gt", installed_version],
         text=True,
         capture_output=True,
-        timeout=timeout,
+        timeout=60,
         env=env,
     )
-    if refreshed.returncode != 0:
-        return refreshed
+    if newer.returncode != 0:
+        return subprocess.CompletedProcess(
+            newer.args, 1, "", f"NativeDev {version} is not newer than installed version {installed_version}."
+        )
 
-    upgraded = subprocess.run(
-        [
-            apt_get,
-            "-o", "DPkg::Lock::Timeout=0",
-            "install",
-            "--only-upgrade",
-            "-y",
-            "nativedev",
-        ],
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        env=env,
-    )
-    if refreshed.stdout:
-        upgraded.stdout = refreshed.stdout + upgraded.stdout
-    if refreshed.stderr:
-        upgraded.stderr = refreshed.stderr + upgraded.stderr
-    return upgraded
+    try:
+        with tempfile.TemporaryDirectory(prefix="nativedev-update-") as temp_dir:
+            package_path = Path(temp_dir) / asset_name
+            _download_native_release_asset(asset_url, package_path, expected_sha256)
 
+            if _deb_field(dpkg_deb, package_path, "Package", env) != "nativedev":
+                raise RuntimeError("Downloaded release asset is not the NativeDev package")
+            if _deb_field(dpkg_deb, package_path, "Version", env) != version:
+                raise RuntimeError("Downloaded NativeDev package version does not match the GitHub release")
+            if _deb_field(dpkg_deb, package_path, "Architecture", env) != "all":
+                raise RuntimeError("Downloaded NativeDev package has an unexpected architecture")
+
+            upgraded = subprocess.run(
+                [
+                    apt_get,
+                    "-o", "DPkg::Lock::Timeout=0",
+                    "install",
+                    "--no-install-recommends",
+                    "-y",
+                    str(package_path),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                env=env,
+            )
+            if upgraded.returncode != 0:
+                return upgraded
+
+            verified = subprocess.run(
+                [dpkg_query, "-W", "-f=${db:Status-Abbrev}\t${Version}", "nativedev"],
+                text=True,
+                capture_output=True,
+                timeout=60,
+                env=env,
+            )
+            if verified.returncode != 0 or verified.stdout.strip() != f"ii \t{version}":
+                return subprocess.CompletedProcess(
+                    verified.args,
+                    1,
+                    upgraded.stdout + verified.stdout,
+                    upgraded.stderr + verified.stderr + "\nNativeDev package verification failed after update.",
+                )
+            return upgraded
+    except RuntimeError as exc:
+        return subprocess.CompletedProcess([], 1, "", str(exc))
 
 def execute_operation(request: dict, uid: int, timeout: int | None) -> subprocess.CompletedProcess:
     action = request.get("action")

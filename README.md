@@ -160,15 +160,15 @@ Run:
 nativedev
 ```
 
-Production release builds can embed a signed NativeDev APT repository by supplying `NATIVEDEV_APT_REPO_URL` and `NATIVEDEV_APT_REPO_KEYRING` to `packaging/build-deb.sh`. The generated DEB refuses to configure an unsigned repository.
+Official packages are distributed as GitHub Release assets from `sayedsahin/nativedev`. The `.deb` is a release artifact; it is not committed to the source repository. When an official version is ready, pushing a matching version tag such as `v0.2.0` triggers `.github/workflows/release.yml`: it validates the tag/source version, runs the test suite, builds `nativedev_<version>_all.deb`, then creates the GitHub Release with that DEB already attached. Until a version tag is pushed there is no public NativeDev release.
 
 ## Application updates
 
-NativeDev has one release channel. When installed as a native package, the application checks the native package metadata in the background at most once every 24 hours. The background probe is read-only and never opens a Polkit prompt. When a newer package candidate is visible, NativeDev shows an update dialog.
+NativeDev has one release channel. When installed as a native package, it checks the public GitHub Releases API for `sayedsahin/nativedev` in the background at most once every 24 hours. The check is unprivileged, read-only, and does not run APT or open a Polkit prompt. If there is no published release yet, NativeDev simply records the check and shows nothing. A newer `vX.Y.Z` release is offered only when it contains the exact Debian asset `nativedev_X.Y.Z_all.deb` and GitHub reports a SHA-256 digest for that asset.
 
-Choosing **Update** performs a fixed semantic privileged operation: NativeDev refreshes APT metadata and upgrades only the `nativedev` package. Package names, repositories, URLs and arbitrary commands are never supplied by the GUI. After the package is replaced, NativeDev offers **Restart NativeDev** so the new application code and privileged helper are loaded together.
+Choosing **Update** still crosses the privileged boundary as the fixed semantic `application.update` action with no client-controlled URL, path, package name, repository, or command. The root helper independently re-queries the same fixed GitHub repository, downloads only the expected NativeDev `.deb`, verifies GitHub's SHA-256 digest and the DEB `Package`, `Version`, and `Architecture` fields, then installs that local package with APT using immediate dpkg-lock failure semantics. After replacement, NativeDev offers **Restart NativeDev** so the new application code and privileged helper are loaded together.
 
-Debian/Ubuntu is the first package backend; the update manager is intentionally backend-oriented so DNF/RPM or Pacman support can be added later without changing the 24-hour UI policy.
+GitHub release discovery is distro-independent. Debian/Ubuntu is currently the implemented package installer backend; future RPM/DNF or Pacman backends can select their own release asset without changing the 24-hour update UI policy.
 
 ## Uninstall
 

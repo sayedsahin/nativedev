@@ -24,7 +24,7 @@ run_root() {
 
 DEB="$("$ROOT/packaging/build-deb.sh" --output-dir "$ROOT/dist")"
 run_root apt-get update
-run_root apt-get install -y "$DEB"
+run_root apt-get install --reinstall -y "$DEB"
 
 # Migrate the old source-copy installer safely. A stale ~/.local/bin/nativedev
 # takes PATH precedence over /usr/bin/nativedev, so remove it only when it is

@@ -1,0 +1,50 @@
+name: Release package
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify release tag matches NativeDev version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(PYTHONPATH=src python3 -c 'from nativedev import __version__; print(__version__)')"
+          tag="${GITHUB_REF_NAME}"
+          tag_version="${tag#v}"
+          if [ "$tag_version" != "$version" ]; then
+            echo "Release tag $tag does not match NativeDev version $version" >&2
+            exit 1
+          fi
+
+      - name: Install test/runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-gi gir1.2-gtk-4.0
+
+      - name: Validate source
+        run: |
+          bash -n install.sh uninstall.sh packaging/build-deb.sh packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm
+          PYTHONPATH=src python3 -m compileall -q src tests
+          PYTHONPATH=src python3 -m unittest discover -s tests -v
+
+      - name: Build Debian package
+        run: ./packaging/build-deb.sh --output-dir dist
+
+      - name: Publish GitHub Release with DEB asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/nativedev_*_all.deb \
+            --verify-tag \
+            --title "NativeDev ${GITHUB_REF_NAME#v}" \
+            --generate-notes

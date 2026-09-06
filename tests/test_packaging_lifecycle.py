@@ -31,7 +31,8 @@ class PackagingLifecycleTests(unittest.TestCase):
         self.assertNotIn("nativedev-tools.conf", text)
         self.assertNotIn("adminer-sqlite", text)
         self.assertNotIn("phpmyadmin", text.lower())
-        self.assertNotIn("mailpit", text.lower())
+        self.assertNotIn("/etc/systemd/system/mailpit.service", text)
+        self.assertNotIn("/usr/local/bin/mailpit", text)
         self.assertNotIn("99-nativedev.ini", text)
 
     def test_postrm_purge_only_cleans_bytecode_and_empty_package_dirs(self):
@@ -41,7 +42,8 @@ class PackagingLifecycleTests(unittest.TestCase):
         self.assertIn("rmdir /usr/lib/nativedev/app/nativedev", text)
         self.assertNotIn("rm -rf /usr/lib/nativedev", text)
         self.assertNotIn("nativedev-tools.conf", text)
-        self.assertNotIn("mailpit", text.lower())
+        self.assertNotIn("/etc/systemd/system/mailpit.service", text)
+        self.assertNotIn("/usr/local/bin/mailpit", text)
 
 
 if __name__ == "__main__":

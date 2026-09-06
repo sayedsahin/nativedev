@@ -2,6 +2,10 @@
 
 ## 0.2.0 - Development architecture update
 
+- Switched NativeDev self-update discovery from APT candidate metadata to the fixed public GitHub Releases repository `sayedsahin/nativedev`. The app performs one unprivileged background check per 24 hours and requires the exact `nativedev_<version>_all.deb` release asset plus GitHub's SHA-256 asset digest before offering an update.
+- Hardened the privileged update path: the GUI still sends only semantic `application.update`; the root helper independently re-queries the fixed GitHub repository, verifies SHA-256 plus DEB package/version/architecture metadata, and installs only the validated NativeDev package.
+- Added a GitHub `release: published` workflow that validates the release tag against the source version, runs tests, builds the architecture-independent `.deb`, and attaches it to the already-created GitHub Release. Release binaries remain outside Git source history.
+
 - NativeDev remains pre-release/unpublished; 0.2.0 formalizes package installation/update/uninstall behavior before the first official release.
 - Application removal cleans only NativeDev core Local Development wildcard DNS and park-directory Nginx routing. Standalone service/tool state remains intact.
 - Developer Tool `.localhost` Nginx integration is persisted independently from Local Development routing.

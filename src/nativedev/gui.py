@@ -19,6 +19,7 @@ from .services import COMPONENTS, ComponentSpec
 from .managers.database_access import DatabaseAdminPasswordRequired, DatabaseAccessManager, DEFAULT_DATABASE_PASSWORD
 from .managers.application import ApplicationUpdate
 from .managers.developer_tools import DEVELOPER_WEB_TOOLS
+from gi.repository import Gtk
 
 
 class Worker:
@@ -2537,6 +2538,58 @@ class DoctorPage(Page):
         self.worker.submit(self.context.doctor.run, done, lambda exc: self.output.get_buffer().set_text(str(exc)))
 
 
+class AboutPage(Page):
+    def __init__(self, window: "MainWindow"):
+        super().__init__(window)
+        self.body.append(page_header("About", "NativeDev application information and updates."))
+
+        info = card()
+        info.append(label("NativeDev", "section-title"))
+        info.append(label(f"Version {__version__}"))
+        info.append(label("NativeDev provides a graphical control plane for a native PHP development stack on Linux."))
+        release_link = Gtk.LinkButton.new_with_label(
+            "https://github.com/sayedsahin/nativedev/",
+            "GitHub: https://github.com/sayedsahin/nativedev"
+        )
+
+        release_link.add_css_class("muted")
+
+        info.append(release_link)
+        self.body.append(info)
+
+        update_card = card()
+
+        self.update_button = Gtk.Button(label="Check for updates")
+        self.update_button.add_css_class("suggested-action")
+        self.update_button.connect("clicked", self._check_updates)
+        update_card.append(self.update_button)
+        self.body.append(update_card)
+
+    def _check_updates(self, *_args):
+        self.update_button.set_sensitive(False)
+        self.window.set_activity(True, "Checking for updates…")
+
+        def done(update):
+            self.update_button.set_sensitive(True)
+            if update is None:
+                self.window.set_activity(False, "NativeDev is up to date.")
+            else:
+                self.window._show_update_dialog(update)
+                self.window.set_activity(False, "Update available.")
+            return False
+
+        def failed(exc):
+            self.update_button.set_sensitive(True)
+            self.window.set_activity(False, str(exc), error=True)
+            return False
+
+        self.worker.submit(
+            lambda: self.context.application.check_for_update(force=True),
+            done,
+            failed,
+        )
+
+
 class MainWindow(Gtk.ApplicationWindow):
     # Only top-level destinations belong in the sidebar. PHP Extensions and PHP
     # Settings are contextual subpages opened from the PHP page.
@@ -2548,6 +2601,7 @@ class MainWindow(Gtk.ApplicationWindow):
         ("node", "Node.js", NodePage),
         ("projects", "Projects", ProjectsPage),
         ("doctor", "Doctor", DoctorPage),
+        ("about", "About", AboutPage),
     )
     PHP_SUBPAGES = (
         ("extensions", PhpExtensionsPage),

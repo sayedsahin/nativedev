@@ -1,6 +1,30 @@
 #!/bin/sh
 set -e
-if command -v update-desktop-database >/dev/null 2>&1; then
-  update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+
+cleanup_python_cache() {
+    APP_ROOT=/usr/lib/nativedev/app
+    [ -d "$APP_ROOT" ] || return 0
+
+    find "$APP_ROOT" -type d -name __pycache__ -prune -exec rm -rf -- {} + 2>/dev/null || true
+    find "$APP_ROOT" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
+}
+
+if [ "${1:-}" = "purge" ]; then
+    # Handles leftovers from older NativeDev packages that created bytecode
+    # before the prerm guard existed.  Only generated Python cache is removed;
+    # persistent NativeDev tool/service state is deliberately left alone.
+    cleanup_python_cache
+
+    # Remove package directories only when they are now genuinely empty.
+    # Never recursively remove /usr/lib/nativedev: unknown files must not be
+    # treated as disposable user/system state.
+    rmdir /usr/lib/nativedev/app/nativedev 2>/dev/null || true
+    rmdir /usr/lib/nativedev/app 2>/dev/null || true
+    rmdir /usr/lib/nativedev 2>/dev/null || true
 fi
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+fi
+
 exit 0

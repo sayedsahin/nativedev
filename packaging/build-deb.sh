@@ -48,6 +48,8 @@ install -d -m 0755 \
   "$STAGE/usr/bin" \
   "$STAGE/usr/lib/nativedev/app" \
   "$STAGE/usr/share/applications" \
+  "$STAGE/usr/share/icons/hicolor/128x128/apps" \
+  "$STAGE/usr/share/icons/hicolor/256x256/apps" \
   "$STAGE/usr/share/polkit-1/actions" \
   "$STAGE/usr/share/doc/nativedev"
 
@@ -63,6 +65,14 @@ install -m 0644 "$ROOT/data/io.github.nativedev.policy" "$STAGE/usr/share/polkit
 install -m 0644 "$ROOT/README.md" "$STAGE/usr/share/doc/nativedev/README.md"
 install -m 0644 "$ROOT/CHANGELOG.md" "$STAGE/usr/share/doc/nativedev/CHANGELOG.md"
 install -m 0644 "$ROOT/LICENSE" "$STAGE/usr/share/doc/nativedev/copyright"
+
+install -m 0644 \
+  "$ROOT/data/icons/hicolor/128x128/nativedev.png" \
+  "$STAGE/usr/share/icons/hicolor/128x128/apps/nativedev.png"
+
+install -m 0644 \
+  "$ROOT/data/icons/hicolor/256x256/apps/nativedev.png" \
+  "$STAGE/usr/share/icons/hicolor/256x256/apps/nativedev.png"
 
 cat > "$STAGE/usr/bin/nativedev" <<'EOF'
 #!/bin/sh

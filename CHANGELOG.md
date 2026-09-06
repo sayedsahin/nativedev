@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased - Native package install/update/uninstall
+## 0.2.0 - Development architecture update
+
+- NativeDev remains pre-release/unpublished; 0.2.0 formalizes package installation/update/uninstall behavior before the first official release.
+- Application removal cleans only NativeDev core Local Development wildcard DNS and park-directory Nginx routing. Standalone service/tool state remains intact.
+- Developer Tool `.localhost` Nginx integration is persisted independently from Local Development routing.
+- Adminer SQLite persistent runtime files live under `/var/lib/nativedev/` instead of the package-owned `/usr/lib/nativedev/` tree.
+
+### Native package install/update/uninstall
 - Replaced the legacy per-user source-copy installer with a native Debian package builder. NativeDev itself is packaged as `Architecture: all`; distro-specific third-party binaries remain architecture-aware at their own install boundary.
 - Added a Linux-backend-oriented application update manager. Debian/Ubuntu currently uses APT; the GTK app performs a read-only background update check at most once every 24 hours and shows a dialog only when a newer candidate exists.
 - Added the fixed semantic `application.update` privileged operation. The root helper refreshes APT metadata and upgrades only the installed `nativedev` package; the client cannot choose a package name, repository, URL or command. Privileged RPC advanced to protocol 23.

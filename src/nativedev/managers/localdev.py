@@ -13,15 +13,6 @@ from pathlib import Path
 from ..config import AppConfig, STATE_DIR
 from ..system import AptManager, CommandRunner, SystemdManager
 from .php import PhpManager
-from .developer_tools import (
-    ADMINER_SQLITE_ENTRYPOINT,
-    ADMINER_SQLITE_HOSTNAME,
-    ADMINER_SQLITE_MARKER,
-    DEVELOPER_TOOL_BY_KEY,
-    DEVELOPER_WEB_TOOLS,
-    developer_tool_hostname,
-)
-
 
 NGINX_SITE = Path("/etc/nginx/sites-available/nativedev-sites.conf")
 NGINX_ENABLED = Path("/etc/nginx/sites-enabled/nativedev-sites.conf")
@@ -285,9 +276,13 @@ class LocalDevManager:
             temp = Path(temp_dir)
             nm_conf = temp / "nativedev-dns.conf"
             nm_dnsmasq = temp / "nativedev-test.conf"
-            nm_conf.write_text("[main]\ndns=dnsmasq\n", encoding="utf-8")
+            nm_conf.write_text(
+                "# Managed by NativeDev Local Development\n[main]\ndns=dnsmasq\n",
+                encoding="utf-8",
+            )
             nm_dnsmasq.write_text(
-                f"address=/.{self.config.domain}/127.0.0.1\n", encoding="utf-8"
+                f"# Managed by NativeDev Local Development\naddress=/.{self.config.domain}/127.0.0.1\n",
+                encoding="utf-8",
             )
             self.runner.run(["mkdir", "-p", str(NM_CONF.parent), str(NM_DNSMASQ.parent)], privileged=True, check=True)
 
@@ -384,134 +379,6 @@ class LocalDevManager:
                 )
             routes[host] = project
         return routes
-
-    def _developer_tool_php(self, key: str, installed_versions: set[str], default_version: str) -> str:
-        preference = self.config.developer_tools.get(key, {})
-        selected = preference.get("php", "") if isinstance(preference, dict) else ""
-        return selected if selected in installed_versions else default_version
-
-    @staticmethod
-    def _adminer_sqlite_managed() -> bool:
-        path = ADMINER_SQLITE_ENTRYPOINT
-        if not path.is_file() or path.is_symlink():
-            return False
-        try:
-            return ADMINER_SQLITE_MARKER in path.read_text(encoding="utf-8", errors="strict")
-        except (OSError, UnicodeError):
-            return False
-
-    def _render_adminer_single_file_server(self, host: str, script_path: Path, version: str) -> str:
-        socket_value = f"unix:{self.php.developer_socket_path(version)}"
-        backend = self._nginx_quote(socket_value)
-        script = self._nginx_quote(str(script_path))
-        return f"""server {{
-    listen 80;
-    listen [::]:80;
-    server_name {host};
-
-    allow 127.0.0.1;
-    allow ::1;
-    deny all;
-
-    location = / {{
-        include fastcgi_params;
-        fastcgi_pass {backend};
-        fastcgi_param SCRIPT_FILENAME {script};
-        fastcgi_param SCRIPT_NAME /adminer.php;
-        fastcgi_param HTTPS off;
-    }}
-
-    location = /adminer.php {{
-        include fastcgi_params;
-        fastcgi_pass {backend};
-        fastcgi_param SCRIPT_FILENAME {script};
-        fastcgi_param SCRIPT_NAME /adminer.php;
-        fastcgi_param HTTPS off;
-    }}
-
-    location / {{
-        return 404;
-    }}
-}}
-"""
-
-    def _render_developer_tool_servers(self, default_version: str, installed_versions: set[str]) -> list[str]:
-        if not self.apt:
-            return []
-        blocks: list[str] = []
-        for spec in DEVELOPER_WEB_TOOLS:
-            if not self.apt.is_installed(spec.package):
-                continue
-            version = self._developer_tool_php(spec.key, installed_versions, default_version)
-            if not version:
-                continue
-            host = developer_tool_hostname(spec.key)
-            socket_value = f"unix:{self.php.developer_socket_path(version)}"
-            backend = self._nginx_quote(socket_value)
-
-            if spec.key == "adminer":
-                # Debian/Ubuntu ship a compiled single-file Adminer. The normal
-                # endpoint and the optional SQLite wrapper both execute the
-                # distro-owned Adminer core without serving its source tree.
-                blocks.append(
-                    self._render_adminer_single_file_server(
-                        host, spec.document_root / spec.entrypoint, version
-                    )
-                )
-                continue
-
-            root = self._nginx_quote(str(spec.document_root))
-            blocks.append(
-                f"""server {{
-    listen 80;
-    listen [::]:80;
-    server_name {host};
-
-    allow 127.0.0.1;
-    allow ::1;
-    deny all;
-
-    root {root};
-    index index.php index.html;
-
-    location / {{
-        try_files $uri $uri/ /index.php?$query_string;
-    }}
-
-    # Static assets must never fall back to index.php. Returning HTML for a
-    # missing CSS/JS path makes browsers reject the response on MIME grounds.
-    location ~* \\.(?:css|js|map|png|gif|jpe?g|svg|ico|webp|woff2?|ttf)$ {{
-        try_files $uri =404;
-        access_log off;
-    }}
-
-    location ~ \\.php$ {{
-        try_files $uri =404;
-        include fastcgi_params;
-        fastcgi_pass {backend};
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        fastcgi_param HTTPS off;
-        # Distro phpMyAdmin is an application dependency, not user project
-        # code. Do not expose vendor/dependency deprecation notices in-page.
-        fastcgi_param PHP_ADMIN_VALUE "display_errors=Off\\nerror_reporting=E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED";
-    }}
-
-    location ~ /\\. {{
-        deny all;
-    }}
-}}
-"""
-            )
-        adminer = DEVELOPER_TOOL_BY_KEY["adminer"]
-        if self.apt.is_installed(adminer.package) and self._adminer_sqlite_managed():
-            version = self._developer_tool_php("adminer", installed_versions, default_version)
-            if version:
-                blocks.append(
-                    self._render_adminer_single_file_server(
-                        ADMINER_SQLITE_HOSTNAME, ADMINER_SQLITE_ENTRYPOINT, version
-                    )
-                )
-        return blocks
 
     def https_ready(self) -> bool:
         """Return True only when HTTPS is enabled *and* both TLS files exist."""
@@ -624,7 +491,6 @@ class LocalDevManager:
                 "",
                 *php_map,
                 "",
-                *self._render_developer_tool_servers(default_version, installed),
                 server,
             ]
         )

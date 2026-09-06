@@ -1,5 +1,13 @@
 #!/bin/sh
 set -e
+
+# 0.2.0 separates persistent service/tool integrations from the removable
+# Local Development router and moves generated Adminer SQLite state out of the
+# package-owned /usr/lib tree. The migration is idempotent and best-effort.
+if [ -f /usr/lib/nativedev/app/nativedev/package_lifecycle.py ]; then
+  PYTHONPATH=/usr/lib/nativedev/app /usr/bin/python3 -m nativedev.package_lifecycle migrate || true
+fi
+
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
 fi

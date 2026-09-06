@@ -63,9 +63,13 @@ class NativeDevController:
             self.application.update()
 
     def _reconcile_managed_nginx(self) -> None:
-        """Refresh NativeDev-owned Nginx state without creating it implicitly."""
-        if self.localdev.nginx_managed() and shutil.which("nginx"):
+        """Refresh independently managed LocalDev and Developer Tool Nginx state."""
+        if not shutil.which("nginx"):
+            return
+        if self.localdev.nginx_managed():
             self.localdev.configure_nginx_sites()
+        if self.developer_tools is not None and self.developer_tools.nginx_managed():
+            self.developer_tools.configure_nginx()
 
     def update_localdev_settings(self, park_dir: str, domain: str) -> None:
         """Persist Local Development settings and reconcile derived infrastructure.
@@ -185,10 +189,10 @@ class NativeDevController:
             self.php.ensure_developer_pool(version)
             self.developer_tools.install(spec, version)
             try:
-                self.localdev.configure_nginx_sites()
+                self.developer_tools.configure_nginx()
             except Exception as exc:
                 raise RuntimeError(
-                    f"{spec.title} was installed, but NativeDev Nginx integration failed: {exc}"
+                    f"{spec.title} was installed, but its persistent localhost Nginx integration failed: {exc}"
                 ) from exc
 
     def uninstall_developer_tool(self, spec: DeveloperToolSpec) -> None:
@@ -197,10 +201,10 @@ class NativeDevController:
                 raise RuntimeError("Developer Tool manager is not available")
             self.developer_tools.uninstall(spec)
             try:
-                self._reconcile_managed_nginx()
+                self.developer_tools.configure_nginx()
             except Exception as exc:
                 raise RuntimeError(
-                    f"{spec.title} was uninstalled, but NativeDev Nginx reconciliation failed: {exc}"
+                    f"{spec.title} was uninstalled, but persistent localhost Nginx reconciliation failed: {exc}"
                 ) from exc
 
     def repair_developer_tool(self, spec: DeveloperToolSpec) -> None:
@@ -208,8 +212,8 @@ class NativeDevController:
             if self.developer_tools is None:
                 raise RuntimeError("Developer Tool manager is not available")
             self.developer_tools.reconcile_runtime(spec)
-            if self.localdev.nginx_managed() and shutil.which("nginx"):
-                self.localdev.configure_nginx_sites()
+            if shutil.which("nginx"):
+                self.developer_tools.configure_nginx()
 
     def set_developer_tool_php(self, spec: DeveloperToolSpec, version: str) -> None:
         with self._mutation_lock:
@@ -221,7 +225,7 @@ class NativeDevController:
             self.php.ensure_developer_pool(version)
             self.developer_tools.set_selected_php(spec.key, version)
             try:
-                self.localdev.configure_nginx_sites()
+                self.developer_tools.configure_nginx()
             except Exception as exc:
                 rollback_error = None
                 try:
@@ -229,7 +233,7 @@ class NativeDevController:
                         self.developer_tools.set_selected_php(spec.key, previous_selected)
                     else:
                         self.developer_tools.clear_selected_php(spec.key)
-                    self.localdev.configure_nginx_sites()
+                    self.developer_tools.configure_nginx()
                 except Exception as rollback_exc:
                     rollback_error = rollback_exc
                 if rollback_error is not None:
@@ -252,10 +256,10 @@ class NativeDevController:
             self.php.ensure_developer_pool(state.php_version)
             self.developer_tools.install_adminer_sqlite()
             try:
-                self.localdev.configure_nginx_sites()
+                self.developer_tools.configure_nginx()
             except Exception as exc:
                 raise RuntimeError(
-                    f"Adminer SQLite was installed, but NativeDev Nginx integration failed: {exc}"
+                    f"Adminer SQLite was installed, but persistent localhost Nginx integration failed: {exc}"
                 ) from exc
 
     def uninstall_adminer_sqlite(self) -> None:
@@ -264,10 +268,10 @@ class NativeDevController:
                 raise RuntimeError("Developer Tool manager is not available")
             self.developer_tools.uninstall_adminer_sqlite()
             try:
-                self._reconcile_managed_nginx()
+                self.developer_tools.configure_nginx()
             except Exception as exc:
                 raise RuntimeError(
-                    f"Adminer SQLite was uninstalled, but NativeDev Nginx reconciliation failed: {exc}"
+                    f"Adminer SQLite was uninstalled, but persistent localhost Nginx reconciliation failed: {exc}"
                 ) from exc
 
     def repair_adminer_sqlite(self) -> None:
@@ -281,8 +285,8 @@ class NativeDevController:
                 raise RuntimeError("Adminer does not currently have an available PHP-FPM runtime")
             self.php.ensure_developer_pool(state.php_version)
             self.developer_tools.reconcile_adminer_sqlite()
-            if self.localdev.nginx_managed() and shutil.which("nginx"):
-                self.localdev.configure_nginx_sites()
+            if shutil.which("nginx"):
+                self.developer_tools.configure_nginx()
 
     def use_existing_database_access(self, key: str, password: str):
         with self._mutation_lock:

@@ -85,6 +85,7 @@ Description: Linux-native PHP development environment manager
 EOF
 
 install -m 0755 "$ROOT/packaging/debian/postinst" "$STAGE/DEBIAN/postinst"
+install -m 0755 "$ROOT/packaging/debian/prerm" "$STAGE/DEBIAN/prerm"
 install -m 0755 "$ROOT/packaging/debian/postrm" "$STAGE/DEBIAN/postrm"
 
 # Production release builds can embed the signed NativeDev APT source without

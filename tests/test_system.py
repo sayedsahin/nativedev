@@ -2608,8 +2608,9 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
             manager.set_selected_php("adminer", "8.3")
             self.assertEqual(manager.effective_php("adminer"), "8.3")
 
-    def test_nginx_renders_developer_tool_hosts_on_fixed_localhost_domain(self):
+    def test_developer_tool_nginx_is_persistent_and_independent_from_local_tld(self):
         from nativedev.config import AppConfig
+        from nativedev.managers.developer_tools import DeveloperToolManager
         from nativedev.managers.localdev import LocalDevManager
 
         class Apt:
@@ -2622,8 +2623,10 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
                 domain="test",
                 developer_tools={"phpmyadmin": {"php": "8.3"}},
             )
-            manager = LocalDevManager(None, Apt(), None, config, StubPhp(default="8.4", installed=["8.4", "8.3"]))
-            rendered = manager.render_nginx()
+            php = StubPhp(default="8.4", installed=["8.4", "8.3"])
+            tools = DeveloperToolManager(None, Apt(), php, config)
+            rendered = tools.render_nginx()
+            self.assertIn("# Managed by NativeDev Developer Tools v1", rendered)
             self.assertIn("server_name phpmyadmin.localhost;", rendered)
             self.assertIn("server_name adminer.localhost;", rendered)
             self.assertIn('root "/usr/share/phpmyadmin";', rendered)
@@ -2631,8 +2634,13 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
             self.assertIn('fastcgi_pass "unix:/run/php/php8.3-fpm-nativedev-1000.sock";', rendered)
             self.assertIn('fastcgi_pass "unix:/run/php/php8.4-fpm-nativedev-1000.sock";', rendered)
 
+            localdev = LocalDevManager(None, Apt(), None, config, php)
+            local_rendered = localdev.render_nginx()
+            self.assertNotIn("phpmyadmin.localhost", local_rendered)
+            self.assertNotIn("adminer.localhost", local_rendered)
+
             config.domain = "dev"
-            rendered = manager.render_nginx()
+            rendered = tools.render_nginx()
             self.assertIn("server_name phpmyadmin.localhost;", rendered)
             self.assertIn("server_name adminer.localhost;", rendered)
             self.assertNotIn("server_name phpmyadmin.dev;", rendered)
@@ -2672,7 +2680,7 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
 
     def test_nginx_uses_compiled_adminer_and_keeps_developer_tools_http_only(self):
         from nativedev.config import AppConfig
-        from nativedev.managers.localdev import LocalDevManager
+        from nativedev.managers.developer_tools import DeveloperToolManager
 
         class Apt:
             def is_installed(self, package):
@@ -2680,7 +2688,7 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             config = AppConfig(park_dir=td, domain="test", https_enabled=True)
-            manager = LocalDevManager(None, Apt(), None, config, StubPhp())
+            manager = DeveloperToolManager(None, Apt(), StubPhp(), config)
             rendered = manager.render_nginx()
             adminer_start = rendered.index("server_name adminer.localhost;")
             next_server = rendered.find("server {", adminer_start)
@@ -2838,9 +2846,11 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
             def candidate(self, package): return "1.0"
 
         class Php:
+            developer_user = "developer"
             def installed_fpm_versions(self): return ["8.4", "8.3"]
             def default_fpm_version(self): return "8.4"
             def fpm_config_ready(self, version): return True
+            def developer_socket_path(self, version): return Path(f"/run/php/php{version}-fpm-nativedev-1000.sock")
 
         class Runner:
             def run(self, argv, **_kwargs):
@@ -2850,7 +2860,9 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             wrapper = Path(td) / "index.php"
-            with patch.object(module, "ADMINER_SQLITE_ENTRYPOINT", wrapper):
+            nginx = Path(td) / "nativedev-tools.conf"
+            with patch.object(module, "ADMINER_SQLITE_ENTRYPOINT", wrapper), \
+                 patch.object(module, "DEVELOPER_TOOLS_NGINX", nginx):
                 manager = DeveloperToolManager(Runner(), Apt(set()), Php(), Config())
                 state = manager.adminer_sqlite_state()
                 self.assertFalse(state.installable)
@@ -2867,6 +2879,12 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
                     module.ADMINER_SQLITE_MARKER + "\n// NativeDev Adminer major: 5\n",
                     encoding="utf-8",
                 )
+                nginx.write_text(
+                    module.DEVELOPER_TOOLS_NGINX_MARKER
+                    + "\nserver_name adminer-sqlite.localhost;\n"
+                    + "unix:/run/php/php8.3-fpm-nativedev-1000.sock\n",
+                    encoding="utf-8",
+                )
                 state = manager.adminer_sqlite_state()
                 self.assertTrue(state.installed)
                 self.assertTrue(state.runtime_ready)
@@ -2874,8 +2892,8 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
     def test_nginx_adminer_sqlite_is_fixed_localhost_and_inherits_adminer_php(self):
         from unittest.mock import patch
         from nativedev.config import AppConfig
-        import nativedev.managers.localdev as localdev_module
-        from nativedev.managers.localdev import LocalDevManager
+        import nativedev.managers.developer_tools as tools_module
+        from nativedev.managers.developer_tools import DeveloperToolManager
 
         class Apt:
             def is_installed(self, package):
@@ -2889,14 +2907,13 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
                 domain="dev",
                 developer_tools={"adminer": {"php": "8.3"}},
             )
-            with patch.object(localdev_module, "ADMINER_SQLITE_ENTRYPOINT", wrapper):
-                manager = LocalDevManager(None, Apt(), None, config, StubPhp(default="8.4", installed=["8.4", "8.3"]))
+            with patch.object(tools_module, "ADMINER_SQLITE_ENTRYPOINT", wrapper):
+                manager = DeveloperToolManager(None, Apt(), StubPhp(default="8.4", installed=["8.4", "8.3"]), config)
                 rendered = manager.render_nginx()
 
             self.assertIn("server_name adminer-sqlite.localhost;", rendered)
             sqlite_start = rendered.index("server_name adminer-sqlite.localhost;")
-            sqlite_end = rendered.find("server {", sqlite_start)
-            sqlite_block = rendered[sqlite_start: sqlite_end if sqlite_end != -1 else len(rendered)]
+            sqlite_block = rendered[sqlite_start:]
             self.assertIn(str(wrapper), sqlite_block)
             self.assertIn('fastcgi_pass "unix:/run/php/php8.3-fpm-nativedev-1000.sock";', sqlite_block)
             self.assertIn("allow 127.0.0.1;", sqlite_block)
@@ -3081,6 +3098,7 @@ class NativePackageWorkflowTests(unittest.TestCase):
         self.assertIn("Architecture: all", script)
         self.assertIn("/usr/lib/nativedev/privileged_helper.py", script)
         self.assertIn("dpkg-deb --root-owner-group --build", script)
+        self.assertIn('packaging/debian/prerm', script)
         self.assertIn("NATIVEDEV_APT_REPO_KEYRING", script)
         self.assertIn("Signed-By: /usr/share/keyrings/nativedev-archive-keyring.gpg", script)
 
@@ -3098,6 +3116,7 @@ class NativePackageWorkflowTests(unittest.TestCase):
         self.assertNotIn("/var/lib/mysql", script)
         self.assertNotIn("/var/lib/postgresql", script)
         self.assertIn("intentionally preserved", script)
+        self.assertIn("wildcard DNS and park-directory Nginx routing", script)
 
     def test_gui_starts_background_update_check_and_shows_dialog(self):
         gui = (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "gui.py").read_text()
@@ -3107,3 +3126,124 @@ class NativePackageWorkflowTests(unittest.TestCase):
         self.assertIn('dialog.add_button("Later"', gui)
         self.assertIn('dialog.add_button("Update"', gui)
         self.assertIn('dialog.add_button("Restart NativeDev"', gui)
+
+class PackageLifecycleArchitectureTests(unittest.TestCase):
+    def test_version_is_0_2_0_before_first_official_release(self):
+        import nativedev
+        root = Path(__file__).resolve().parents[1]
+        self.assertEqual(nativedev.__version__, "0.2.0")
+        self.assertIn('version = "0.2.0"', (root / "pyproject.toml").read_text())
+        self.assertIn("pre-release MVP", (root / "README.md").read_text())
+
+    def test_localdev_cleanup_removes_only_dns_and_park_router(self):
+        from unittest.mock import patch
+        import nativedev.package_lifecycle as lifecycle
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            nm_conf = base / "etc/NetworkManager/conf.d/nativedev-dns.conf"
+            nm_dns = base / "etc/NetworkManager/dnsmasq.d/nativedev-test.conf"
+            site = base / "etc/nginx/sites-available/nativedev-sites.conf"
+            enabled = base / "etc/nginx/sites-enabled/nativedev-sites.conf"
+            tools = base / "etc/nginx/conf.d/nativedev-tools.conf"
+            php_ini = base / "etc/php/8.4/mods-available/nativedev.ini"
+            mailpit = base / "etc/systemd/system/mailpit.service"
+            cert = base / "etc/nginx/nativedev/nativedev.pem"
+            for path in (nm_conf, nm_dns, site, tools, php_ini, mailpit, cert):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            nm_conf.write_text(lifecycle.DNS_MARKER + "\n[main]\ndns=dnsmasq\n")
+            nm_dns.write_text(lifecycle.DNS_MARKER + "\naddress=/.test/127.0.0.1\n")
+            site.write_text(lifecycle.LOCALDEV_NGINX_MARKER + "\nserver {}\n")
+            enabled.parent.mkdir(parents=True, exist_ok=True)
+            enabled.symlink_to(site)
+            tools.write_text(lifecycle.TOOLS_NGINX_MARKER + "\nserver_name adminer.localhost;\n")
+            php_ini.write_text("memory_limit=512M\n")
+            mailpit.write_text("# Managed by NativeDev\n")
+            cert.write_text("certificate\n")
+
+            with patch.object(lifecycle, "NM_CONF", nm_conf), \
+                 patch.object(lifecycle, "NM_DNSMASQ", nm_dns), \
+                 patch.object(lifecycle, "LOCALDEV_NGINX_SITE", site), \
+                 patch.object(lifecycle, "LOCALDEV_NGINX_ENABLED", enabled), \
+                 patch.object(lifecycle, "_reload_networkmanager_dns") as reload_dns, \
+                 patch.object(lifecycle, "_nginx_validate_and_reload") as reload_nginx:
+                lifecycle.cleanup_localdev()
+
+            self.assertFalse(nm_conf.exists())
+            self.assertFalse(nm_dns.exists())
+            self.assertFalse(site.exists())
+            self.assertFalse(enabled.exists())
+            self.assertTrue(tools.exists())
+            self.assertTrue(php_ini.exists())
+            self.assertTrue(mailpit.exists())
+            self.assertTrue(cert.exists())
+            reload_dns.assert_called_once()
+            reload_nginx.assert_called_once()
+
+    def test_0_2_0_migration_moves_sqlite_wrapper_and_splits_localhost_nginx(self):
+        from unittest.mock import patch
+        import nativedev.package_lifecycle as lifecycle
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            legacy = base / "etc/nginx/sites-available/nativedev-sites.conf"
+            tools = base / "etc/nginx/conf.d/nativedev-tools.conf"
+            old_wrapper = base / "usr/lib/nativedev/adminer-sqlite/index.php"
+            new_wrapper = base / "var/lib/nativedev/adminer-sqlite/index.php"
+            legacy.parent.mkdir(parents=True)
+            old_wrapper.parent.mkdir(parents=True)
+            legacy.write_text(
+                lifecycle.LOCALDEV_NGINX_MARKER
+                + "\nmap $host $x { default y; }\n"
+                + "server {\n    server_name phpmyadmin.localhost;\n    location / { return 200; }\n}\n"
+                + "server {\n    server_name adminer.localhost;\n    location / { return 200; }\n}\n"
+                + f"server {{\n    server_name adminer-sqlite.localhost;\n    fastcgi_param SCRIPT_FILENAME {old_wrapper};\n}}\n"
+                + "server {\n    server_name ~^.+\\.test$;\n    location / { return 200; }\n}\n"
+            )
+            old_wrapper.write_text(lifecycle.ADMINER_SQLITE_MARKER + "\n<?php\n")
+
+            with patch.object(lifecycle, "LOCALDEV_NGINX_SITE", legacy), \
+                 patch.object(lifecycle, "TOOLS_NGINX", tools), \
+                 patch.object(lifecycle, "OLD_ADMINER_SQLITE", old_wrapper), \
+                 patch.object(lifecycle, "OLD_ADMINER_SQLITE_ROOT", old_wrapper.parent), \
+                 patch.object(lifecycle, "NEW_ADMINER_SQLITE", new_wrapper), \
+                 patch.object(lifecycle.shutil, "which", return_value=None), \
+                 patch.object(lifecycle, "_nginx_validate_and_reload"):
+                lifecycle.migrate()
+
+            self.assertFalse(old_wrapper.exists())
+            self.assertTrue(new_wrapper.exists())
+            self.assertIn(lifecycle.ADMINER_SQLITE_MARKER, new_wrapper.read_text())
+            tool_text = tools.read_text()
+            self.assertIn(lifecycle.TOOLS_NGINX_MARKER, tool_text)
+            self.assertIn("phpmyadmin.localhost", tool_text)
+            self.assertIn("adminer.localhost", tool_text)
+            self.assertIn("adminer-sqlite.localhost", tool_text)
+            self.assertIn(str(new_wrapper), tool_text)
+            self.assertNotIn("/usr/lib/nativedev/adminer-sqlite/index.php", tool_text)
+            local_text = legacy.read_text()
+            self.assertNotIn("phpmyadmin.localhost", local_text)
+            self.assertNotIn("adminer.localhost", local_text)
+            self.assertIn("~^.+\\.test$", local_text)
+
+    def test_package_prerm_cleans_localdev_only_on_remove_not_upgrade(self):
+        root = Path(__file__).resolve().parents[1]
+        prerm = (root / "packaging" / "debian" / "prerm").read_text()
+        self.assertIn('[ "$1" = "remove" ]', prerm)
+        self.assertNotIn('[ "$1" = "upgrade" ]', prerm)
+        self.assertIn("cleanup-localdev", prerm)
+        self.assertNotIn("mailpit", prerm.lower())
+        self.assertNotIn("nativedev.ini", prerm)
+        self.assertNotIn("nativedev-tools.conf", prerm)
+
+    def test_persistent_developer_tool_state_is_outside_package_owned_usr_lib(self):
+        from nativedev.managers.developer_tools import ADMINER_SQLITE_ENTRYPOINT, DEVELOPER_TOOLS_NGINX
+        self.assertEqual(str(ADMINER_SQLITE_ENTRYPOINT), "/var/lib/nativedev/adminer-sqlite/index.php")
+        self.assertEqual(str(DEVELOPER_TOOLS_NGINX), "/etc/nginx/conf.d/nativedev-tools.conf")
+        self.assertFalse(str(ADMINER_SQLITE_ENTRYPOINT).startswith("/usr/lib/nativedev/"))
+
+    def test_helper_allows_only_fixed_persistent_tools_nginx_path(self):
+        import nativedev.privileged_helper as helper
+        self.assertIn("/etc/nginx/conf.d/nativedev-tools.conf", helper.MANAGED_FILES)
+        self.assertTrue(helper._installable_file("/etc/nginx/conf.d/nativedev-tools.conf", 1000))
+        self.assertFalse(helper._installable_file("/etc/nginx/conf.d/arbitrary.conf", 1000))

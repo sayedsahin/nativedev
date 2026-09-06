@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+# NativeDev is a service-management control plane. Removing the application
+# tears down only its two core Local Development integrations: wildcard DNS
+# and the park-directory wildcard Nginx router. Standalone tools/services and
+# their configuration deliberately continue working.
+if [ "$1" = "remove" ]; then
+  if [ -f /usr/lib/nativedev/app/nativedev/package_lifecycle.py ]; then
+    PYTHONPATH=/usr/lib/nativedev/app /usr/bin/python3 -m nativedev.package_lifecycle cleanup-localdev || true
+  fi
+fi
+
+exit 0

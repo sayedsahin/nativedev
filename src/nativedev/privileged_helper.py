@@ -27,6 +27,7 @@ MANAGED_FILES = {
     "/etc/NetworkManager/dnsmasq.d/nativedev-test.conf",
     "/etc/nginx/sites-available/nativedev-sites.conf",
     "/etc/nginx/sites-enabled/nativedev-sites.conf",
+    "/etc/nginx/conf.d/nativedev-tools.conf",
     "/etc/nginx/nativedev/nativedev.pem",
     "/etc/nginx/nativedev/nativedev-key.pem",
 }
@@ -55,7 +56,7 @@ PHPMYADMIN_RUNTIME_ROOT = Path("/var/lib/nativedev/phpmyadmin")
 PHPMYADMIN_CONFIG_MARKER = "// Managed by NativeDev. Manual edits may be replaced."
 ADMINER_ENTRYPOINT = Path("/usr/share/adminer/adminer.php")
 ADMINER_PLUGIN_ROOT = Path("/usr/share/adminer/plugins")
-ADMINER_SQLITE_ROOT = Path("/usr/lib/nativedev/adminer-sqlite")
+ADMINER_SQLITE_ROOT = Path("/var/lib/nativedev/adminer-sqlite")
 ADMINER_SQLITE_ENTRYPOINT = ADMINER_SQLITE_ROOT / "index.php"
 ADMINER_SQLITE_MARKER = "// Managed by NativeDev: Adminer SQLite"
 # Fixed local-development password requested by NativeDev: nativedev. Only the
@@ -260,6 +261,7 @@ def _installable_file(value: str, uid: int | None = None) -> bool:
         "/etc/NetworkManager/conf.d/nativedev-dns.conf",
         "/etc/NetworkManager/dnsmasq.d/nativedev-test.conf",
         "/etc/nginx/sites-available/nativedev-sites.conf",
+        "/etc/nginx/conf.d/nativedev-tools.conf",
         "/etc/nginx/nativedev/nativedev.pem",
         "/etc/nginx/nativedev/nativedev-key.pem",
     }:

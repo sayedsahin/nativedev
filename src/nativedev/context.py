@@ -41,7 +41,7 @@ class AppContext:
         node = NodeManager(runner, apt)
         database_access = DatabaseAccessManager(runner)
         application = ApplicationManager(runner, distro)
-        developer_tools = DeveloperToolManager(runner, apt, php, config)
+        developer_tools = DeveloperToolManager(runner, apt, php, config, systemd)
         services = ServiceManager(runner, apt, systemd)
         localdev = LocalDevManager(runner, apt, systemd, config, php)
         doctor = Doctor(distro, apt, systemd, php, node, developer_tools, services, localdev)

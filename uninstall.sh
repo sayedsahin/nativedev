@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 run_root() {
   if [ "$(id -u)" -eq 0 ]; then
     "$@"
@@ -17,7 +19,11 @@ run_root() {
 if command -v dpkg-query >/dev/null 2>&1 && dpkg-query -W -f='${db:Status-Abbrev}' nativedev 2>/dev/null | grep -q '^ii '; then
   run_root apt-get remove -y nativedev
 else
-  # Backward-compatible cleanup for the old source-copy installer.
+  # Backward-compatible cleanup for the old source-copy installer. Remove only
+  # the two core Local Development integrations, matching the native package.
+  if [ -f "$ROOT/src/nativedev/package_lifecycle.py" ]; then
+    run_root env PYTHONPATH="$ROOT/src" python3 -m nativedev.package_lifecycle cleanup-localdev || true
+  fi
   rm -rf "$HOME/.local/share/nativedev/src"
   if [ -f "$HOME/.local/bin/nativedev" ] && grep -q '/\.local/share/nativedev' "$HOME/.local/bin/nativedev" 2>/dev/null; then
     rm -f "$HOME/.local/bin/nativedev"
@@ -32,4 +38,5 @@ else
 fi
 
 echo "NativeDev application package removed."
-echo "User projects, databases, database accounts, and NativeDev-managed system service configuration were intentionally preserved."
+echo "NativeDev wildcard DNS and park-directory Nginx routing are removed by the package lifecycle hook."
+echo "Projects, database data/accounts, standalone services/tools, localhost tool routes, Mailpit, and NativeDev PHP INI configuration are intentionally preserved."

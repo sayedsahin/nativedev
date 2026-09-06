@@ -6,7 +6,7 @@ It is a minimal **Python + PyGObject + GTK4** desktop manager that orchestrates 
 
 NativeDev deliberately manages the services already provided by your Linux system. It does **not** bundle PHP, Nginx, databases, Redis, Node.js, containers, VMs, Electron, or a private server stack.
 
-> Status: **0.1.9 alpha / runnable MVP**. Review every privileged change before using this on an important workstation.
+> Status: **0.2.0 development / pre-release MVP**. NativeDev has not had an official public release yet; review privileged changes before using it on an important workstation.
 
 ## Current target
 
@@ -86,7 +86,7 @@ NativeDev intentionally does not bundle a newer Python/GTK runtime for old distr
 - Route `*.test` PHP requests to each project's own `/run/php/phpX.Y-fpm-nativedev-UID.sock`, not the distro `www-data` FPM pool
 - Grant Nginx a read-only ACL on existing document roots and an inheritable read/traverse ACL on the configured park directory so projects created later work immediately; PHP itself never needs an ACL since it already runs as the developer
 - Install the system `acl` package automatically the first time that read grant is needed
-- Generate only `/etc/nginx/sites-available/nativedev-sites.conf`; the file contains a wildcard/default PHP route plus explicit backend overrides only for projects pinned to another PHP version
+- Generate `/etc/nginx/sites-available/nativedev-sites.conf` only for Local Development wildcard park routing. Persistent `*.localhost` Developer Tool routes live separately in `/etc/nginx/conf.d/nativedev-tools.conf` and do not depend on the configured project TLD or park directory
 - Quote generated Nginx document-root paths safely, including project directories containing spaces
 - Validate with `nginx -t` before reload and restore both the previous site file and enablement state on failure
 - Configure `*.test -> 127.0.0.1` using **NetworkManager-managed dnsmasq**
@@ -140,7 +140,7 @@ Then:
 
 ## Native package install
 
-NativeDev is distributed as a native Linux package. The current release builder produces one architecture-independent Debian package because the NativeDev application itself is Python/GTK:
+NativeDev is still pre-release, but its install workflow is already native-package based. The current development builder produces one architecture-independent Debian package because the NativeDev application itself is Python/GTK:
 
 ```bash
 ./packaging/build-deb.sh --output-dir dist
@@ -149,7 +149,7 @@ NativeDev is distributed as a native Linux package. The current release builder 
 Install the resulting package with your normal Debian/Ubuntu package manager:
 
 ```bash
-sudo apt install ./dist/nativedev_0.1.9_all.deb
+sudo apt install ./dist/nativedev_0.2.0_all.deb
 ```
 
 For source-tree convenience, `./install.sh` builds that same `.deb` and installs it. It no longer copies application source into `~/.local`. The package owns `/usr/bin/nativedev`, `/usr/lib/nativedev/app`, the root-owned privileged helper, desktop file and Polkit policy.
@@ -182,7 +182,9 @@ or from a source checkout:
 ./uninstall.sh
 ```
 
-Application/package files are removed. User projects, database data/accounts and NativeDev-managed service configuration are preserved by default.
+Application/package files are removed. The package removal hook removes only NativeDev's two core Local Development integrations: the NetworkManager wildcard DNS snippets and `/etc/nginx/sites-available/nativedev-sites.conf` park router (plus its NativeDev symlink). Park contents and ACLs are preserved.
+
+NativeDev acts as the management UI for standalone services/tools, so uninstall intentionally preserves their working state: PHP versions and NativeDev INI overrides, Nginx/MariaDB/PostgreSQL/Redis/RabbitMQ, Mailpit, phpMyAdmin/Adminer packages and runtime configuration, Adminer SQLite, and `/etc/nginx/conf.d/nativedev-tools.conf`. Reinstalling NativeDev can detect/manage those existing components again. Database data/accounts and user projects are never removed by application uninstall.
 
 ## Development
 
@@ -216,6 +218,7 @@ NativeDev uses explicitly scoped system integration. Debian Multi-PHP uses Nativ
 /etc/NetworkManager/dnsmasq.d/nativedev-test.conf
 /etc/nginx/sites-available/nativedev-sites.conf
 /etc/nginx/sites-enabled/nativedev-sites.conf
+/etc/nginx/conf.d/nativedev-tools.conf
 /etc/nginx/nativedev/nativedev.pem
 /etc/nginx/nativedev/nativedev-key.pem
 /etc/php/X.Y/fpm/pool.d/nativedev-UID.conf
@@ -229,6 +232,8 @@ User state:
 ~/.config/nativedev/config.json
 ~/.config/nativedev/database-credentials.json
 ~/.local/share/nativedev/
+/var/lib/nativedev/phpmyadmin/
+/var/lib/nativedev/adminer-sqlite/
 /usr/lib/nativedev/privileged_helper.py
 ```
 
@@ -243,7 +248,7 @@ NVM shell integration is enclosed by:
 ## Important alpha limitations
 
 - Automatic wildcard DNS is intentionally limited to NetworkManager. Other resolver layouts are detected as unsupported instead of rewriting resolver configuration. NativeDev reloads only NetworkManager configuration/DNS state; it does not intentionally restart the whole NetworkManager service.
-- Generic Redis/MariaDB/PostgreSQL configuration editors are not implemented yet; v0.1 installs/detects/controls their native services and manages a local database login matching the current Unix developer user, but does not yet expose server tuning forms. Nginx/local DNS/HTTPS configuration is implemented.
+- Generic Redis/MariaDB/PostgreSQL configuration editors are not implemented yet; the current development build installs/detects/controls their native services and manages a local database login matching the current Unix developer user, but does not yet expose server tuning forms. Nginx/local DNS/HTTPS configuration is implemented.
 - Site scanning is refresh-based, not a persistent filesystem daemon.
 - PHP requests for `*.test` run as the logged-in developer, which avoids CLI-vs-FPM ownership conflicts for cache/uploads/rate-limit directories. Nginx still needs read/traverse permission to serve static files directly under the project's document root; NativeDev grants that automatically via a read-only ACL scoped to the document root only, and never broadens permissions on the rest of the project or the home directory.
 - Project ACL management assumes normal development projects are owned by the desktop user; files owned by another account may require ownership repair outside NativeDev.
@@ -259,7 +264,8 @@ GTK4 GUI / future CLI
           +-- NativeDevController -- serialized mutations + cross-manager reconciliation
           |        |
           |        +-- PhpManager ------ APT / systemd / Multi-PHP
-          |        +-- LocalDevManager - NetworkManager / Nginx / mkcert
+          |        +-- LocalDevManager - wildcard DNS / park Nginx / mkcert
+          |        +-- DeveloperToolManager - persistent localhost Nginx tools
           |        +-- DatabaseAccessManager - local DB account / credentials
           |
           +-- NodeManager -------- NVM (per user)

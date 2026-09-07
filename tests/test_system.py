@@ -688,7 +688,7 @@ class ServiceCleanupTests(unittest.TestCase):
         from unittest.mock import patch
         from nativedev.privileged_helper import validate_operation
 
-        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"):
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"):
             self.assertTrue(validate_operation({"protocol": 23, "action": "database.delete_all_data", "key": "mariadb"})[0])
             self.assertTrue(validate_operation({"protocol": 23, "action": "database.delete_all_data", "key": "postgresql"})[0])
             self.assertFalse(validate_operation({"protocol": 23, "action": "database.delete_all_data", "key": "redis"})[0])
@@ -722,15 +722,15 @@ class DatabaseAccessManagerTests(unittest.TestCase):
                 self.runs.append((list(argv), dict(fields)))
                 sql = fields.get("input_text") or ""
                 if sql.startswith("SELECT CURRENT_USER"):
-                    stdout = "sayed@localhost\n"
+                    stdout = "developer@localhost\n"
                 elif sql.startswith("SELECT current_user"):
-                    stdout = "sayed\n"
+                    stdout = "developer\n"
                 else:
                     stdout = ""
                 return CommandResult(list(argv), 0, stdout, "")
 
         runner = Runner()
-        manager = DatabaseAccessManager(runner, root / "database-credentials.json", developer_username="sayed")
+        manager = DatabaseAccessManager(runner, root / "database-credentials.json", developer_username="developer")
         return manager, runner
 
     def test_fresh_database_install_creates_default_managed_account_and_0600_store(self):
@@ -741,7 +741,7 @@ class DatabaseAccessManagerTests(unittest.TestCase):
                 state = manager.ensure_after_install("mariadb")
             self.assertTrue(state.managed)
             self.assertFalse(state.conflict)
-            self.assertEqual(state.username, "sayed")
+            self.assertEqual(state.username, "developer")
             self.assertEqual(state.password, "nativedev")
             self.assertEqual(state.host, "localhost")
             self.assertEqual(state.port, 3306)
@@ -779,7 +779,7 @@ class DatabaseAccessManagerTests(unittest.TestCase):
             manager, runner = self._manager(root, status="0")
             with patch("nativedev.managers.database_access.shutil.which", return_value="/usr/bin/psql"):
                 state = manager.ensure_after_install("postgresql")
-            self.assertEqual(state.username, "sayed")
+            self.assertEqual(state.username, "developer")
             self.assertEqual(state.password, "nativedev")
             self.assertEqual([action for action, _ in runner.operations], [
                 "database.postgresql.ensure_cluster",
@@ -820,13 +820,13 @@ class DatabaseAccessManagerTests(unittest.TestCase):
                 sql_seen.append((password, sql, transport))
                 self.assertEqual(transport, "tcp")
                 if sql.startswith("SELECT CURRENT_USER") and password == "Existing123!":
-                    return CommandResult(["mariadb"], 0, "sayed@localhost\n", "")
+                    return CommandResult(["mariadb"], 0, "developer@localhost\n", "")
                 return CommandResult(["mariadb"], 1, "", "ERROR 1045 access denied")
 
             with patch.object(manager, "_mysql_user_sql", side_effect=mysql_sql):
                 state = manager.use_existing_account("mariadb", "Existing123!")
             self.assertTrue(state.managed)
-            self.assertEqual(state.username, "sayed")
+            self.assertEqual(state.username, "developer")
             self.assertEqual(state.password, "Existing123!")
             self.assertEqual(state.host, "localhost")
             self.assertEqual(runner.operations, [])
@@ -884,7 +884,7 @@ class DatabaseAccessManagerTests(unittest.TestCase):
             def mysql_sql(password, sql, *, transport="tcp"):
                 self.assertEqual(transport, "tcp")
                 if sql.startswith("SELECT CURRENT_USER") and password == "nativedev":
-                    return CommandResult(["mariadb"], 0, "sayed@localhost\n", "")
+                    return CommandResult(["mariadb"], 0, "developer@localhost\n", "")
                 return CommandResult(["mariadb"], 1, "", "ERROR 1045 access denied")
 
             with patch.object(manager, "_mysql_user_sql", side_effect=mysql_sql):
@@ -922,7 +922,7 @@ class DatabaseAccessManagerTests(unittest.TestCase):
 
             def mysql_sql(password, sql, *, transport="tcp"):
                 if sql.startswith("SELECT CURRENT_USER") and password == "nativedev":
-                    return CommandResult(["mariadb"], 0, "sayed@localhost\n", "")
+                    return CommandResult(["mariadb"], 0, "developer@localhost\n", "")
                 return CommandResult(["mariadb"], 1, "", "ERROR 1045 access denied")
 
             with patch.object(manager, "_mysql_user_sql", side_effect=mysql_sql):
@@ -942,7 +942,7 @@ class DatabaseAccessManagerTests(unittest.TestCase):
             def mysql_sql(password, sql, *, transport="tcp"):
                 transports.append(transport)
                 if transport == "socket":
-                    return CommandResult(["mariadb"], 0, "sayed@localhost\n", "")
+                    return CommandResult(["mariadb"], 0, "developer@localhost\n", "")
                 return CommandResult(["mariadb"], 1, "", "ERROR 1045 access denied")
 
             with patch.object(manager, "_mysql_user_sql", side_effect=mysql_sql):
@@ -962,7 +962,7 @@ class DatabaseAccessManagerTests(unittest.TestCase):
             def mysql_sql(password, sql, *, transport="tcp"):
                 if sql.startswith("SELECT CURRENT_USER"):
                     if password == "Existing123!":
-                        return CommandResult(["mariadb"], 0, "sayed@localhost\n", "")
+                        return CommandResult(["mariadb"], 0, "developer@localhost\n", "")
                     return CommandResult(["mariadb"], 1, "", "ERROR 1045 access denied")
                 if sql.startswith("SELECT VERSION"):
                     return CommandResult(["mariadb"], 0, "11.8.3-MariaDB\n", "")
@@ -994,7 +994,7 @@ class DatabaseAccessManagerTests(unittest.TestCase):
                 if sql.startswith("SELECT CURRENT_USER"):
                     if password not in valid_passwords:
                         return CommandResult(["mariadb"], 1, "", "ERROR 1045 access denied")
-                    return CommandResult(["mariadb"], 0, "sayed@localhost\n", "")
+                    return CommandResult(["mariadb"], 0, "developer@localhost\n", "")
                 if sql.startswith("SELECT VERSION"):
                     return CommandResult(["mariadb"], 0, "11.8.3-MariaDB\n", "")
                 if sql.startswith("SET PASSWORD"):
@@ -1044,13 +1044,13 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
             calls.append((sql, admin_password))
             return subprocess.CompletedProcess(["/usr/bin/mariadb"], 0, "", "")
 
-        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"), \
              patch("nativedev.privileged_helper._run_mysql_admin", side_effect=run_admin):
             execute_operation(request, uid=1000, timeout=30)
 
         self.assertEqual(calls[0], ("SELECT 1;\n", None))
         sql = calls[1][0]
-        self.assertIn("'sayed'@'localhost'", sql)
+        self.assertIn("'developer'@'localhost'", sql)
         grant_line = next(line for line in sql.splitlines() if line.startswith("GRANT "))
         self.assertIn("CREATE", grant_line)
         self.assertIn("CREATE ROUTINE", grant_line)
@@ -1063,7 +1063,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         import subprocess
 
         request = {"protocol": 23, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
-        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"), \
              patch("nativedev.privileged_helper._run_mysql_admin") as run_admin:
             run_admin.return_value = subprocess.CompletedProcess(["mariadb"], 1, "", "ERROR 1045")
             result = execute_operation(request, uid=1000, timeout=30)
@@ -1088,7 +1088,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
             calls.append((sql, admin_password))
             return subprocess.CompletedProcess(["mariadb"], 0, "", "")
 
-        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"), \
              patch("nativedev.privileged_helper._run_mysql_admin", side_effect=run_admin):
             result = execute_operation(request, uid=1000, timeout=30)
         self.assertEqual(result.returncode, 0)
@@ -1141,7 +1141,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
             "pg_lsclusters": "/usr/bin/pg_lsclusters",
             "pg_createcluster": "/usr/bin/pg_createcluster",
         }
-        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"), \
              patch("nativedev.privileged_helper._binary", side_effect=lambda name: binaries[name]), \
              patch("nativedev.privileged_helper._installed_postgresql_versions", return_value=["17"]), \
              patch("nativedev.privileged_helper.subprocess.run", side_effect=fake_run):
@@ -1175,7 +1175,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
             "pg_lsclusters": "/usr/bin/pg_lsclusters",
             "pg_ctlcluster": "/usr/bin/pg_ctlcluster",
         }
-        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"), \
              patch("nativedev.privileged_helper._binary", side_effect=lambda name: binaries[name]), \
              patch("nativedev.privileged_helper.subprocess.run", side_effect=fake_run):
             result = execute_operation(request, uid=1000, timeout=120)
@@ -1189,13 +1189,13 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         import subprocess
 
         request = {"protocol": 23, "action": "database.postgresql.ensure_dev_account", "password": "nativedev"}
-        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"), \
              patch("nativedev.privileged_helper._postgres_admin_argv", return_value=["/usr/bin/runuser", "psql"]), \
              patch("nativedev.privileged_helper.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess(["psql"], 0, "", "")
             execute_operation(request, uid=1000, timeout=30)
         sql = run.call_args.kwargs["input"]
-        self.assertIn('ROLE "sayed"', sql)
+        self.assertIn('ROLE "developer"', sql)
         self.assertIn("CREATEDB", sql)
         self.assertIn("NOSUPERUSER", sql)
         self.assertIn("NOCREATEROLE", sql)
@@ -1209,7 +1209,7 @@ class DatabaseDataResetHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {"protocol": 23, "action": "database.delete_all_data", "key": "mariadb"}
-        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"), \
              patch("nativedev.privileged_helper._remove_fixed_tree") as remove:
             result = execute_operation(request, uid=1000, timeout=90)
         self.assertEqual(result.returncode, 0)
@@ -1220,7 +1220,7 @@ class DatabaseDataResetHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {"protocol": 23, "action": "database.delete_all_data", "key": "postgresql"}
-        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="sayed"), \
+        with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"), \
              patch("nativedev.privileged_helper._remove_fixed_tree") as remove:
             result = execute_operation(request, uid=1000, timeout=90)
         self.assertEqual(result.returncode, 0)
@@ -1301,7 +1301,7 @@ class ControllerTests(unittest.TestCase):
         events = []
 
         class Config:
-            park_dir = "/home/dev/Code"
+            park_dir = "/tmp/nativedev-test-user/Code"
             domain = "test"
             https_enabled = False
             def save(self): events.append(("save", self.park_dir, self.domain))
@@ -1315,10 +1315,10 @@ class ControllerTests(unittest.TestCase):
 
         localdev = LocalDev()
         controller = NativeDevController(object(), localdev)
-        controller.update_localdev_settings("/home/dev/Code", "tests")
+        controller.update_localdev_settings("/tmp/nativedev-test-user/Code", "tests")
         self.assertEqual(localdev.config.domain, "tests")
         self.assertIn(("dns", "tests"), events)
-        self.assertIn(("nginx", "/home/dev/Code", "tests"), events)
+        self.assertIn(("nginx", "/tmp/nativedev-test-user/Code", "tests"), events)
 
     def test_localdev_park_change_rebuilds_nginx_without_touching_dns(self):
         from nativedev.controller import NativeDevController
@@ -1326,7 +1326,7 @@ class ControllerTests(unittest.TestCase):
         events = []
 
         class Config:
-            park_dir = "/home/dev/Code"
+            park_dir = "/tmp/nativedev-test-user/Code"
             domain = "test"
             https_enabled = False
             def save(self): events.append(("save", self.park_dir, self.domain))
@@ -1340,9 +1340,9 @@ class ControllerTests(unittest.TestCase):
 
         localdev = LocalDev()
         controller = NativeDevController(object(), localdev)
-        controller.update_localdev_settings("/home/dev/Work", "test")
-        self.assertEqual(localdev.config.park_dir, "/home/dev/Work")
-        self.assertIn(("nginx", "/home/dev/Work", "test"), events)
+        controller.update_localdev_settings("/tmp/nativedev-test-user/Work", "test")
+        self.assertEqual(localdev.config.park_dir, "/tmp/nativedev-test-user/Work")
+        self.assertIn(("nginx", "/tmp/nativedev-test-user/Work", "test"), events)
         self.assertFalse(any(event[0].startswith("dns") for event in events))
 
     def test_localdev_reconcile_failure_rolls_config_and_router_back(self):
@@ -1351,7 +1351,7 @@ class ControllerTests(unittest.TestCase):
         events = []
 
         class Config:
-            park_dir = "/home/dev/Code"
+            park_dir = "/tmp/nativedev-test-user/Code"
             domain = "test"
             https_enabled = False
             def save(self): events.append(("save", self.park_dir, self.domain))
@@ -1372,12 +1372,12 @@ class ControllerTests(unittest.TestCase):
         localdev = LocalDev()
         controller = NativeDevController(object(), localdev)
         with self.assertRaisesRegex(RuntimeError, "rolled back"):
-            controller.update_localdev_settings("/home/dev/Work", "tests")
-        self.assertEqual(localdev.config.park_dir, "/home/dev/Code")
+            controller.update_localdev_settings("/tmp/nativedev-test-user/Work", "tests")
+        self.assertEqual(localdev.config.park_dir, "/tmp/nativedev-test-user/Code")
         self.assertEqual(localdev.config.domain, "test")
         self.assertIn(("dns", "tests"), events)
         self.assertIn(("dns", "test"), events)
-        self.assertIn(("nginx", "/home/dev/Code", "test"), events)
+        self.assertIn(("nginx", "/tmp/nativedev-test-user/Code", "test"), events)
 
     def test_localdev_domain_change_regenerates_https_instead_of_plain_nginx_rebuild(self):
         from nativedev.controller import NativeDevController
@@ -1385,7 +1385,7 @@ class ControllerTests(unittest.TestCase):
         events = []
 
         class Config:
-            park_dir = "/home/dev/Code"
+            park_dir = "/tmp/nativedev-test-user/Code"
             domain = "test"
             https_enabled = True
             def save(self): events.append(("save", self.domain))
@@ -1399,7 +1399,7 @@ class ControllerTests(unittest.TestCase):
             def configure_nginx_sites(self): events.append(("nginx", self.config.domain))
 
         localdev = LocalDev()
-        NativeDevController(object(), localdev).update_localdev_settings("/home/dev/Code", "tests")
+        NativeDevController(object(), localdev).update_localdev_settings("/tmp/nativedev-test-user/Code", "tests")
         self.assertEqual(events[-2:], [("dns", "tests"), ("https", "tests")])
         self.assertFalse(any(event[0] == "nginx" for event in events))
 
@@ -2609,8 +2609,8 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
             self.assertEqual(manager.effective_php("adminer"), "8.3")
 
     def test_nginx_renders_developer_tool_hosts_on_fixed_localhost_domain(self):
+        from nativedev.managers.developer_tools import DeveloperToolManager
         from nativedev.config import AppConfig
-        from nativedev.managers.localdev import LocalDevManager
 
         class Apt:
             def is_installed(self, package):
@@ -2622,7 +2622,7 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
                 domain="test",
                 developer_tools={"phpmyadmin": {"php": "8.3"}},
             )
-            manager = LocalDevManager(None, Apt(), None, config, StubPhp(default="8.4", installed=["8.4", "8.3"]))
+            manager = DeveloperToolManager(None, Apt(), StubPhp(default="8.4", installed=["8.4", "8.3"]), config)
             rendered = manager.render_nginx()
             self.assertIn("server_name phpmyadmin.localhost;", rendered)
             self.assertIn("server_name adminer.localhost;", rendered)
@@ -2672,7 +2672,7 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
 
     def test_nginx_uses_compiled_adminer_and_keeps_developer_tools_http_only(self):
         from nativedev.config import AppConfig
-        from nativedev.managers.localdev import LocalDevManager
+        from nativedev.managers.developer_tools import DeveloperToolManager
 
         class Apt:
             def is_installed(self, package):
@@ -2680,7 +2680,7 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             config = AppConfig(park_dir=td, domain="test", https_enabled=True)
-            manager = LocalDevManager(None, Apt(), None, config, StubPhp())
+            manager = DeveloperToolManager(None, Apt(), StubPhp(), config)
             rendered = manager.render_nginx()
             adminer_start = rendered.index("server_name adminer.localhost;")
             next_server = rendered.find("server {", adminer_start)
@@ -2869,13 +2869,22 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
                 )
                 state = manager.adminer_sqlite_state()
                 self.assertTrue(state.installed)
+                from nativedev.managers import developer_tools as developer_tools_module
+                developer_tools_module.DEVELOPER_TOOLS_NGINX.parent.mkdir(parents=True, exist_ok=True)
+                developer_tools_module.DEVELOPER_TOOLS_NGINX.write_text(
+                    developer_tools_module.DEVELOPER_TOOLS_NGINX_MARKER
+                    + "\nserver_name adminer-sqlite.localhost;\n"
+                    + 'fastcgi_pass "unix:/run/php/php8.3-fpm-nativedev-1000.sock";\n',
+                    encoding="utf-8",
+                )
+                state = manager.adminer_sqlite_state()
                 self.assertTrue(state.runtime_ready)
 
     def test_nginx_adminer_sqlite_is_fixed_localhost_and_inherits_adminer_php(self):
         from unittest.mock import patch
         from nativedev.config import AppConfig
-        import nativedev.managers.localdev as localdev_module
-        from nativedev.managers.localdev import LocalDevManager
+        import nativedev.managers.developer_tools as developer_tools_module
+        from nativedev.managers.developer_tools import DeveloperToolManager
 
         class Apt:
             def is_installed(self, package):
@@ -2889,8 +2898,8 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
                 domain="dev",
                 developer_tools={"adminer": {"php": "8.3"}},
             )
-            with patch.object(localdev_module, "ADMINER_SQLITE_ENTRYPOINT", wrapper):
-                manager = LocalDevManager(None, Apt(), None, config, StubPhp(default="8.4", installed=["8.4", "8.3"]))
+            with patch.object(developer_tools_module, "ADMINER_SQLITE_ENTRYPOINT", wrapper):
+                manager = DeveloperToolManager(None, Apt(), StubPhp(default="8.4", installed=["8.4", "8.3"]), config)
                 rendered = manager.render_nginx()
 
             self.assertIn("server_name adminer-sqlite.localhost;", rendered)

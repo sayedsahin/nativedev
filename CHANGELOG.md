@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.2.2] - 2026-09-07
+
+### Added
+
+- Added About page with NativeDev application information.
+- Added manual "Check for updates" option from the About page.
+- Added NativeDev application icon support for desktop environments.
+  - Added proper `Icon=nativedev` desktop integration.
+  - Included application icons in Debian package installation.
+
+### Improved
+
+- Improved desktop integration with proper application launcher icon.
+- Improved user visibility of update availability through manual update checking.
+
+### Fixed
+
+- Fixed missing NativeDev icon in application menu and desktop launcher after installation.
+- Fixed packaging script to include application icon assets in `.deb` packages.
+
+
 ## 0.2.0 - Development architecture update
 
 - Switched NativeDev self-update discovery from APT candidate metadata to the fixed public GitHub Releases repository `sayedsahin/nativedev`. The app performs one unprivileged background check per 24 hours and requires the exact `nativedev_<version>_all.deb` release asset plus GitHub's SHA-256 asset digest before offering an update.

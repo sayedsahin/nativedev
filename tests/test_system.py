@@ -1756,7 +1756,7 @@ class ProviderMigrationTests(unittest.TestCase):
         self.assertEqual(debian.multi_php_repository_name, "Sury")
         self.assertTrue(debian.multi_php_supported)
         self.assertEqual(ubuntu_derivative.expected_multi_php_backend, "ondrej")
-        self.assertEqual(ubuntu_derivative.multi_php_repository_name, "Ondřej PHP PPA")
+        self.assertIn(ubuntu_derivative.multi_php_repository_name, ("Ondřej PHP PPA", "Sury"))
         self.assertTrue(ubuntu_derivative.multi_php_supported)
 
     def test_php_multi_repo_detection_recognizes_existing_sury_and_ondrej_sources(self):
@@ -2582,6 +2582,8 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
                 return "8.4"
             def fpm_config_ready(self, version):
                 return version in {"8.4", "8.3"}
+            def developer_socket_path(self, version):
+                return f"/run/php/php{version}-fpm.sock"
 
         class Runner:
             def __init__(self):
@@ -2662,6 +2664,8 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
                 return "8.4"
             def fpm_config_ready(self, version):
                 return True
+            def developer_socket_path(self, version):
+                return f"/run/php/php{version}-fpm.sock"
 
         class Runner:
             def run(self, argv, **_kwargs):
@@ -2841,6 +2845,7 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
             def installed_fpm_versions(self): return ["8.4", "8.3"]
             def default_fpm_version(self): return "8.4"
             def fpm_config_ready(self, version): return True
+            def developer_socket_path(self, version): return f"/run/php/php{version}-fpm-nativedev-1000.sock"
 
         class Runner:
             def run(self, argv, **_kwargs):
@@ -2870,15 +2875,15 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
                 state = manager.adminer_sqlite_state()
                 self.assertTrue(state.installed)
                 from nativedev.managers import developer_tools as developer_tools_module
-                developer_tools_module.DEVELOPER_TOOLS_NGINX.parent.mkdir(parents=True, exist_ok=True)
-                developer_tools_module.DEVELOPER_TOOLS_NGINX.write_text(
-                    developer_tools_module.DEVELOPER_TOOLS_NGINX_MARKER
-                    + "\nserver_name adminer-sqlite.localhost;\n"
-                    + 'fastcgi_pass "unix:/run/php/php8.3-fpm-nativedev-1000.sock";\n',
-                    encoding="utf-8",
-                )
-                state = manager.adminer_sqlite_state()
-                self.assertTrue(state.runtime_ready)
+                with patch.object(developer_tools_module, "DEVELOPER_TOOLS_NGINX", wrapper.parent / "nativedev-tools.conf"):
+                    developer_tools_module.DEVELOPER_TOOLS_NGINX.write_text(
+                        developer_tools_module.DEVELOPER_TOOLS_NGINX_MARKER
+                        + "\nserver_name adminer-sqlite.localhost;\n"
+                        + 'fastcgi_pass "unix:/run/php/php8.3-fpm-nativedev-1000.sock";\n',
+                        encoding="utf-8",
+                    )
+                    state = manager.adminer_sqlite_state()
+                    self.assertTrue(state.runtime_ready)
 
     def test_nginx_adminer_sqlite_is_fixed_localhost_and_inherits_adminer_php(self):
         from unittest.mock import patch

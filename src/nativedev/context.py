@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .config import AppConfig
-from .controller import NativeDevController
+from .php_uninstall import PhpAwareNativeDevController
 from .managers import ApplicationManager, DatabaseAccessManager, DeveloperToolManager, Doctor, LocalDevManager, NodeManager, PhpExtensionManager, PhpIniManager, PhpManager
 from .services import ServiceManager
 from .system import AptManager, CommandRunner, DistroInfo, SystemdManager, read_os_release
@@ -26,7 +26,7 @@ class AppContext:
     services: ServiceManager
     localdev: LocalDevManager
     doctor: Doctor
-    controller: NativeDevController
+    controller: PhpAwareNativeDevController
 
     @classmethod
     def create(cls) -> "AppContext":
@@ -45,5 +45,31 @@ class AppContext:
         services = ServiceManager(runner, apt, systemd)
         localdev = LocalDevManager(runner, apt, systemd, config, php)
         doctor = Doctor(distro, apt, systemd, php, node, developer_tools, services, localdev)
-        controller = NativeDevController(php, localdev, node, php_ini, services, database_access, developer_tools, application)
-        return cls(distro, config, runner, apt, systemd, php, php_extensions, php_ini, node, database_access, application, developer_tools, services, localdev, doctor, controller)
+        controller = PhpAwareNativeDevController(
+            php,
+            localdev,
+            node,
+            php_ini,
+            services,
+            database_access,
+            developer_tools,
+            application,
+        )
+        return cls(
+            distro,
+            config,
+            runner,
+            apt,
+            systemd,
+            php,
+            php_extensions,
+            php_ini,
+            node,
+            database_access,
+            application,
+            developer_tools,
+            services,
+            localdev,
+            doctor,
+            controller,
+        )

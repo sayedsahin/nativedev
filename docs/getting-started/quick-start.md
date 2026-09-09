@@ -1,4 +1,5 @@
 ---
+layout: default
 title: Quick Start
 parent: Getting Started
 nav_order: 2
@@ -6,6 +7,12 @@ nav_order: 2
 
 # Quick Start
 
-Open NativeDev and manage your local development environment from the graphical interface.
+After installation:
 
-Use the dashboard to access PHP, Node.js, services, tools, and projects.
+1. Open NativeDev.
+2. Review the dashboard.
+3. Configure local development.
+4. Enable required services.
+5. Manage PHP, Node.js and projects.
+
+NativeDev manages existing system resources instead of creating isolated environments.

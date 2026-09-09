@@ -1,8 +1,20 @@
 ---
+layout: default
 title: System Integration
 parent: Internals
+nav_order: 4
 ---
 
 # System Integration
 
-NativeDev integrates with Linux package management, systemd, filesystem permissions, Nginx, PHP-FPM, and Polkit.
+NativeDev works with existing Linux resources.
+
+Integrations include:
+
+- APT packages
+- systemd services
+- Nginx
+- PHP-FPM
+- filesystem permissions
+- Network configuration
+- Polkit

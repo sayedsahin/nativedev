@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .config import AppConfig
-from .php_uninstall import PhpAwareNativeDevController
-from .managers import ApplicationManager, DatabaseAccessManager, DeveloperToolManager, Doctor, LocalDevManager, NodeManager, PhpExtensionManager, PhpIniManager, PhpManager
+from .provider_uninstall import ProviderAwareNativeDevController, ProviderNodeManager
+from .managers import ApplicationManager, DatabaseAccessManager, DeveloperToolManager, Doctor, LocalDevManager, PhpExtensionManager, PhpIniManager, PhpManager
 from .services import ServiceManager
 from .system import AptManager, CommandRunner, DistroInfo, SystemdManager, read_os_release
 
@@ -19,14 +19,14 @@ class AppContext:
     php: PhpManager
     php_extensions: PhpExtensionManager
     php_ini: PhpIniManager
-    node: NodeManager
+    node: ProviderNodeManager
     database_access: DatabaseAccessManager
     application: ApplicationManager
     developer_tools: DeveloperToolManager
     services: ServiceManager
     localdev: LocalDevManager
     doctor: Doctor
-    controller: PhpAwareNativeDevController
+    controller: ProviderAwareNativeDevController
 
     @classmethod
     def create(cls) -> "AppContext":
@@ -38,14 +38,14 @@ class AppContext:
         php = PhpManager(runner, apt, systemd, distro)
         php_extensions = PhpExtensionManager(runner, apt, systemd, php)
         php_ini = PhpIniManager(runner, systemd, php)
-        node = NodeManager(runner, apt)
+        node = ProviderNodeManager(runner, apt)
         database_access = DatabaseAccessManager(runner)
         application = ApplicationManager(runner, distro)
         developer_tools = DeveloperToolManager(runner, apt, php, config, systemd)
         services = ServiceManager(runner, apt, systemd)
         localdev = LocalDevManager(runner, apt, systemd, config, php)
         doctor = Doctor(distro, apt, systemd, php, node, developer_tools, services, localdev)
-        controller = PhpAwareNativeDevController(
+        controller = ProviderAwareNativeDevController(
             php,
             localdev,
             node,

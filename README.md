@@ -74,11 +74,6 @@ NativeDev currently supports **Debian and Ubuntu based Linux distributions**.
 
 ## Screenshots
 
-### Dashboard
-Overview of your development environment and available actions.
-
-<img src="docs/images/1.dashboard.webp" alt="Dashboard" width="800">
-
 ### Local Development
 Manage local projects, routing, domains, and development environment settings.
 

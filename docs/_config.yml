@@ -1,0 +1,12 @@
+title: NativeDev Documentation
+description: Native Linux Development Environment Manager
+theme: just-the-docs
+
+url: https://sayedsahin.github.io
+baseurl: /nativedev
+
+search_enabled: true
+
+aux_links:
+  GitHub Repository:
+    - https://github.com/sayedsahin/nativedev

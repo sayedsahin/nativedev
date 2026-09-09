@@ -1,6 +1,15 @@
-# Changelog
+# Change-log
 
-## [0.2.2] - 2026-09-07
+## [0.3.0] - 2026-09-09
+- Fixed silently uninstall adminer and phpMyAdmin when all php version uninstalled
+    - adminer/phpmyadmin switch to another php version when it's available
+    - show warning when another php version not available
+- Detect 80 and 443 port listener and add stop and disable option
+- Added Sury/Ondrej php and NVM repository uninstall system
+
+
+
+## [0.3.0] - 2026-09-07
 
 ### Added
 

@@ -58,29 +58,53 @@ def _tool_users(
 
 
 def build_php_uninstall_preview(
-    controller: NativeDevController,
-    version: str,
+    controller_or_php,
+    developer_tools_or_version,
+    version: str | None = None,
 ) -> PhpUninstallPreview:
-    developer_tools = controller.developer_tools
-    users = _tool_users(developer_tools, version)
+    """Build a read-only uninstall plan.
+
+    Supports both the current controller API::
+
+        build_php_uninstall_preview(controller, "8.4")
+
+    and the earlier public/test API::
+
+        build_php_uninstall_preview(php, developer_tools, "8.4")
+
+    Keeping both signatures avoids breaking callers while the application
+    itself continues to use the controller-based workflow.
+    """
+
+    if version is None:
+        controller = controller_or_php
+        php = controller.php
+        developer_tools = controller.developer_tools
+        target = str(developer_tools_or_version)
+    else:
+        php = controller_or_php
+        developer_tools = developer_tools_or_version
+        target = str(version)
+
+    users = _tool_users(developer_tools, target)
 
     remaining = tuple(
         sorted(
             (
                 installed
-                for installed in controller.php.installed_fpm_versions()
-                if installed != version
+                for installed in php.installed_fpm_versions()
+                if installed != target
             ),
-            key=controller.php._version_key,
+            key=php._version_key,
             reverse=True,
         )
     )
 
-    current_default = controller.php.cli_version()
+    current_default = php.cli_version()
     replacement = ""
 
     if users and remaining:
-        if current_default != version and current_default in remaining:
+        if current_default != target and current_default in remaining:
             # Removing a non-default PHP: move affected tools to the current
             # system Default PHP when that Default has an installed FPM.
             replacement = current_default
@@ -92,12 +116,12 @@ def build_php_uninstall_preview(
             replacement = remaining[0]
 
     return PhpUninstallPreview(
-        version=version,
+        version=target,
         tool_keys=tuple(spec.key for spec in users),
         tool_titles=tuple(spec.title for spec in users),
         remaining_fpm=remaining,
         replacement=replacement,
-        removing_default=current_default == version,
+        removing_default=current_default == target,
     )
 
 
@@ -270,6 +294,150 @@ def _restore_tool_selections(
 
     if shutil.which("nginx"):
         developer_tools.configure_nginx()
+
+
+class _StandalonePhpUninstallContext:
+    """Minimal adapter for the legacy module-level uninstall API."""
+
+    def __init__(self, php, developer_tools):
+        self.php = php
+        self.developer_tools = developer_tools
+
+
+def _standalone_remove_php_version(
+    *,
+    php,
+    php_ini,
+    reconcile_nginx,
+    version: str,
+) -> None:
+    """Legacy removal tail used only by :func:`uninstall_php_version`.
+
+    The controller workflow owns the newer version-package postcondition check.
+    This compatibility path deliberately preserves the earlier public contract
+    because external callers/test doubles may not expose ``php.apt`` or the
+    controller's LocalDev state.
+    """
+
+    detached_ini = False
+    if (
+        php_ini is not None
+        and hasattr(php_ini, "has_active_override")
+        and php_ini.has_active_override(version)
+    ):
+        php_ini.detach_runtime(version)
+        detached_ini = True
+
+    try:
+        php.uninstall_version(version)
+    except Exception as exc:
+        if detached_ini:
+            try:
+                php_ini.restore_profile(version)
+            except Exception as rollback_exc:
+                raise RuntimeError(
+                    f"PHP {version} uninstall failed ({exc}); "
+                    f"NativeDev INI rollback also failed ({rollback_exc})"
+                ) from exc
+        raise
+
+    if reconcile_nginx is not None:
+        reconcile_nginx()
+
+
+def uninstall_php_version(
+    *,
+    php,
+    developer_tools,
+    php_ini,
+    reconcile_nginx,
+    version: str,
+    confirmed_tool_removal: Iterable[str] = (),
+) -> None:
+    """Backward-compatible module-level PHP uninstall workflow.
+
+    This API predates :class:`PhpAwareNativeDevController` and remains useful
+    for tests and non-GUI callers. It follows the same dependency-aware policy:
+
+    * migrate affected Developer Tools to a remaining FPM when possible;
+    * never change the system Default PHP explicitly;
+    * block when APT would remove an affected Developer Tool;
+    * require explicit confirmation when the last FPM is being removed.
+    """
+
+    preview = build_php_uninstall_preview(php, developer_tools, version)
+
+    if not preview.has_tool_users:
+        _standalone_remove_php_version(
+            php=php,
+            php_ini=php_ini,
+            reconcile_nginx=reconcile_nginx,
+            version=version,
+        )
+        return
+
+    if not preview.remaining_fpm:
+        confirmed = {str(key) for key in confirmed_tool_removal}
+        if not set(preview.tool_keys).issubset(confirmed):
+            titles = ", ".join(preview.tool_titles)
+            raise RuntimeError(
+                f"PHP {version} is the only installed PHP-FPM runtime and "
+                f"is currently used by: {titles}. Removing it may also "
+                "remove those Developer Tools. Explicit confirmation is "
+                "required."
+            )
+
+        _standalone_remove_php_version(
+            php=php,
+            php_ini=php_ini,
+            reconcile_nginx=reconcile_nginx,
+            version=version,
+        )
+        if developer_tools is not None:
+            for key in preview.tool_keys:
+                developer_tools.clear_selected_php(key)
+        return
+
+    context = _StandalonePhpUninstallContext(php, developer_tools)
+    previous = {
+        key: developer_tools.selected_php(key)
+        for key in preview.tool_keys
+    }
+
+    try:
+        _prepare_replacement_php(context, preview)
+
+        for key in preview.tool_keys:
+            developer_tools.set_selected_php(key, preview.replacement)
+
+        if shutil.which("nginx"):
+            developer_tools.configure_nginx()
+
+        impacted = _simulate_tool_impact(context, preview.version)
+        if impacted:
+            titles = ", ".join(spec.title for spec in impacted)
+            raise RuntimeError(
+                f"PHP {preview.version} cannot be removed safely because "
+                f"APT would also remove: {titles}."
+            )
+
+        _standalone_remove_php_version(
+            php=php,
+            php_ini=php_ini,
+            reconcile_nginx=reconcile_nginx,
+            version=version,
+        )
+
+    except Exception as exc:
+        try:
+            _restore_tool_selections(context, previous)
+        except Exception as rollback_exc:
+            raise RuntimeError(
+                f"PHP {preview.version} uninstall failed ({exc}); "
+                "Developer Tool PHP rollback also failed "
+                f"({rollback_exc})"
+            ) from exc
+        raise
 
 
 class PhpAwareNativeDevController(NativeDevController):

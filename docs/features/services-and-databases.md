@@ -1,5 +1,8 @@
 # Services & Databases
 
+![Services and Databases](../images/3.1-services-and-tools-nginx-mariadb-postgresql.webp)
+
+
 NativeDev's **Services & tools** page manages the native background services a typical PHP workstation needs, using the distro's own packages and systemd:
 
 - Nginx
@@ -9,6 +12,8 @@ NativeDev's **Services & tools** page manages the native background services a t
 - Memcached
 - Composer
 - mkcert
+
+![Services and Databases](../images/3.2-services-and-tools-redis-memcached-rabbitmq-composer-mkcert.webp)
 
 Every service that supports it gets start/stop/restart and enable/disable controls through systemd.
 

@@ -1,5 +1,7 @@
 # Developer Tools
 
+![Developer Tools](../images/3.3-services-and-tools-phpmyadmin-adminer-adminersqlite-mailpit.webp)
+
 Developer tools are persistent web-based utilities — phpMyAdmin and Adminer are the built-in examples — that NativeDev exposes on their own `*.localhost` addresses, separate from the project-based `*.test` routing described in [Local development](local-development.md).
 
 ## How they differ from projects

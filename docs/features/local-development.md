@@ -1,5 +1,7 @@
 # Local Development
 
+![Local Development](../images/2.local-development.webp)
+
 The **Local development** and **Projects** pages turn a plain folder of project directories into working `*.test` sites with no per-project Nginx editing.
 
 ## Parking a projects directory

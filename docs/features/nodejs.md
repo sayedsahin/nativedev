@@ -1,8 +1,14 @@
 # Node.js Management
 
+![Node.js Management](../images/5.2-nmv-node-list.webp)
+
+
 Node.js follows the same two-provider pattern as PHP: NativeDev starts from whatever is already on the system and offers an explicit, one-way migration for anyone who wants multiple Node versions.
 
 ## System Node vs. NVM
+
+![Node.js Management](../images/5.1-node-enable-system-or-multi.webp)
+
 
 - **System Node** — NativeDev detects and manages an existing `nodejs`/`npm` installation without replacing it merely because the application starts.
 - **NVM Multi-Node** — an explicit, one-way **Enable NVM Multi-Node** migration. Before migrating, NativeDev simulates removing System Node (the same APT dry-run approach used elsewhere) and blocks the migration if unrelated packages would also be removed. If the migration is approved, System `nodejs`/`npm` is removed, then NVM and an LTS Node runtime are installed and configured. A failed migration attempts to restore System Node rather than leaving neither provider working.

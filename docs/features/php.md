@@ -1,8 +1,14 @@
 # PHP Management
 
+![PHP Management](../images/4.2-php-version-list.webp)
+
+
 NativeDev manages PHP through two mutually exclusive models. It starts by detecting whatever is already on your system and never changes the PHP provider on its own.
 
 ## System PHP vs. Multi-PHP
+
+![PHP Package](../images/4.1.php-enable-system-or-multi.webp)
+
 
 - **System PHP** — NativeDev detects and uses your distribution's existing PHP-FPM installation for `*.test` sites through a separate per-user pool, without touching the distro's own `www` pool or repository configuration.
 - **Multi-PHP** — an explicit, one-way **Enable Multi-PHP** migration for anyone who wants several PHP versions installed side by side. Once the distro-appropriate Multi-PHP repository is active, NativeDev stops offering System PHP as a second provider. The migration moves existing System PHP package names to the equivalent Multi-PHP candidates **in place**, rather than uninstalling first — this avoids unnecessarily removing reverse dependents such as Composer.
@@ -28,6 +34,9 @@ NativeDev creates its own per-user PHP-FPM pool for each version used by `*.test
 
 ## Extensions
 
+![PHP Extension](../images/4.3-php-extension.webp)
+
+
 The **PHP Extensions** page has its own installed-PHP version selector (the current CLI default is preselected and explicitly marked) and always applies Install/Uninstall/Enable/Disable to CLI and FPM together — there is no separate control per SAPI.
 
 - Runtime/core modules that ship with PHP itself (JSON, OpenSSL, PDO, php-common modules, etc.) are listed read-only as **Built-in** — there is nothing to install or uninstall for them.
@@ -37,6 +46,9 @@ The **PHP Extensions** page has its own installed-PHP version selector (the curr
 - Uninstalling an extension runs the same APT removal simulation described above and blocks if a manually installed package would be swept along with it. PHP configuration for that extension is not purged on uninstall.
 
 ## Per-version settings
+
+![PHP Settings](../images/4.4-php-settings.webp)
+
 
 The **PHP Settings** page manages custom configuration per PHP version without ever editing the System/Multi-PHP `php.ini` files directly. NativeDev owns exactly two files per version:
 

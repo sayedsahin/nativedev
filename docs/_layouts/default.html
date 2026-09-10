@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 {% seo %}
 <meta name="viewport" content="width=device-width">
-<link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
+<link rel="stylesheet" href="{{ '/assets/css/style.css?v=' | append: site.github.build_revision | relative_url }}">
 </head>
 <body>
 <div class="wrapper">
@@ -33,7 +33,7 @@
 
 {% if site.github.is_project_page %}
 <p class="view">
-<a href="https://github.com/sayedsahin/nativedev">View the Project on GitHub</a>
+<a href="https://github.com/sayedsahin/nativedev"><img src="../images/github.svg" alt="GitHub"></a>
 </p>
 {% endif %}
 </header>

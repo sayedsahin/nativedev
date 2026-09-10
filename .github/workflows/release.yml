@@ -44,7 +44,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/nativedev_*_all.deb \
-            --verify-tag \
-            --title "NativeDev ${GITHUB_REF_NAME#v}" \
-            --generate-notes
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; uploading the freshly built asset into it."
+            gh release upload "$GITHUB_REF_NAME" dist/nativedev_*_all.deb --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/nativedev_*_all.deb \
+              --verify-tag \
+              --title "NativeDev ${GITHUB_REF_NAME#v}" \
+              --generate-notes
+          fi

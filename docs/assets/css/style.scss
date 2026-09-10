@@ -1,0 +1,45 @@
+---
+---
+
+@import "{{ site.theme }}";
+
+.sidebar-nav {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid #e5e5e5;
+}
+
+.sidebar-nav-group {
+    margin-bottom: 24px;
+}
+
+.sidebar-nav-group h2 {
+    font-size: 14px;
+    color: #222;
+    margin-bottom: 8px;
+}
+
+.sidebar-nav ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.sidebar-nav a {
+    display: block;
+    padding: 4px 0;
+    color: #267cb9;
+    font-size: 14px;
+}
+
+.sidebar-nav a.active {
+    color: #222;
+    font-weight: 600;
+}
+
+@media print, screen and (min-width: 961px) {
+    header {
+        max-height: calc(100vh - 40px);
+        overflow-y: auto;
+    }
+}

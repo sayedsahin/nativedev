@@ -1,9 +1,9 @@
 <!doctype html>
-<html>
+<html lang="{{ site.lang | default: 'en-US' }}">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{ page.title }} | {{ site.title }}</title>
+<meta charset="UTF-8">
+{% seo %}
+<meta name="viewport" content="width=device-width">
 <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
 </head>
 <body>
@@ -11,35 +11,36 @@
 <header>
 <h1><a href="{{ '/' | relative_url }}">{{ site.title }}</a></h1>
 <p>{{ site.description }}</p>
+
+{% if site.data.navigation %}
+<nav class="sidebar-nav">
+{% for group in site.data.navigation %}
+<div class="sidebar-nav-group">
+<h2>{{ group.title }}</h2>
+<ul>
+{% for item in group.items %}
+<li>
+<a href="{{ item.url | relative_url }}" {% if page.url == item.url %}class="active"{% endif %}>
+{{ item.title }}
+</a>
+</li>
+{% endfor %}
+</ul>
+</div>
+{% endfor %}
+</nav>
+{% endif %}
+
+{% if site.github.is_project_page %}
+<p class="view">
+<a href="https://github.com/sayedsahin/nativedev">View the Project on GitHub</a>
+</p>
+{% endif %}
 </header>
-<aside class="sidebar">
-<h3>Documentation</h3>
-<h4>Getting Started</h4>
-<ul><li><a href="{{ '/getting-started' | relative_url }}">Installation & First Launch</a></li></ul>
-<h4>Features</h4>
-<ul>
-<li><a href="{{ '/features/dashboard' | relative_url }}">Dashboard</a></li>
-<li><a href="{{ '/features/local-development' | relative_url }}">Local Development</a></li>
-<li><a href="{{ '/features/php' | relative_url }}">PHP Management</a></li>
-<li><a href="{{ '/features/nodejs' | relative_url }}">Node.js</a></li>
-<li><a href="{{ '/features/services-and-databases' | relative_url }}">Services & Databases</a></li>
-<li><a href="{{ '/features/developer-tools' | relative_url }}">Developer Tools</a></li>
-</ul>
-<h4>Reference</h4>
-<ul>
-<li><a href="{{ '/architecture' | relative_url }}">Architecture</a></li>
-<li><a href="{{ '/security' | relative_url }}">Security</a></li>
-<li><a href="{{ '/updating' | relative_url }}">Updating</a></li>
-<li><a href="{{ '/uninstalling' | relative_url }}">Uninstalling</a></li>
-<li><a href="{{ '/troubleshooting' | relative_url }}">Troubleshooting</a></li>
-</ul>
-<h4>Development</h4>
-<ul>
-<li><a href="{{ '/contributing' | relative_url }}">Contributing</a></li>
-<li><a href="{{ '/faq' | relative_url }}">FAQ</a></li>
-</ul>
-</aside>
-<main>{{ content }}</main>
+
+<section>
+{{ content }}
+</section>
 </div>
 </body>
 </html>

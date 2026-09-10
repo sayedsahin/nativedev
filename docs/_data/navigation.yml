@@ -1,0 +1,43 @@
+- title: Getting Started
+  items:
+    - title: Introduction
+      url: /
+    - title: Installation
+      url: /getting-started.html
+    - title: First Launch
+      url: /getting-started.html
+
+- title: Features
+  items:
+    - title: Dashboard
+      url: /features/dashboard.html
+    - title: Local Development
+      url: /features/local-development.html
+    - title: PHP Management
+      url: /features/php.html
+    - title: Node.js Management
+      url: /features/nodejs.html
+    - title: Services and Databases
+      url: /features/services-and-databases.html
+    - title: Developer Tools
+      url: /features/developer-tools.html
+
+- title: Reference
+  items:
+    - title: Architecture
+      url: /architecture.html
+    - title: Security Model
+      url: /security.html
+    - title: Updating
+      url: /updating.html
+    - title: Uninstalling
+      url: /uninstalling.html
+    - title: Troubleshooting
+      url: /troubleshooting.html
+
+- title: Development
+  items:
+    - title: Contributing
+      url: /contributing.html
+    - title: FAQ
+      url: /faq.html

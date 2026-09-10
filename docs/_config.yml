@@ -1,0 +1,7 @@
+title: NativeDev Documentation
+description: Native Linux Development Environment Manager
+theme: jekyll-theme-minimal
+show_downloads: false
+github:
+  is_project_page: true
+  repository_url: https://github.com/sayedsahin/nativedev

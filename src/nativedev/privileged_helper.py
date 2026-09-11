@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-PROTOCOL_VERSION = 23
+PROTOCOL_VERSION = 24
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
 GITHUB_OWNER = "sayedsahin"
@@ -204,9 +204,21 @@ COMPONENT_PACKAGES = {
     "postgresql-client",
     "composer",
     "mkcert",
+    "libnss3-tools",
     "nodejs",
     "npm",
 }
+
+
+# `mkcert -install` needs root only for its one system-trust-store step (copy
+# rootCA.pem into this directory and run update-ca-certificates). Run
+# unprivileged, mkcert re-execs itself through `sudo` to get that root step,
+# which fails with no controlling terminal/askpass agent -- exactly the
+# environment NativeDev's GUI runs in. NativeDev performs that single step
+# itself here, through the already-authenticated helper, instead of shelling
+# out to mkcert as root (which would also create a second, mismatched CA
+# under root's own home directory unless CAROOT/HOME were preserved just so).
+MKCERT_SYSTEM_ANCHOR_DIR = Path("/usr/local/share/ca-certificates")
 
 
 def _read_os_release(path: Path = Path("/etc/os-release")) -> dict[str, str]:
@@ -285,6 +297,65 @@ def _installable_file(value: str, uid: int | None = None) -> bool:
     if not match:
         return False
     return uid is None or int(match.group("uid")) == uid
+
+
+def _safe_mkcert_caroot(value, uid: int) -> Path | None:
+    """Resolve+validate a client-supplied mkcert CAROOT for uid, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        account = pwd.getpwuid(uid)
+    except KeyError:
+        return None
+    try:
+        home = Path(account.pw_dir).resolve()
+        resolved = Path(value).resolve()
+    except OSError:
+        return None
+    if not resolved.is_dir():
+        return None
+    try:
+        if resolved.stat().st_uid != uid:
+            return None
+    except OSError:
+        return None
+    # mkcert's default CAROOT (and any XDG_DATA_HOME override a developer is
+    # likely to use) lives under their own home directory. Anything outside
+    # of it is refused rather than guessed at.
+    try:
+        resolved.relative_to(home)
+    except ValueError:
+        return None
+    return resolved
+
+
+def _execute_cert_trust_local_ca(request: dict, uid: int, timeout: int | None) -> subprocess.CompletedProcess:
+    caroot = _safe_mkcert_caroot(request.get("caroot"), uid)
+    if caroot is None:
+        raise RuntimeError("mkcert CA root is outside the developer's home directory")
+    root_cert = caroot / "rootCA.pem"
+    if not root_cert.is_file() or root_cert.is_symlink():
+        raise RuntimeError(f"mkcert root certificate not found at {root_cert}")
+    data = root_cert.read_bytes()
+    if b"BEGIN CERTIFICATE" not in data:
+        raise RuntimeError("mkcert root certificate does not look like a PEM certificate")
+
+    MKCERT_SYSTEM_ANCHOR_DIR.mkdir(parents=True, exist_ok=True)
+    # Scoped by uid: each developer account gets its own anchor file, and
+    # re-running this action after mkcert regenerates its CA simply replaces
+    # the same file rather than accumulating stale entries.
+    destination = MKCERT_SYSTEM_ANCHOR_DIR / f"nativedev-mkcert-{uid}.crt"
+    _atomic_write_bytes(destination, data, mode=0o644)
+
+    env = dict(os.environ)
+    env["PATH"] = SAFE_PATH
+    return subprocess.run(
+        [_binary("update-ca-certificates")],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
 
 
 def _allowed_php_package(value: str) -> bool:
@@ -1030,6 +1101,13 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
             *(["--no-install-recommends"] if verb == "install" else []),
             package,
         ]
+
+    if action == "cert.trust_local_ca":
+        if set(request).difference({"protocol", "action", "timeout", "caroot"}):
+            raise RuntimeError("Local CA trust operation contains unsupported fields")
+        if _safe_mkcert_caroot(request.get("caroot"), uid) is None:
+            raise RuntimeError("mkcert CA root is outside the developer's home directory")
+        return []
 
     if action == "apt.update":
         return [_binary("apt-get"), "update"]
@@ -1851,6 +1929,10 @@ def _execute_application_update(timeout: int | None) -> subprocess.CompletedProc
 
 def execute_operation(request: dict, uid: int, timeout: int | None) -> subprocess.CompletedProcess:
     action = request.get("action")
+
+    if action == "cert.trust_local_ca":
+        command_for_operation(request, uid)
+        return _execute_cert_trust_local_ca(request, uid, timeout)
 
     if action == "application.update":
         command_for_operation(request, uid)

@@ -21,7 +21,7 @@ NM_DNSMASQ = Path("/etc/NetworkManager/dnsmasq.d/nativedev-test.conf")
 NGINX_CERT_DIR = Path("/etc/nginx/nativedev")
 NGINX_CERT = NGINX_CERT_DIR / "nativedev.pem"
 NGINX_KEY = NGINX_CERT_DIR / "nativedev-key.pem"
-NGINX_WILDCARD_MARKER = "# NativeDev wildcard router v1"
+NGINX_WILDCARD_MARKER = "# NativeDev wildcard router v2"
 NGINX_ROUTING_SIGNATURE_PREFIX = "# NativeDev routing signature: "
 WEB_USER = "www-data"
 PHP_DEFAULT = "default"
@@ -366,6 +366,21 @@ class LocalDevManager:
             return None
         return f"{project.name}.{self.config.domain}".lower()
 
+    def _project_secure_hostname(self, project: Path) -> str | None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project.name):
+            return None
+        return f"{project.name}.secure.{self.config.domain}".lower()
+
+    def project_http_url(self, project: Path) -> str | None:
+        project = self._validate_project(project)
+        host = self._project_hostname(project)
+        return f"http://{host}" if host else None
+
+    def project_https_url(self, project: Path) -> str | None:
+        project = self._validate_project(project)
+        host = self._project_secure_hostname(project)
+        return f"https://{host}" if host else None
+
     def _known_project_routes(self) -> dict[str, Path]:
         routes: dict[str, Path] = {}
         for project in self.projects():
@@ -391,7 +406,7 @@ class LocalDevManager:
             self.config.save()
 
     def render_nginx(self) -> str:
-        """Render one persistent wildcard router instead of one server per project."""
+        """Render persistent HTTP and optional HTTPS wildcard routers."""
         domain = self.config.domain
         default_version = self.default_php_version()
         if not default_version:
@@ -405,28 +420,52 @@ class LocalDevManager:
         default_socket = f"unix:{self.php.developer_socket_path(default_version)}"
         installed = set(self.php.installed_fpm_versions())
         routes = self._known_project_routes()
-        dynamic_path = self._nginx_template_path(str(self.park_dir) + os.sep, "nativedev_auto_project")
         domain_re = re.escape(domain)
 
-        project_map = [
-            "map $host $nativedev_project_dir {",
+        http_dynamic_path = self._nginx_template_path(
+            str(self.park_dir) + os.sep, "nativedev_http_project"
+        )
+        https_dynamic_path = self._nginx_template_path(
+            str(self.park_dir) + os.sep, "nativedev_https_project"
+        )
+
+        http_project_map = [
+            "map $host $nativedev_http_project_dir {",
+            '    default "";',
+        ]
+        https_project_map = [
+            "map $host $nativedev_https_project_dir {",
             '    default "";',
         ]
         for host, project in sorted(routes.items()):
-            # Normal lowercase DNS-safe projects are intentionally *not* baked
-            # into the file. Their host always resolves through the live park
-            # fallback, so delete/recreate/rename workflows stay zero-reload.
-            # Exact entries exist only to preserve already-known legacy names
-            # such as Shop, foo_bar or foo.bar on case-sensitive filesystems.
+            # Lowercase DNS-safe names stay zero-reload through the live park
+            # fallback. Exact entries preserve already-known legacy names such
+            # as Shop, foo_bar or foo.bar on case-sensitive filesystems.
             if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", project.name):
-                project_map.append(f"    {host} {self._nginx_quote(str(project))};")
-        project_map.append(
-            f"    ~^(?<nativedev_auto_project>[a-z0-9][a-z0-9-]*)\\.{domain_re}$ {dynamic_path};"
-        )
-        project_map.append("}")
+                http_project_map.append(
+                    f"    {host} {self._nginx_quote(str(project))};"
+                )
+                secure_host = self._project_secure_hostname(project)
+                if secure_host:
+                    https_project_map.append(
+                        f"    {secure_host} {self._nginx_quote(str(project))};"
+                    )
 
-        php_map = [
-            "map $host $nativedev_php_backend {",
+        http_project_map.append(
+            f"    ~^(?<nativedev_http_project>[a-z0-9][a-z0-9-]*)\\.{domain_re}$ {http_dynamic_path};"
+        )
+        https_project_map.append(
+            f"    ~^(?<nativedev_https_project>[a-z0-9][a-z0-9-]*)\\.secure\\.{domain_re}$ {https_dynamic_path};"
+        )
+        http_project_map.append("}")
+        https_project_map.append("}")
+
+        http_php_map = [
+            "map $host $nativedev_http_php_backend {",
+            f"    default {self._nginx_quote(default_socket)};",
+        ]
+        https_php_map = [
+            "map $host $nativedev_https_php_backend {",
             f"    default {self._nginx_quote(default_socket)};",
         ]
         for host, project in sorted(routes.items()):
@@ -434,29 +473,25 @@ class LocalDevManager:
             if version == PHP_DEFAULT or version not in installed:
                 continue
             socket_value = f"unix:{self.php.developer_socket_path(version)}"
-            php_map.append(f"    {host} {self._nginx_quote(socket_value)};")
-        php_map.append("}")
+            quoted_socket = self._nginx_quote(socket_value)
+            http_php_map.append(f"    {host} {quoted_socket};")
+            secure_host = self._project_secure_hostname(project)
+            if secure_host:
+                https_php_map.append(f"    {secure_host} {quoted_socket};")
+        http_php_map.append("}")
+        https_php_map.append("}")
 
-        ssl = ""
-        if self.https_ready():
-            ssl = (
-                "    listen 443 ssl;\n"
-                "    listen [::]:443 ssl;\n"
-                f"    ssl_certificate {NGINX_CERT};\n"
-                f"    ssl_certificate_key {NGINX_KEY};\n"
-            )
-
-        server = f"""server {{
+        http_server = f"""server {{
     listen 80;
     listen [::]:80;
-{ssl}    server_name ~^.+\\.{domain_re}$;
+    server_name ~^.+\\.{domain_re}$;
 
-    if ($nativedev_project_dir = "") {{ return 404; }}
-    if (!-d $nativedev_project_dir) {{ return 404; }}
+    if ($nativedev_http_project_dir = "") {{ return 404; }}
+    if (!-d $nativedev_http_project_dir) {{ return 404; }}
 
-    set $nativedev_document_root $nativedev_project_dir;
-    if (-d "$nativedev_project_dir/public") {{
-        set $nativedev_document_root "$nativedev_project_dir/public";
+    set $nativedev_document_root $nativedev_http_project_dir;
+    if (-d "$nativedev_http_project_dir/public") {{
+        set $nativedev_document_root "$nativedev_http_project_dir/public";
     }}
 
     root $nativedev_document_root;
@@ -469,7 +504,7 @@ class LocalDevManager:
     location ~ \\.php$ {{
         try_files $uri =404;
         include fastcgi_params;
-        fastcgi_pass $nativedev_php_backend;
+        fastcgi_pass $nativedev_http_php_backend;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_param HTTPS $https if_not_empty;
     }}
@@ -479,21 +514,68 @@ class LocalDevManager:
     }}
 }}
 """
-        return "\n".join(
-            [
-                NGINX_WILDCARD_MARKER,
-                NGINX_ROUTING_SIGNATURE_PREFIX + self._routing_signature(),
-                "# Managed by NativeDev. Manual edits may be replaced.",
-                f"# PHP-FPM workers run as local developer: {self.php.developer_user}",
-                "# New lowercase project directories under the park are routable without regeneration.",
-                "",
-                *project_map,
-                "",
-                *php_map,
-                "",
-                server,
-            ]
-        )
+
+        https_server = ""
+        if self.https_ready():
+            https_server = f"""server {{
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name ~^.+\\.secure\\.{domain_re}$;
+
+    ssl_certificate {NGINX_CERT};
+    ssl_certificate_key {NGINX_KEY};
+
+    if ($nativedev_https_project_dir = "") {{ return 404; }}
+    if (!-d $nativedev_https_project_dir) {{ return 404; }}
+
+    set $nativedev_document_root $nativedev_https_project_dir;
+    if (-d "$nativedev_https_project_dir/public") {{
+        set $nativedev_document_root "$nativedev_https_project_dir/public";
+    }}
+
+    root $nativedev_document_root;
+    index index.php index.html index.htm;
+
+    location / {{
+        try_files $uri $uri/ /index.php?$query_string;
+    }}
+
+    location ~ \\.php$ {{
+        try_files $uri =404;
+        include fastcgi_params;
+        fastcgi_pass $nativedev_https_php_backend;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param HTTPS $https if_not_empty;
+    }}
+
+    location ~ /\\. {{
+        deny all;
+    }}
+}}
+"""
+
+        sections = [
+            NGINX_WILDCARD_MARKER,
+            NGINX_ROUTING_SIGNATURE_PREFIX + self._routing_signature(),
+            "# Managed by NativeDev. Manual edits may be replaced.",
+            f"# PHP-FPM workers run as local developer: {self.php.developer_user}",
+            "# HTTP:  project.<domain>",
+            "# HTTPS: project.secure.<domain>",
+            "# New lowercase project directories under the park are routable without regeneration.",
+            "",
+            *http_project_map,
+            "",
+            *https_project_map,
+            "",
+            *http_php_map,
+            "",
+            *https_php_map,
+            "",
+            http_server,
+        ]
+        if https_server:
+            sections.extend([https_server])
+        return "\n".join(sections)
 
     def configure_nginx_sites(self) -> None:
         if not shutil.which("nginx"):
@@ -502,7 +584,7 @@ class LocalDevManager:
         self._reconcile_https_state()
         default_version = self.default_php_version()
         if not default_version:
-            raise RuntimeError("Install and start a PHP-FPM version before configuring wildcard *.test routing")
+            raise RuntimeError("Install and start a PHP-FPM version before configuring local wildcard routing")
 
         versions_needed: set[str] = {default_version}
         installed = set(self.php.installed_fpm_versions())
@@ -561,7 +643,36 @@ class LocalDevManager:
     def trust_mkcert_ca(self) -> None:
         if not self.mkcert_installed():
             raise RuntimeError("mkcert is not installed")
-        result = self.runner.run(["mkcert", "-install"], timeout=180)
+        if not shutil.which("certutil"):
+            # mkcert silently skips (rather than errors on) the Firefox/Chrome
+            # NSS step when certutil is missing, which used to look like a
+            # successful "Trust local CA" click while the browser stayed
+            # untrusted. Debian's mkcert package does not pull this in on its
+            # own, so fail loudly here instead of leaving that confusing gap.
+            raise RuntimeError(
+                "certutil is not installed, so mkcert cannot register the local CA with "
+                "Firefox/Chrome. Install libnss3-tools (sudo apt install libnss3-tools) "
+                "and try again."
+            )
+
+        caroot_result = self.runner.run(["mkcert", "-CAROOT"], timeout=30)
+        caroot = (caroot_result.stdout or "").strip()
+        if not caroot_result.ok or not caroot:
+            raise RuntimeError(caroot_result.output or "Could not determine mkcert's local CA directory")
+
+        # The system trust store step of `mkcert -install` needs root, and
+        # mkcert gets it by re-executing itself through `sudo`. That has no
+        # controlling terminal or askpass agent inside NativeDev's GUI
+        # session and fails outright. NativeDev performs that one root-only
+        # step itself, through its own already-authenticated privileged
+        # helper, pointed at the developer's real CA directory.
+        self.runner.privileged_operation("cert.trust_local_ca", check=True, timeout=180, caroot=caroot)
+
+        # The system store is now trusted, so this unprivileged pass only
+        # needs to register the CA with the per-user Firefox/Chrome NSS
+        # databases. TRUST_STORES=nss stops mkcert from retrying (and
+        # re-sudo-ing) the system store step, which would just fail again.
+        result = self.runner.run(["mkcert", "-install"], timeout=180, env={"TRUST_STORES": "nss"})
         if not result.ok:
             raise RuntimeError(result.output or "mkcert CA installation failed")
 
@@ -580,8 +691,8 @@ class LocalDevManager:
                     str(cert),
                     "-key-file",
                     str(key),
-                    f"*.{domain}",
-                    domain,
+                    f"*.secure.{domain}",
+                    f"secure.{domain}",
                     "localhost",
                     "127.0.0.1",
                 ],

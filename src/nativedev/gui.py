@@ -2213,7 +2213,7 @@ class ProjectsPage(Page):
         self.body.append(
             page_header(
                 "Projects",
-                "Per-project PHP-FPM version for *.test sites.",
+                "Open each project over HTTP or optional local HTTPS.",
                 self.refresh,
             )
         )
@@ -2240,6 +2240,8 @@ class ProjectsPage(Page):
                         "path": project,
                         "root": self.context.localdev.document_root(project),
                         "prefs": self.context.localdev.project_preferences(project),
+                        "http_url": self.context.localdev.project_http_url(project),
+                        "https_url": self.context.localdev.project_https_url(project),
                         "readable_error": "",
                     }
                 )
@@ -2247,6 +2249,8 @@ class ProjectsPage(Page):
                 "projects": rows,
                 "default_php": default_php,
                 "fpm_versions": fpm_versions,
+                "nginx_ready": self.context.localdev.nginx_ready(),
+                "https_ready": self.context.localdev.https_ready(),
             }
 
         def done(data):
@@ -2273,8 +2277,12 @@ class ProjectsPage(Page):
                         item["path"],
                         item["root"],
                         item["prefs"],
+                        item["http_url"],
+                        item["https_url"],
                         data["default_php"],
                         data["fpm_versions"],
+                        data["nginx_ready"],
+                        data["https_ready"],
                         item["readable_error"],
                     )
                 )
@@ -2287,18 +2295,62 @@ class ProjectsPage(Page):
         project: Path,
         docroot: Path,
         prefs: dict[str, str],
+        http_url: str | None,
+        https_url: str | None,
         default_php: str,
         fpm_versions: list[str],
+        nginx_ready: bool,
+        https_ready: bool,
         readable_error: str,
     ) -> Gtk.Widget:
         box = card()
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
         copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         copy.set_hexpand(True)
-        copy.append(label(f"{project.name}.{self.context.config.domain}", "section-title"))
+        copy.append(label(project.name, "section-title"))
         copy.append(label(str(project), "muted", wrap=True))
         if docroot != project:
             copy.append(label(f"Document root: {docroot}", "muted", wrap=True))
+
+        if http_url and https_url:
+            link = Gtk.Label()
+link.set_markup(
+    f'HTTPS  <a href="{https_url}">{https_url}</a>'
+)
+link.set_halign(Gtk.Align.START)
+link.set_wrap(True)
+link.add_css_class("muted")
+
+copy.append(link)
+        else:
+            copy.append(label("This project name cannot be mapped to a local hostname.", "error-text", wrap=True))
+
+        open_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        open_http = Gtk.Button(label="Open HTTP")
+        open_http.set_sensitive(bool(http_url and nginx_ready))
+        if not nginx_ready:
+            open_http.set_tooltip_text("Configure wildcard Nginx routing first.")
+
+        open_https = Gtk.Button(label="Open HTTPS")
+        open_https.set_sensitive(bool(https_url and nginx_ready and https_ready))
+        if not nginx_ready:
+            open_https.set_tooltip_text("Configure wildcard Nginx routing first.")
+        elif not https_ready:
+            open_https.set_tooltip_text("Generate the local *.secure domain certificate first.")
+
+        def open_uri(_button, uri: str | None):
+            if not uri:
+                return
+            try:
+                Gio.AppInfo.launch_default_for_uri(uri, None)
+            except Exception as exc:
+                self.window.set_activity(False, str(exc), error=True)
+
+        open_http.connect("clicked", open_uri, http_url)
+        open_https.connect("clicked", open_uri, https_url)
+        open_actions.append(open_http)
+        open_actions.append(open_https)
+        copy.append(open_actions)
         top.append(copy)
 
         controls = Gtk.Grid(column_spacing=10, row_spacing=8)
@@ -2365,7 +2417,7 @@ class ProjectsPage(Page):
 class LocalDevPage(Page):
     def __init__(self, window: "MainWindow"):
         super().__init__(window)
-        self.body.append(page_header("Local development", "Park projects, configure *.test, Nginx and trusted local HTTPS.", self.refresh))
+        self.body.append(page_header("Local development", "HTTP uses project.<TLD>; HTTPS uses project.secure.<TLD>.", self.refresh))
         self.settings_card = card()
         self.dns_card = card()
         self.nginx_card = card()
@@ -2389,7 +2441,7 @@ class LocalDevPage(Page):
                 "projects": self.context.localdev.projects(),
                 "nginx": self.context.localdev.nginx_ready(),
                 "mkcert": self.context.localdev.mkcert_installed(),
-                "https": self.context.config.https_enabled,
+                "https": self.context.localdev.https_ready(),
             }
 
         def done(data):
@@ -2415,7 +2467,8 @@ class LocalDevPage(Page):
             sites.append(
                 label(
                     f"After one-time setup, a new folder named with lowercase letters, numbers or hyphens inside {self.context.localdev.park_dir} "
-                    f"is immediately available as folder.{self.context.config.domain} — NativeDev does not need to be open. "
+                    f"is immediately available over HTTP as folder.{self.context.config.domain} — NativeDev does not need to be open. "
+                    f"When local HTTPS is enabled, the same project is available as folder.secure.{self.context.config.domain}. "
                     "A public/ directory is selected automatically when present. Default PHP is used unless a project is pinned on the Projects page.",
                     "muted",
                     wrap=True,
@@ -2430,7 +2483,7 @@ class LocalDevPage(Page):
                 lambda *_: confirm(
                     self.window,
                     "Configure NativeDev wildcard Nginx routing?",
-                    "NativeDev will install one persistent *.test router, prepare an inheritable read-only Nginx ACL on the park directory, validate with nginx -t, and reload Nginx. New projects will not require regeneration.",
+                    f"NativeDev will install persistent HTTP (*.{self.context.config.domain}) and optional HTTPS (*.secure.{self.context.config.domain}) routing, prepare an inheritable read-only Nginx ACL on the park directory, validate with nginx -t, and reload Nginx. New projects will not require regeneration.",
                     lambda: self.action(site_btn, self.context.localdev.configure_nginx_sites, success_message="Wildcard Nginx routing ready", after=self.refresh),
                 ),
             )
@@ -2439,17 +2492,23 @@ class LocalDevPage(Page):
 
             https = [label("Local HTTPS", "section-title")]
             https.append(status_pill("mkcert installed" if data["mkcert"] else "mkcert missing", data["mkcert"]))
+            https.append(
+                status_pill(
+                    f"*.secure.{self.context.config.domain} certificate ready" if data["https"] else "HTTPS not configured",
+                    data["https"],
+                )
+            )
             if data["mkcert"]:
                 trust = Gtk.Button(label="Trust local CA")
                 trust.connect("clicked", lambda *_: self.action(trust, self.context.localdev.trust_mkcert_ca, success_message="Local CA trust configured"))
-                enable = Gtk.Button(label=(f"Generate *.{self.context.config.domain} certificate"))
+                enable = Gtk.Button(label=(f"Generate *.secure.{self.context.config.domain} certificate"))
                 enable.add_css_class("suggested-action")
                 enable.connect(
                     "clicked",
                     lambda *_: confirm(
                         self.window,
                         "Enable HTTPS for local sites?",
-                        "A wildcard certificate is generated with mkcert and copied to NativeDev's Nginx certificate directory.",
+                        f"A wildcard certificate for *.secure.{self.context.config.domain} is generated with mkcert and copied to NativeDev's Nginx certificate directory.",
                         lambda: self.action(enable, self.context.localdev.enable_https, success_message="HTTPS enabled", after=self.refresh),
                     ),
                 )

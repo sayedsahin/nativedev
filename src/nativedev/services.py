@@ -47,7 +47,16 @@ COMPONENTS: tuple[ComponentSpec, ...] = (
         "Native RabbitMQ message broker from the system repositories.",
     ),
     ComponentSpec("composer", "Composer", ("composer",), None, "composer", "CLI tool; no system service."),
-    ComponentSpec("mkcert", "mkcert", ("mkcert",), None, "mkcert", "Local certificate tool; no system service."),
+    ComponentSpec(
+        "mkcert",
+        "mkcert",
+        ("mkcert", "libnss3-tools"),
+        None,
+        "mkcert",
+        "Local certificate tool. libnss3-tools (certutil) is installed alongside it -- "
+        "without it mkcert can generate certificates but cannot register its CA with "
+        "Firefox/Chrome's NSS databases, so trusted local HTTPS would silently not work.",
+    ),
     ComponentSpec(
         "mailpit",
         "Mailpit",

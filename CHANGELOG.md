@@ -1,5 +1,12 @@
 # Change-log
 
+## [0.3.0] - 2026-09-12
+- Fixed nginx not found in debian
+- Change mkcert architecture, ssl make for .secure.test only
+- mkcert install with required library
+- update logo
+
+
 ## [0.3.0] - 2026-09-09
 - Fixed silently uninstall adminer and phpMyAdmin when all php version uninstalled
     - adminer/phpmyadmin switch to another php version when it's available

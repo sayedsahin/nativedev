@@ -2459,6 +2459,10 @@ class LocalDevPage(Page):
                 https.append(actions)
             else:
                 https.append(label("Install mkcert from Services & tools first.", "muted"))
+                install_btn = Gtk.Button(label="Install mkcert")
+                install_btn.add_css_class("suggested-action")
+                install_btn.connect("clicked", lambda *_: self.window.open_page("services"))
+                https.append(install_btn)
             self._replace(self.https_card, https)
             return False
 
@@ -2709,6 +2713,15 @@ class MainWindow(Gtk.ApplicationWindow):
         # subpages do not mutate the PHP runtime/provider inventory shown on
         # the parent page, so avoid an unnecessary asynchronous refresh.
         self.stack.set_visible_child_name("php")
+
+    def open_page(self, key: str) -> None:
+        """Jump to a top-level sidebar destination (e.g. from a cross-page hint)."""
+        for index in range(len(self.PAGES)):
+            row = self.sidebar.get_row_at_index(index)
+            if row is not None and row.get_name() == key:
+                self.sidebar.select_row(row)
+                return
+        raise RuntimeError(f"Unknown page: {key}")
 
     def _update_timer_tick(self) -> bool:
         # The lightweight hourly timer only checks the local timestamp. The

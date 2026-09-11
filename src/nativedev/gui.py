@@ -2313,15 +2313,8 @@ class ProjectsPage(Page):
             copy.append(label(f"Document root: {docroot}", "muted", wrap=True))
 
         if http_url and https_url:
-            link = Gtk.Label()
-link.set_markup(
-    f'HTTPS  <a href="{https_url}">{https_url}</a>'
-)
-link.set_halign(Gtk.Align.START)
-link.set_wrap(True)
-link.add_css_class("muted")
-
-copy.append(link)
+            copy.append(label(f"HTTP   {http_url}", "muted", wrap=True))
+            copy.append(label(f"HTTPS  {https_url}", "muted", wrap=True))
         else:
             copy.append(label("This project name cannot be mapped to a local hostname.", "error-text", wrap=True))
 

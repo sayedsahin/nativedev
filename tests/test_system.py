@@ -70,11 +70,13 @@ class NginxRenderTests(unittest.TestCase):
             manager = LocalDevManager(None, None, None, AppConfig(park_dir=str(root), domain="test"), StubPhp())
             rendered = manager.render_nginx()
             self.assertIn(NGINX_WILDCARD_MARKER, rendered)
-            self.assertIn("map $host $nativedev_project_dir", rendered)
-            self.assertIn("$nativedev_auto_project", rendered)
-            self.assertIn('if (-d "$nativedev_project_dir/public")', rendered)
+            self.assertIn("map $host $nativedev_http_project_dir", rendered)
+            self.assertIn("map $host $nativedev_https_project_dir", rendered)
+            self.assertIn("$nativedev_http_project", rendered)
+            self.assertIn("$nativedev_https_project", rendered)
+            self.assertIn('if (-d "$nativedev_http_project_dir/public")', rendered)
             self.assertIn("root $nativedev_document_root;", rendered)
-            self.assertIn("fastcgi_pass $nativedev_php_backend;", rendered)
+            self.assertIn("fastcgi_pass $nativedev_http_php_backend;", rendered)
             self.assertIn("php8.4-fpm-nativedev-1000.sock", rendered)
             self.assertNotIn(f'shop.test "{root / "shop"}";', rendered)
             self.assertNotIn("server_name shop.test;", rendered)
@@ -89,8 +91,10 @@ class NginxRenderTests(unittest.TestCase):
             manager = LocalDevManager(None, None, None, AppConfig(park_dir=str(root), domain="test"), StubPhp())
             rendered = manager.render_nginx()
             self.assertIn(f'shop.test "{root / "Shop"}";', rendered)
-            self.assertIn(r"(?<nativedev_auto_project>[a-z0-9][a-z0-9-]*)\.test$", rendered)
-            self.assertIn(f'"{root}/$nativedev_auto_project"', rendered)
+            self.assertIn(r"(?<nativedev_http_project>[a-z0-9][a-z0-9-]*)\.test$", rendered)
+            self.assertIn(r"(?<nativedev_https_project>[a-z0-9][a-z0-9-]*)\.secure\.test$", rendered)
+            self.assertIn(f'"{root}/$nativedev_http_project"', rendered)
+            self.assertIn(f'"{root}/$nativedev_https_project"', rendered)
 
     def test_project_can_pin_an_installed_php_fpm_version(self):
         from nativedev.config import AppConfig
@@ -118,7 +122,8 @@ class NginxRenderTests(unittest.TestCase):
             root = Path(td)
             manager = LocalDevManager(None, None, None, AppConfig(park_dir=str(root)), StubPhp())
             rendered = manager.render_nginx()
-            self.assertIn(f'"{root}/$nativedev_auto_project"', rendered)
+            self.assertIn(f'"{root}/$nativedev_http_project"', rendered)
+            self.assertIn(f'"{root}/$nativedev_https_project"', rendered)
 
     def test_new_project_defaults_to_default_php(self):
         from nativedev.config import AppConfig
@@ -275,7 +280,7 @@ class PrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=uid)[0]
 
     def test_allows_structured_native_operations(self):
-        protocol = 23
+        protocol = 24
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "restart", "now": False, "service": "nginx"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "disable", "now": True, "service": "php8.4-fpm"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["redis-tools"]}))
@@ -297,7 +302,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/php/8.4/fpm/pool.d/nativedev-1001.conf"]}, uid=1000))
 
     def test_rejects_raw_commands_and_outside_packages(self):
-        protocol = 23
+        protocol = 24
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "run", "argv": ["bash", "-c", "id"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["openssh-server"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "apt.install", "packages": ["/tmp/nativedev-test/debsuryorg-archive-keyring.deb"]}))
@@ -348,7 +353,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         import subprocess
 
         request = {
-            "protocol": 23,
+            "protocol": 24,
             "action": "php.multi_repo.configure",
             "backend": "ondrej",
             "codename": "noble",
@@ -372,7 +377,7 @@ class PrivilegedHelperTests(unittest.TestCase):
 
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
             argv = command_for_operation({
-                "protocol": 23,
+                "protocol": 24,
                 "action": "apt.remove",
                 "packages": ["mariadb-server"],
             }, uid=1000)
@@ -387,7 +392,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {
-            "protocol": 23,
+            "protocol": 24,
             "action": "apt.remove",
             "packages": ["mariadb-server"],
             "timeout": None,
@@ -412,7 +417,7 @@ class PrivilegedHelperTests(unittest.TestCase):
     def test_client_and_helper_protocol_versions_match(self):
         from nativedev.system import PRIVILEGE_PROTOCOL_VERSION
         from nativedev.privileged_helper import PROTOCOL_VERSION
-        self.assertEqual(PRIVILEGE_PROTOCOL_VERSION, 23)
+        self.assertEqual(PRIVILEGE_PROTOCOL_VERSION, 24)
         self.assertEqual(PROTOCOL_VERSION, PRIVILEGE_PROTOCOL_VERSION)
 
     def test_client_translates_to_semantic_rpc_without_argv(self):
@@ -428,7 +433,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
 
         request = {
-            "protocol": 23,
+            "protocol": 24,
             "action": "php.install_packages",
             "packages": ["php8.4-cli", "php8.4-gd", "php8.4-opcache"],
         }
@@ -449,7 +454,7 @@ class PrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         from nativedev.system import CommandResult
 
-        request = {"protocol": 23, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
+        request = {"protocol": 24, "action": "php.extension_install", "version": "8.4", "extension": "redis"}
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("nativedev.privileged_helper.subprocess.run") as run, \
              patch("nativedev.privileged_helper._run_extension_module_pair") as modules:
@@ -615,7 +620,7 @@ class ServiceCleanupTests(unittest.TestCase):
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
             self.assertEqual(
                 command_for_operation({
-                    "protocol": 23,
+                    "protocol": 24,
                     "action": "apt.install",
                     "packages": ["rabbitmq-server"],
                 }, uid=1000),
@@ -623,7 +628,7 @@ class ServiceCleanupTests(unittest.TestCase):
             )
             self.assertEqual(
                 command_for_operation({
-                    "protocol": 23,
+                    "protocol": 24,
                     "action": "systemd.service",
                     "verb": "start",
                     "now": False,
@@ -633,7 +638,7 @@ class ServiceCleanupTests(unittest.TestCase):
             )
             self.assertEqual(
                 command_for_operation({
-                    "protocol": 23,
+                    "protocol": 24,
                     "action": "systemd.service",
                     "verb": "restart",
                     "now": False,
@@ -642,15 +647,15 @@ class ServiceCleanupTests(unittest.TestCase):
                 ["/usr/bin/systemctl", "restart", "mailpit"],
             )
 
-        self.assertTrue(validate_operation({"protocol": 23, "action": "mailpit.install"})[0])
-        self.assertTrue(validate_operation({"protocol": 23, "action": "mailpit.uninstall"})[0])
+        self.assertTrue(validate_operation({"protocol": 24, "action": "mailpit.install"})[0])
+        self.assertTrue(validate_operation({"protocol": 24, "action": "mailpit.uninstall"})[0])
         self.assertFalse(validate_operation({
-            "protocol": 23,
+            "protocol": 24,
             "action": "mailpit.install",
             "url": "https://example.invalid/mailpit",
         })[0])
         self.assertFalse(validate_operation({
-            "protocol": 23,
+            "protocol": 24,
             "action": "mailpit.uninstall",
             "path": "/tmp/mailpit",
         })[0])
@@ -689,11 +694,11 @@ class ServiceCleanupTests(unittest.TestCase):
         from nativedev.privileged_helper import validate_operation
 
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"):
-            self.assertTrue(validate_operation({"protocol": 23, "action": "database.delete_all_data", "key": "mariadb"})[0])
-            self.assertTrue(validate_operation({"protocol": 23, "action": "database.delete_all_data", "key": "postgresql"})[0])
-            self.assertFalse(validate_operation({"protocol": 23, "action": "database.delete_all_data", "key": "redis"})[0])
-            self.assertFalse(validate_operation({"protocol": 23, "action": "database.delete_all_data", "key": "mariadb", "path": "/tmp/evil"})[0])
-            self.assertFalse(validate_operation({"protocol": 23, "action": "database.cleanup_component", "key": "mariadb"})[0])
+            self.assertTrue(validate_operation({"protocol": 24, "action": "database.delete_all_data", "key": "mariadb"})[0])
+            self.assertTrue(validate_operation({"protocol": 24, "action": "database.delete_all_data", "key": "postgresql"})[0])
+            self.assertFalse(validate_operation({"protocol": 24, "action": "database.delete_all_data", "key": "redis"})[0])
+            self.assertFalse(validate_operation({"protocol": 24, "action": "database.delete_all_data", "key": "mariadb", "path": "/tmp/evil"})[0])
+            self.assertFalse(validate_operation({"protocol": 24, "action": "database.cleanup_component", "key": "mariadb"})[0])
 
 
 class ManagerPackageExportTests(unittest.TestCase):
@@ -1018,7 +1023,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
             return validate_operation(request, uid=1000)[0]
 
     def test_database_rpc_derives_username_from_peer_and_rejects_client_user_or_sql_selectors(self):
-        protocol = 23
+        protocol = 24
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.account_status"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "database.mysql.ensure_dev_account", "password": "nativedev", "admin_password": "root secret !@#"}))
@@ -1037,7 +1042,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 23, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 24, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
         calls = []
 
         def run_admin(sql, admin_password, timeout, env):
@@ -1062,7 +1067,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 23, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 24, "action": "database.mysql.ensure_dev_account", "password": "nativedev"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"), \
              patch("nativedev.privileged_helper._run_mysql_admin") as run_admin:
             run_admin.return_value = subprocess.CompletedProcess(["mariadb"], 1, "", "ERROR 1045")
@@ -1077,7 +1082,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         import subprocess
 
         request = {
-            "protocol": 23,
+            "protocol": 24,
             "action": "database.mysql.ensure_dev_account",
             "password": "nativedev",
             "admin_password": "Root secret !@#",
@@ -1126,7 +1131,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 23, "action": "database.postgresql.ensure_cluster"}
+        request = {"protocol": 24, "action": "database.postgresql.ensure_cluster"}
         calls = []
 
         def fake_run(argv, **kwargs):
@@ -1156,7 +1161,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 23, "action": "database.postgresql.ensure_cluster"}
+        request = {"protocol": 24, "action": "database.postgresql.ensure_cluster"}
         calls = []
 
         def fake_run(argv, **kwargs):
@@ -1188,7 +1193,7 @@ class DatabasePrivilegedHelperTests(unittest.TestCase):
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
-        request = {"protocol": 23, "action": "database.postgresql.ensure_dev_account", "password": "nativedev"}
+        request = {"protocol": 24, "action": "database.postgresql.ensure_dev_account", "password": "nativedev"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"), \
              patch("nativedev.privileged_helper._postgres_admin_argv", return_value=["/usr/bin/runuser", "psql"]), \
              patch("nativedev.privileged_helper.subprocess.run") as run:
@@ -1208,7 +1213,7 @@ class DatabaseDataResetHelperTests(unittest.TestCase):
         from unittest.mock import patch, call
         from nativedev.privileged_helper import execute_operation
 
-        request = {"protocol": 23, "action": "database.delete_all_data", "key": "mariadb"}
+        request = {"protocol": 24, "action": "database.delete_all_data", "key": "mariadb"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"), \
              patch("nativedev.privileged_helper._remove_fixed_tree") as remove:
             result = execute_operation(request, uid=1000, timeout=90)
@@ -1219,7 +1224,7 @@ class DatabaseDataResetHelperTests(unittest.TestCase):
         from unittest.mock import patch, call
         from nativedev.privileged_helper import execute_operation
 
-        request = {"protocol": 23, "action": "database.delete_all_data", "key": "postgresql"}
+        request = {"protocol": 24, "action": "database.delete_all_data", "key": "postgresql"}
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"), \
              patch("nativedev.privileged_helper._remove_fixed_tree") as remove:
             result = execute_operation(request, uid=1000, timeout=90)
@@ -2500,7 +2505,7 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"):
             self.assertEqual(
                 command_for_operation(
-                    {"protocol": 23, "action": "developer_tool.install", "tool": "phpmyadmin"},
+                    {"protocol": 24, "action": "developer_tool.install", "tool": "phpmyadmin"},
                     uid=1000,
                 ),
                 [
@@ -2510,7 +2515,7 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(
                 command_for_operation(
-                    {"protocol": 23, "action": "developer_tool.uninstall", "tool": "adminer"},
+                    {"protocol": 24, "action": "developer_tool.uninstall", "tool": "adminer"},
                     uid=1000,
                 ),
                 [
@@ -2519,16 +2524,16 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
                 ],
             )
 
-        self.assertTrue(validate_operation({"protocol": 23, "action": "developer_tool.install", "tool": "adminer"})[0])
-        self.assertFalse(validate_operation({"protocol": 23, "action": "developer_tool.install", "tool": "evil"})[0])
+        self.assertTrue(validate_operation({"protocol": 24, "action": "developer_tool.install", "tool": "adminer"})[0])
+        self.assertFalse(validate_operation({"protocol": 24, "action": "developer_tool.install", "tool": "evil"})[0])
         self.assertFalse(validate_operation({
-            "protocol": 23,
+            "protocol": 24,
             "action": "developer_tool.install",
             "tool": "adminer",
             "package": "openssh-server",
         })[0])
         self.assertFalse(validate_operation({
-            "protocol": 23,
+            "protocol": 24,
             "action": "developer_tool.install",
             "tool": "phpmyadmin",
             "url": "https://example.invalid/tool.deb",
@@ -2539,7 +2544,7 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
         import subprocess
         from nativedev.privileged_helper import execute_operation
 
-        request = {"protocol": 23, "action": "developer_tool.install", "tool": "phpmyadmin"}
+        request = {"protocol": 24, "action": "developer_tool.install", "tool": "phpmyadmin"}
         completed = subprocess.CompletedProcess([], 0, "", "")
         with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("nativedev.privileged_helper.subprocess.run", return_value=completed) as run, \
@@ -2744,13 +2749,13 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
         from unittest.mock import patch
         with patch("nativedev.privileged_helper._database_username_for_uid", return_value="developer"):
             self.assertTrue(validate_operation({
-                "protocol": 23, "action": "developer_tool.reconcile", "tool": "phpmyadmin"
+                "protocol": 24, "action": "developer_tool.reconcile", "tool": "phpmyadmin"
             })[0])
             self.assertFalse(validate_operation({
-                "protocol": 23, "action": "developer_tool.reconcile", "tool": "adminer"
+                "protocol": 24, "action": "developer_tool.reconcile", "tool": "adminer"
             })[0])
             self.assertFalse(validate_operation({
-                "protocol": 23, "action": "developer_tool.reconcile", "tool": "phpmyadmin",
+                "protocol": 24, "action": "developer_tool.reconcile", "tool": "phpmyadmin",
                 "path": "/tmp/evil",
             })[0])
 
@@ -2758,17 +2763,17 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
         from nativedev.privileged_helper import validate_operation
 
         self.assertTrue(validate_operation({
-            "protocol": 23, "action": "developer_tool.adminer_sqlite.install"
+            "protocol": 24, "action": "developer_tool.adminer_sqlite.install"
         })[0])
         self.assertTrue(validate_operation({
-            "protocol": 23, "action": "developer_tool.adminer_sqlite.uninstall"
+            "protocol": 24, "action": "developer_tool.adminer_sqlite.uninstall"
         })[0])
         self.assertFalse(validate_operation({
-            "protocol": 23, "action": "developer_tool.adminer_sqlite.install",
+            "protocol": 24, "action": "developer_tool.adminer_sqlite.install",
             "path": "/tmp/wrapper.php",
         })[0])
         self.assertFalse(validate_operation({
-            "protocol": 23, "action": "developer_tool.adminer_sqlite.install",
+            "protocol": 24, "action": "developer_tool.adminer_sqlite.install",
             "password": "changed",
         })[0])
 
@@ -2953,7 +2958,7 @@ class DeveloperToolIntegrationTests(unittest.TestCase):
         self.assertIn('self._section_panel(\n                "SYSTEM TOOLS"', gui)
         self.assertIn('self._section_panel(\n                "DEVELOPER TOOLS"', gui)
         self.assertIn('section.add_css_class("services-section")', gui)
-        self.assertIn('Generate *.{self.context.config.domain} certificate', gui)
+        self.assertIn('Generate *.secure.{self.context.config.domain} certificate', gui)
         self.assertIn('button {\n  min-height: 15px;', (Path(__file__).resolve().parents[1] / "src" / "nativedev" / "style.css").read_text())
         developer_card = gui[gui.index("def _developer_web_tool_card"):gui.index("def _use_default_database_user")]
         self.assertLess(developer_card.index("actions.append(php_dropdown)"), developer_card.index("actions.append(uninstall)"))
@@ -3147,19 +3152,19 @@ class ApplicationPackageSecurityTests(unittest.TestCase):
     def test_application_update_rpc_has_no_client_controlled_package_repository_or_url(self):
         from nativedev.privileged_helper import validate_operation
 
-        self.assertTrue(validate_operation({"protocol": 23, "action": "application.update"})[0])
+        self.assertTrue(validate_operation({"protocol": 24, "action": "application.update"})[0])
         self.assertFalse(validate_operation({
-            "protocol": 23,
+            "protocol": 24,
             "action": "application.update",
             "package": "openssh-server",
         })[0])
         self.assertFalse(validate_operation({
-            "protocol": 23,
+            "protocol": 24,
             "action": "application.update",
             "repository": "https://example.invalid/",
         })[0])
         self.assertFalse(validate_operation({
-            "protocol": 23,
+            "protocol": 24,
             "action": "application.update",
             "url": "https://example.invalid/evil.deb",
         })[0])

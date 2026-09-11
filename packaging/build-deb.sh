@@ -67,7 +67,7 @@ install -m 0644 "$ROOT/CHANGELOG.md" "$STAGE/usr/share/doc/nativedev/CHANGELOG.m
 install -m 0644 "$ROOT/LICENSE" "$STAGE/usr/share/doc/nativedev/copyright"
 
 install -m 0644 \
-  "$ROOT/data/icons/hicolor/128x128/nativedev.png" \
+  "$ROOT/data/icons/hicolor/128x128/apps/nativedev.png" \
   "$STAGE/usr/share/icons/hicolor/128x128/apps/nativedev.png"
 
 install -m 0644 \

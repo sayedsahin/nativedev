@@ -58,17 +58,28 @@ NativeDev currently supports **Debian and Ubuntu based Linux distributions**.
 
 | Feature | Description |
 |---|---|
-| 🌐 **Local Development** | Create projects with `.test` domains, native Nginx routing, and automatic framework web root detection |
+| 🌐 **Local Development** | Park projects with HTTP at `project.test`, optional HTTPS at `project.secure.test`, native Nginx wildcard routing, and automatic framework web root detection |
 | 🐘 **PHP** | Manage PHP versions, extensions, and runtime settings |
 | 🟢 **Node.js** | Manage Node.js versions and development environments |
 | ⚙️ **Services & Tools** | Control Nginx, MariaDB, PostgreSQL, Redis, Memcached, RabbitMQ, Composer, mkcert, and more |
-| 📁 **Projects** | Organize and manage local development projects |
+| 📁 **Projects** | Manage detected projects, choose PHP per project, and open the HTTP or HTTPS local URL directly |
 | 🗄️ **Database Management** | Manage local database services and developer database access |
 | 🔍 **System Doctor** | Check system requirements and detect configuration issues |
 | 🔐 **Safe Privilege Management** | Perform system operations through a controlled privilege boundary |
 | 🧩 **Native System Integration** | Works with distro packages, systemd services, filesystem permissions, and Linux conventions |
 
 **Supported services & tools:** Nginx · MariaDB · PostgreSQL · Redis · Memcached · RabbitMQ · Composer · mkcert · phpMyAdmin · Adminer · Mailpit
+
+### Local site URLs
+
+NativeDev keeps ordinary local development on HTTP and makes HTTPS optional:
+
+```text
+HTTP   → http://example.test
+HTTPS  → https://example.secure.test
+```
+
+The **Projects** page exposes both destinations with **Open HTTP** and **Open HTTPS**. HTTPS uses one mkcert wildcard certificate (`*.secure.test` with the default TLD), so adding a new project does not require a new certificate.
 
 ---
 
@@ -132,9 +143,10 @@ Linux System Resources
 
 📖 Detailed documentation:
 
-- [Architecture](docs/architecture.md)
-- [Security Model](docs/security-model.md)
-- [Privilege Protocol](docs/privilege-protocol.md)
+- [Why NativeDev](https://sayedsahin.github.io/nativedev-doc/why-nativedev)
+- [Architecture](https://sayedsahin.github.io/nativedev-doc/architecture)
+- [Security Model](https://sayedsahin.github.io/nativedev-doc/security)
+- [Local Development](https://sayedsahin.github.io/nativedev-doc/features/local-development)
 
 ---
 
@@ -167,16 +179,18 @@ For contributors and development:
 ./install.sh
 ```
 
-See the [Development Guide](docs/development.md) for details.
+See the [documentation](https://sayedsahin.github.io/nativedev-doc/) and [contributing guide](https://sayedsahin.github.io/nativedev-doc/contributing) for details.
 
 ---
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
-- [Security Model](docs/security-model.md)
-- [Privilege Protocol](docs/privilege-protocol.md)
-- [Development Guide](docs/development.md)
+- [Documentation home](https://sayedsahin.github.io/nativedev-doc/)
+- [Why NativeDev](https://sayedsahin.github.io/nativedev-doc/why-nativedev)
+- [Local Development](https://sayedsahin.github.io/nativedev-doc/features/local-development)
+- [Architecture](https://sayedsahin.github.io/nativedev-doc/architecture)
+- [Security Model](https://sayedsahin.github.io/nativedev-doc/security)
+- [Troubleshooting](https://sayedsahin.github.io/nativedev-doc/troubleshooting)
 
 ---
 

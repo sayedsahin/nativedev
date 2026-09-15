@@ -2441,7 +2441,7 @@ class LocalDevPage(Page):
             dns = [label(f"*.{self.context.config.domain} DNS", "section-title")]
             dns.append(status_pill("Ready" if data["dns"] else f"Not configured ({data['strategy']})", data["dns"]))
             dns_btn = Gtk.Button(label="Configure automatically")
-            dns_btn.set_sensitive(data["strategy"] == "networkmanager")
+            dns_btn.set_sensitive(data["strategy"] in ("networkmanager", "ubuntu-resolved"))
             dns_btn.add_css_class("suggested-action")
             dns_btn.connect(
                 "clicked",

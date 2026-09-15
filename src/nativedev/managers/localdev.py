@@ -18,7 +18,6 @@ NGINX_SITE = Path("/etc/nginx/sites-available/nativedev-sites.conf")
 NGINX_ENABLED = Path("/etc/nginx/sites-enabled/nativedev-sites.conf")
 NM_CONF = Path("/etc/NetworkManager/conf.d/nativedev-dns.conf")
 NM_DNSMASQ = Path("/etc/NetworkManager/dnsmasq.d/nativedev-test.conf")
-RESOLVED_CONF = Path("/etc/systemd/resolved.conf.d/nativedev.conf")
 NGINX_CERT_DIR = Path("/etc/nginx/nativedev")
 NGINX_CERT = NGINX_CERT_DIR / "nativedev.pem"
 NGINX_KEY = NGINX_CERT_DIR / "nativedev-key.pem"
@@ -230,12 +229,18 @@ class LocalDevManager:
     # ---- DNS ----------------------------------------------------------------
 
     def dns_strategy(self) -> str:
-        if self.systemd.is_active("systemd-resolved") and (
+        has_nm = (
             self.systemd.is_active("NetworkManager")
             or self.systemd.is_active("NetworkManager.service")
-        ):
+        )
+        has_resolved = (
+            self.systemd.is_active("systemd-resolved")
+            or self.systemd.is_active("systemd-resolved.service")
+        )
+
+        if has_resolved and has_nm:
             return "ubuntu-resolved"
-        if self.systemd.is_active("NetworkManager") or self.systemd.is_active("NetworkManager.service"):
+        if has_nm:
             return "networkmanager"
         return "unsupported"
 
@@ -246,59 +251,78 @@ class LocalDevManager:
             return False
 
     def _wait_for_dns_ready(self, timeout: float = 8.0, interval: float = 0.25) -> bool:
-        deadline = time.monotonic() + timeout
+        # `nmcli general reload dns-full` restarts NetworkManager's DNS plugin.
+        # NetworkManager documents that this shortly interrupts name
+        # resolution, so an immediate one-shot lookup is racy even when the
+        # resulting configuration is correct. Retry for a small bounded window
+        # instead of rolling back a healthy configuration on the first lookup.
+        deadline = time.monotonic() + max(0.0, timeout)
         while True:
             if self.dns_ready():
                 return True
             if time.monotonic() >= deadline:
                 return False
-            time.sleep(interval)
+            time.sleep(max(0.01, interval))
 
     def _reload_networkmanager_dns(self) -> None:
+        # Do not restart NetworkManager: that can bounce active connections,
+        # delay connectivity after boot, and interfere with VPN/Wi-Fi state.
+        # Reload only NetworkManager.conf and its DNS plugin.
         self.runner.run(["nmcli", "general", "reload", "conf"], privileged=True, check=True, timeout=30)
         self.runner.run(["nmcli", "general", "reload", "dns-full"], privileged=True, check=True, timeout=30)
-        self.runner.run(["systemctl", "restart", "systemd-resolved"], privileged=True, check=True, timeout=30)
 
     def configure_dns(self) -> None:
-        if self.dns_strategy() == "unsupported":
-            raise RuntimeError("Automatic wildcard DNS requires NetworkManager and systemd-resolved.")
-
+        strategy = self.dns_strategy()
+        if strategy not in ("networkmanager", "ubuntu-resolved"):
+            raise RuntimeError(
+                "Automatic wildcard DNS requires NetworkManager and systemd-resolved support."
+            )
         if not self.apt.is_installed("dnsmasq-base"):
             self.apt.install(["dnsmasq-base"])
+
+        previous_conf = NM_CONF.read_text(encoding="utf-8") if NM_CONF.exists() else None
+        previous_dnsmasq = NM_DNSMASQ.read_text(encoding="utf-8") if NM_DNSMASQ.exists() else None
 
         with tempfile.TemporaryDirectory(prefix="nativedev-dns-", dir="/tmp") as temp_dir:
             temp = Path(temp_dir)
             nm_conf = temp / "nativedev-dns.conf"
-            dnsmasq_conf = temp / "nativedev-test.conf"
-            resolved_conf = temp / "nativedev.conf"
-
+            nm_dnsmasq = temp / "nativedev-test.conf"
             nm_conf.write_text(
                 "# Managed by NativeDev Local Development\n[main]\ndns=dnsmasq\n",
                 encoding="utf-8",
             )
-            dnsmasq_conf.write_text(
-                "# Managed by NativeDev Local Development\n"
-                "listen-address=127.0.0.1\n"
-                "bind-interfaces\n"
-                f"address=/.{self.config.domain}/127.0.0.1\n",
+            nm_dnsmasq.write_text(
+                f"# Managed by NativeDev Local Development\naddress=/.{self.config.domain}/127.0.0.1\n",
                 encoding="utf-8",
             )
-            resolved_conf.write_text(
-                "# Managed by NativeDev Local Development\n[Resolve]\n"
-                "DNS=127.0.0.1\n"
-                f"Domains=~{self.config.domain}\n",
-                encoding="utf-8",
-            )
+            self.runner.run(["mkdir", "-p", str(NM_CONF.parent), str(NM_DNSMASQ.parent)], privileged=True, check=True)
 
-            self.runner.run(["mkdir", "-p", str(NM_CONF.parent), str(NM_DNSMASQ.parent), str(RESOLVED_CONF.parent)], privileged=True, check=True)
-            self.runner.run(["install", "-m", "0644", str(nm_conf), str(NM_CONF)], privileged=True, check=True)
-            self.runner.run(["install", "-m", "0644", str(dnsmasq_conf), str(NM_DNSMASQ)], privileged=True, check=True)
-            self.runner.run(["install", "-m", "0644", str(resolved_conf), str(RESOLVED_CONF)], privileged=True, check=True)
-
-            self._reload_networkmanager_dns()
-
-            if not self._wait_for_dns_ready():
-                raise RuntimeError(f"*.{self.config.domain} did not resolve to 127.0.0.1 after DNS reload")
+            try:
+                self.runner.run(["install", "-m", "0644", str(nm_conf), str(NM_CONF)], privileged=True, check=True)
+                self.runner.run(["install", "-m", "0644", str(nm_dnsmasq), str(NM_DNSMASQ)], privileged=True, check=True)
+                self._reload_networkmanager_dns()
+                if not self._wait_for_dns_ready():
+                    raise RuntimeError(
+                        f"*.{self.config.domain} did not resolve to 127.0.0.1 within 8 seconds after DNS reload"
+                    )
+            except Exception as exc:
+                # Restore only NativeDev-owned files. Never rewrite resolv.conf
+                # or connection profiles while recovering from a failed setup.
+                for old, dest, name in (
+                    (previous_conf, NM_CONF, "rollback-nm.conf"),
+                    (previous_dnsmasq, NM_DNSMASQ, "rollback-dnsmasq.conf"),
+                ):
+                    if old is None:
+                        self.runner.run(["rm", "-f", str(dest)], privileged=True, check=True)
+                    else:
+                        rollback = temp / name
+                        rollback.write_text(old, encoding="utf-8")
+                        self.runner.run(["install", "-m", "0644", str(rollback), str(dest)], privileged=True, check=True)
+                try:
+                    self._reload_networkmanager_dns()
+                except Exception as rollback_exc:
+                    raise RuntimeError(f"DNS setup failed and DNS reload rollback also failed: {rollback_exc}") from exc
+                raise
 
     # ---- Nginx ---------------------------------------------------------------
 

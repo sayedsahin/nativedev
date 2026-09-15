@@ -253,10 +253,34 @@ class LocalDevManager:
                 return False
             time.sleep(max(0.01, interval))
 
+    def _set_networkmanager_local_dns(self) -> None:
+        result = self.runner.run(
+            ["nmcli", "-t", "-f", "NAME", "connection", "show", "--active"],
+            privileged=False,
+            check=True,
+            timeout=30,
+        )
+        connections = [line.strip() for line in result.output.splitlines() if line.strip()]
+        if not connections:
+            raise RuntimeError("No active NetworkManager connection found for DNS configuration")
+
+        connection = connections[0]
+        self.runner.run(
+            [
+                "nmcli",
+                "connection",
+                "modify",
+                connection,
+                "ipv4.dns",
+                "127.0.0.1",
+            ],
+            privileged=False,
+            check=True,
+            timeout=30,
+        )
+
     def _reload_networkmanager_dns(self) -> None:
-        # Do not restart NetworkManager: that can bounce active connections,
-        # delay connectivity after boot, and interfere with VPN/Wi-Fi state.
-        # Reload only NetworkManager.conf and its DNS plugin.
+        # Do not restart NetworkManager: that can bounce active connections.
         self.runner.run(["nmcli", "general", "reload", "conf"], privileged=True, check=True, timeout=30)
         self.runner.run(["nmcli", "general", "reload", "dns-full"], privileged=True, check=True, timeout=30)
 
@@ -289,6 +313,7 @@ class LocalDevManager:
             try:
                 self.runner.run(["install", "-m", "0644", str(nm_conf), str(NM_CONF)], privileged=True, check=True)
                 self.runner.run(["install", "-m", "0644", str(nm_dnsmasq), str(NM_DNSMASQ)], privileged=True, check=True)
+                self._set_networkmanager_local_dns()
                 self._reload_networkmanager_dns()
                 if not self._wait_for_dns_ready():
                     raise RuntimeError(

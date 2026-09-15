@@ -20,6 +20,7 @@ TOOLS_HOSTS = (
 )
 NM_CONF = Path("/etc/NetworkManager/conf.d/nativedev-dns.conf")
 NM_DNSMASQ = Path("/etc/NetworkManager/dnsmasq.d/nativedev-test.conf")
+RESOLVED_CONF = Path("/etc/systemd/resolved.conf.d/nativedev.conf")
 DNS_MARKER = "# Managed by NativeDev Local Development"
 OLD_ADMINER_SQLITE = Path("/usr/lib/nativedev/adminer-sqlite/index.php")
 OLD_ADMINER_SQLITE_ROOT = OLD_ADMINER_SQLITE.parent
@@ -111,7 +112,7 @@ def cleanup_localdev() -> None:
     routing are deliberately preserved; NativeDev is only their management UI.
     """
     dns_changed = False
-    for path, predicate in ((NM_CONF, _managed_nm_conf), (NM_DNSMASQ, _managed_dnsmasq)):
+    for path, predicate in ((NM_CONF, _managed_nm_conf), (NM_DNSMASQ, _managed_dnsmasq), (RESOLVED_CONF, lambda p: DNS_MARKER in (_read_text(p) or ""))):
         if path.exists() or path.is_symlink():
             if predicate(path):
                 try:
@@ -123,6 +124,7 @@ def cleanup_localdev() -> None:
                 _warn(f"left unrecognised file untouched: {path}")
     if dns_changed:
         _reload_networkmanager_dns()
+        _run(["systemctl", "restart", "systemd-resolved"])
 
     site_text = _read_text(LOCALDEV_NGINX_SITE)
     site_managed = bool(site_text and LOCALDEV_NGINX_MARKER in site_text)

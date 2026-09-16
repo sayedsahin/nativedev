@@ -309,6 +309,14 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.install", "mode": "0644", "source": "/tmp/nativedev-fpm-test/pool.conf", "destination": "/etc/php/8.4/fpm/pool.d/nativedev-1000.conf"}, uid=1000))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/php/8.4/fpm/pool.d/nativedev-1000.conf"]}, uid=1000))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/php/8.4/fpm/pool.d/nativedev-1001.conf"]}, uid=1000))
+        # Wildcard DNS: dedicated dummy-link + dnsmasq unit, not the retired
+        # NetworkManager conf.d snippets.
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.mkdir", "paths": ["/etc/nativedev/dnsmasq.d"]}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.install", "mode": "0644", "source": "/tmp/nativedev-dns-test/wildcard.conf", "destination": "/etc/nativedev/dnsmasq.d/wildcard.conf"}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.install", "mode": "0644", "source": "/tmp/nativedev-dns-test/nativedev-dns.service", "destination": "/etc/systemd/system/nativedev-dns.service"}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/systemd/system/nativedev-dns.service", "/etc/nativedev/dnsmasq.d/wildcard.conf"]}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "enable", "now": True, "service": "nativedev-dns.service"}))
+        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.daemon_reload"}))
 
     def test_rejects_raw_commands_and_outside_packages(self):
         protocol = 24
@@ -328,6 +336,16 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.enable_modules", "version": "8.4", "sapi": "cli", "modules": ["xdebug"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.extension_enable", "version": "8.4", "extension": "evil"}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.extension_install", "version": "8.5", "extension": "opcache"}))
+        # Retired NM-based DNS paths and raw ip/resolvectl argv must stay
+        # rejected -- the client never gets to hand the helper an arbitrary
+        # binary, even one this app happens to need for DNS.
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.mkdir", "paths": ["/etc/NetworkManager/conf.d"]}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.install", "mode": "0644", "source": "/tmp/nativedev-dns-test/x.conf", "destination": "/etc/NetworkManager/conf.d/nativedev-dns.conf"}))
+        from nativedev.system import privileged_operation_for_command as _translate
+        with self.assertRaises(RuntimeError):
+            _translate(["resolvectl", "revert", "nativedev0"])
+        with self.assertRaises(RuntimeError):
+            _translate(["ip", "link", "del", "nativedev0"])
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.extension_enable", "version": "8.4", "extension": "gd", "sapi": "cli"}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.extension_install", "version": "8.4", "extension": "gd", "package": "php8.4-xdebug"}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.ini.apply", "version": "8.4", "settings": {"memory_limit": "512M\nauto_prepend_file=/tmp/x.php"}}))
@@ -434,8 +452,12 @@ class PrivilegedHelperTests(unittest.TestCase):
         request = privileged_operation_for_command(["systemctl", "enable", "--now", "nginx"])
         self.assertEqual(request["action"], "systemd.service")
         self.assertEqual(request["service"], "nginx")
-        self.assertTrue(request["now"])
-        self.assertNotIn("argv", request)
+
+    def test_client_translates_daemon_reload_without_service_argument(self):
+        from nativedev.system import privileged_operation_for_command
+        request = privileged_operation_for_command(["systemctl", "daemon-reload"])
+        self.assertEqual(request["action"], "systemd.daemon_reload")
+        self.assertNotIn("service", request)
 
     def test_php_install_restores_missing_ucf_files_without_overwriting_existing_config(self):
         from unittest.mock import patch

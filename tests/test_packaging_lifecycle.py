@@ -22,8 +22,9 @@ class PackagingLifecycleTests(unittest.TestCase):
         text = PRERM.read_text(encoding="utf-8")
         self.assertIn("remove|deconfigure", text)
         self.assertIn("upgrade|failed-upgrade", text)
-        self.assertIn("/etc/NetworkManager/conf.d/nativedev-dns.conf", text)
-        self.assertIn("/etc/NetworkManager/dnsmasq.d/nativedev-test.conf", text)
+        self.assertIn("/etc/systemd/system/nativedev-dns.service", text)
+        self.assertIn("/etc/nativedev/dnsmasq.d/wildcard.conf", text)
+        self.assertIn("nativedev-dns.service", text)
         self.assertIn("/etc/nginx/sites-available/nativedev-sites.conf", text)
         self.assertIn("/etc/nginx/sites-enabled/nativedev-sites.conf", text)
 

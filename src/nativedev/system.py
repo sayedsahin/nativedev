@@ -89,6 +89,8 @@ def privileged_operation_for_command(argv: Sequence[str], timeout: int | None = 
     if cmd == "systemctl":
         if not args:
             raise RuntimeError("systemctl action missing")
+        if args == ["daemon-reload"]:
+            return {**payload, "action": "systemd.daemon_reload"}
         verb = args[0]
         rest = args[1:]
         now = False

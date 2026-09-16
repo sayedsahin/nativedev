@@ -38,8 +38,8 @@ GITHUB_RELEASE_MAX_DEB = 64 * 1024 * 1024
 
 MANAGED_FILES = {
     "/etc/apt/sources.list.d/nativedev-sury-php.sources",
-    "/etc/NetworkManager/conf.d/nativedev-dns.conf",
-    "/etc/NetworkManager/dnsmasq.d/nativedev-test.conf",
+    "/etc/nativedev/dnsmasq.d/wildcard.conf",
+    "/etc/systemd/system/nativedev-dns.service",
     "/etc/nginx/sites-available/nativedev-sites.conf",
     "/etc/nginx/sites-enabled/nativedev-sites.conf",
     "/etc/nginx/conf.d/nativedev-tools.conf",
@@ -47,12 +47,11 @@ MANAGED_FILES = {
     "/etc/nginx/nativedev/nativedev-key.pem",
 }
 MANAGED_DIRS = {
-    "/etc/NetworkManager/conf.d",
-    "/etc/NetworkManager/dnsmasq.d",
+    "/etc/nativedev/dnsmasq.d",
     "/etc/nginx/nativedev",
 }
 SERVICE_RE = re.compile(
-    r"^(?:nginx|redis-server|memcached|rabbitmq-server|mailpit|mariadb|mysql|postgresql|php\d+\.\d+-fpm)(?:\.service)?$"
+    r"^(?:nginx|redis-server|memcached|rabbitmq-server|mailpit|mariadb|mysql|postgresql|php\d+\.\d+-fpm|nativedev-dns)(?:\.service)?$"
 )
 PHP_PACKAGE_RE = re.compile(r"^php\d+\.\d+(?:-[A-Za-z0-9][A-Za-z0-9.+~_-]*)?$")
 PHP_FPM_PACKAGE_RE = re.compile(r"^php\d+\.\d+-fpm$")
@@ -285,8 +284,8 @@ def _installable_file(value: str, uid: int | None = None) -> bool:
     # The Nginx enablement path is a symlink managed only by nginx.enable_site,
     # and the Sury source is written only by the semantic php.multi_repo.configure action.
     if value in {
-        "/etc/NetworkManager/conf.d/nativedev-dns.conf",
-        "/etc/NetworkManager/dnsmasq.d/nativedev-test.conf",
+        "/etc/nativedev/dnsmasq.d/wildcard.conf",
+        "/etc/systemd/system/nativedev-dns.service",
         "/etc/nginx/sites-available/nativedev-sites.conf",
         "/etc/nginx/conf.d/nativedev-tools.conf",
         "/etc/nginx/nativedev/nativedev.pem",
@@ -1139,6 +1138,9 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
             "Dpkg::Options::=--force-confmiss",
             *packages,
         ]
+
+    if action == "systemd.daemon_reload":
+        return [_binary("systemctl"), "daemon-reload"]
 
     if action == "systemd.service":
         verb = request.get("verb")

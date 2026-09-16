@@ -18,13 +18,18 @@ cleanup_localdev() {
     # Local Development integration is removed.  Standalone service/tool
     # integrations (.localhost tools, Mailpit, PHP INI, databases, etc.) are
     # preserved.
-    rm -f \
-        /etc/NetworkManager/conf.d/nativedev-dns.conf \
-        /etc/NetworkManager/dnsmasq.d/nativedev-test.conf
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now nativedev-dns.service >/dev/null 2>&1 || true
+    fi
 
-    if command -v nmcli >/dev/null 2>&1; then
-        nmcli general reload conf >/dev/null 2>&1 || true
-        nmcli general reload dns-full >/dev/null 2>&1 || true
+    rm -f \
+        /etc/systemd/system/nativedev-dns.service \
+        /etc/nativedev/dnsmasq.d/wildcard.conf
+    rmdir /etc/nativedev/dnsmasq.d 2>/dev/null || true
+    rmdir /etc/nativedev 2>/dev/null || true
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
     fi
 
     rm -f \

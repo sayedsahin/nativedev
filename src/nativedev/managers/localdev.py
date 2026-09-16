@@ -366,18 +366,20 @@ class LocalDevManager:
                 raise
 
     def teardown_dns(self) -> None:
-        """Remove NativeDev's wildcard DNS integration entirely (best-effort)."""
+        """Remove NativeDev's wildcard DNS integration entirely (best-effort).
+
+        Stopping the service is enough to also undo the dummy link and the
+        resolvectl registration: the unit's own ExecStopPost runs `resolvectl
+        revert`/`ip link del` as part of a normal stop. Nothing here calls
+        `ip`/`resolvectl` directly -- the privileged helper only executes a
+        small set of fixed, semantic actions (install/remove specific
+        NativeDev-owned files, manage specific systemd services), never
+        arbitrary client-supplied binaries.
+        """
         self.runner.run(["systemctl", "disable", "--now", DNS_SERVICE], privileged=True, check=False, timeout=30)
         self.runner.run(["rm", "-f", str(NATIVEDEV_DNS_UNIT)], privileged=True, check=False)
         self.runner.run(["rm", "-f", str(NATIVEDEV_DNS_CONF)], privileged=True, check=False)
         self.runner.run(["systemctl", "daemon-reload"], privileged=True, check=False, timeout=30)
-        resolvectl_bin = shutil.which("resolvectl") or "resolvectl"
-        ip_bin = shutil.which("ip") or "ip"
-        # The unit's own ExecStopPost already does this on a normal stop;
-        # repeated here (with check=False) to also cover a link left behind
-        # by an interrupted/failed run.
-        self.runner.run([resolvectl_bin, "revert", DNS_LINK_NAME], privileged=True, check=False, timeout=10)
-        self.runner.run([ip_bin, "link", "del", DNS_LINK_NAME], privileged=True, check=False, timeout=10)
 
     # ---- Nginx ---------------------------------------------------------------
 

@@ -184,13 +184,22 @@ class NginxRenderTests(unittest.TestCase):
 
 
 class DnsRegressionTests(unittest.TestCase):
-    def test_dns_config_does_not_restart_networkmanager(self):
+    def test_dns_config_never_touches_networkmanager_or_resolv_conf(self):
         localdev = (
             Path(__file__).resolve().parents[1] / "src" / "nativedev" / "managers" / "localdev.py"
         ).read_text()
-        self.assertIn('["nmcli", "general", "reload", "conf"]', localdev)
-        self.assertIn('["nmcli", "general", "reload", "dns-full"]', localdev)
+        # The wildcard integration runs on a NativeDev-owned dummy link via
+        # systemd-resolved/dnsmasq. It must never fall back to rewriting
+        # NetworkManager's global DNS backend, restarting NetworkManager, or
+        # touching /etc/resolv.conf directly.
+        self.assertIn('"ExecStart=', localdev)
+        self.assertIn("resolvectl", localdev)
+        self.assertNotIn("dns=dnsmasq", localdev)
+        self.assertNotIn("rc-manager", localdev)
         self.assertNotIn('self.systemd.restart("NetworkManager")', localdev)
+        self.assertNotIn('"/etc/resolv.conf"', localdev)
+        self.assertNotIn("Path(\"/etc/resolv.conf\")", localdev)
+        self.assertNotIn('["nmcli"', localdev)
 
 
 class HttpsKeyPermissionTests(unittest.TestCase):
@@ -1314,7 +1323,7 @@ class ControllerTests(unittest.TestCase):
         class LocalDev:
             def __init__(self): self.config = Config()
             def nginx_managed(self): return True
-            def dns_strategy(self): return "networkmanager"
+            def dns_strategy(self): return "systemd-resolved"
             def configure_dns(self): events.append(("dns", self.config.domain))
             def configure_nginx_sites(self): events.append(("nginx", self.config.park_dir, self.config.domain))
 
@@ -1339,7 +1348,7 @@ class ControllerTests(unittest.TestCase):
         class LocalDev:
             def __init__(self): self.config = Config()
             def nginx_managed(self): return True
-            def dns_strategy(self): events.append(("dns_strategy",)); return "networkmanager"
+            def dns_strategy(self): events.append(("dns_strategy",)); return "systemd-resolved"
             def configure_dns(self): events.append(("dns", self.config.domain))
             def configure_nginx_sites(self): events.append(("nginx", self.config.park_dir, self.config.domain))
 
@@ -1366,7 +1375,7 @@ class ControllerTests(unittest.TestCase):
                 self.config = Config()
                 self.nginx_calls = 0
             def nginx_managed(self): return True
-            def dns_strategy(self): return "networkmanager"
+            def dns_strategy(self): return "systemd-resolved"
             def configure_dns(self): events.append(("dns", self.config.domain))
             def configure_nginx_sites(self):
                 self.nginx_calls += 1
@@ -1398,7 +1407,7 @@ class ControllerTests(unittest.TestCase):
         class LocalDev:
             def __init__(self): self.config = Config()
             def nginx_managed(self): return True
-            def dns_strategy(self): return "networkmanager"
+            def dns_strategy(self): return "systemd-resolved"
             def configure_dns(self): events.append(("dns", self.config.domain))
             def enable_https(self): events.append(("https", self.config.domain))
             def configure_nginx_sites(self): events.append(("nginx", self.config.domain))

@@ -18,14 +18,15 @@ NGINX_SITE = Path("/etc/nginx/sites-available/nativedev-sites.conf")
 NGINX_ENABLED = Path("/etc/nginx/sites-enabled/nativedev-sites.conf")
 # Wildcard DNS talks to systemd-resolved directly on a dedicated, NativeDev-
 # owned link rather than switching NetworkManager's global DNS backend. That
-# older approach (NM_CONF/NM_DNSMASQ, "[main]\ndns=dnsmasq") was abandoned:
-# on Ubuntu it silently failed to commit through the `resolvconf` package's
-# NM integration, and even after fixing that, mixing the wildcard server
-# into the same link as the default upstream made systemd-resolved's server
-# selection unreliable (it would keep answering from the real upstream's
-# NXDOMAIN instead of falling back to dnsmasq). A dedicated dummy link
-# carrying only the `~<domain>` routing domain avoids both problems and
-# needs nothing NetworkManager-specific -- only systemd-resolved.
+# older approach (NM_CONF/NM_DNSMASQ, an NM main-config dnsmasq backend
+# directive) was abandoned: on Ubuntu it silently failed to commit through
+# the `resolvconf` package's NM integration, and even after fixing that,
+# mixing the wildcard server into the same link as the default upstream made
+# systemd-resolved's server selection unreliable (it would keep answering
+# from the real upstream's NXDOMAIN instead of falling back to dnsmasq). A
+# dedicated dummy link carrying only the `~<domain>` routing domain avoids
+# both problems and needs nothing NetworkManager-specific -- only
+# systemd-resolved.
 DNS_LINK_NAME = "nativedev0"
 DNS_LINK_ADDR = "169.254.100.1/32"  # link-local scope; never conflicts with real addressing
 DNS_LISTEN_ADDR = "127.0.0.1"

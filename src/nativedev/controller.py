@@ -74,8 +74,8 @@ class NativeDevController:
     def update_localdev_settings(self, park_dir: str, domain: str) -> None:
         """Persist Local Development settings and reconcile derived infrastructure.
 
-        TLD changes update NativeDev's NetworkManager wildcard DNS when that
-        integration is supported. Existing wildcard Nginx state is rebuilt for
+        TLD changes update NativeDev's wildcard DNS (via systemd-resolved) when
+        that integration is supported. Existing wildcard Nginx state is rebuilt for
         either TLD or park changes, including the new park ACL. When HTTPS is
         enabled, its wildcard certificate is regenerated for the new TLD.
 
@@ -105,7 +105,7 @@ class NativeDevController:
                 raise
 
             try:
-                if domain_changed and dns_strategy == "networkmanager":
+                if domain_changed and dns_strategy == "systemd-resolved":
                     self.localdev.configure_dns()
 
                 # HTTPS certificates contain the TLD, so a domain change must
@@ -120,7 +120,7 @@ class NativeDevController:
                 config.save()
 
                 rollback_errors: list[str] = []
-                if domain_changed and dns_strategy == "networkmanager":
+                if domain_changed and dns_strategy == "systemd-resolved":
                     try:
                         self.localdev.configure_dns()
                     except Exception as rollback_exc:

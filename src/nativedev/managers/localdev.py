@@ -16,8 +16,24 @@ from .php import PhpManager
 
 NGINX_SITE = Path("/etc/nginx/sites-available/nativedev-sites.conf")
 NGINX_ENABLED = Path("/etc/nginx/sites-enabled/nativedev-sites.conf")
-NM_CONF = Path("/etc/NetworkManager/conf.d/nativedev-dns.conf")
-NM_DNSMASQ = Path("/etc/NetworkManager/dnsmasq.d/nativedev-test.conf")
+# Wildcard DNS talks to systemd-resolved directly on a dedicated, NativeDev-
+# owned link rather than switching NetworkManager's global DNS backend. That
+# older approach (NM_CONF/NM_DNSMASQ, "[main]\ndns=dnsmasq") was abandoned:
+# on Ubuntu it silently failed to commit through the `resolvconf` package's
+# NM integration, and even after fixing that, mixing the wildcard server
+# into the same link as the default upstream made systemd-resolved's server
+# selection unreliable (it would keep answering from the real upstream's
+# NXDOMAIN instead of falling back to dnsmasq). A dedicated dummy link
+# carrying only the `~<domain>` routing domain avoids both problems and
+# needs nothing NetworkManager-specific -- only systemd-resolved.
+DNS_LINK_NAME = "nativedev0"
+DNS_LINK_ADDR = "169.254.100.1/32"  # link-local scope; never conflicts with real addressing
+DNS_LISTEN_ADDR = "127.0.0.1"
+NATIVEDEV_DNS_CONF_DIR = Path("/etc/nativedev/dnsmasq.d")
+NATIVEDEV_DNS_CONF = NATIVEDEV_DNS_CONF_DIR / "wildcard.conf"
+NATIVEDEV_DNS_UNIT = Path("/etc/systemd/system/nativedev-dns.service")
+NATIVEDEV_DNS_PIDFILE = "/run/nativedev-dnsmasq.pid"
+DNS_SERVICE = "nativedev-dns.service"
 NGINX_CERT_DIR = Path("/etc/nginx/nativedev")
 NGINX_CERT = NGINX_CERT_DIR / "nativedev.pem"
 NGINX_KEY = NGINX_CERT_DIR / "nativedev-key.pem"
@@ -229,9 +245,15 @@ class LocalDevManager:
     # ---- DNS ----------------------------------------------------------------
 
     def dns_strategy(self) -> str:
-        if self.systemd.is_active("NetworkManager") or self.systemd.is_active("NetworkManager.service"):
-            return "networkmanager"
-        return "unsupported"
+        # The wildcard integration only needs a live systemd-resolved plus
+        # the `ip`/`resolvectl` tools -- NetworkManager itself is incidental
+        # (it happens to be what starts systemd-resolved on most desktops,
+        # but nothing here talks to NM directly anymore).
+        if not shutil.which("resolvectl"):
+            return "unsupported"
+        if not (self.systemd.is_active("systemd-resolved") or self.systemd.is_active("systemd-resolved.service")):
+            return "unsupported"
+        return "systemd-resolved"
 
     def dns_ready(self) -> bool:
         try:
@@ -240,11 +262,10 @@ class LocalDevManager:
             return False
 
     def _wait_for_dns_ready(self, timeout: float = 8.0, interval: float = 0.25) -> bool:
-        # `nmcli general reload dns-full` restarts NetworkManager's DNS plugin.
-        # NetworkManager documents that this shortly interrupts name
-        # resolution, so an immediate one-shot lookup is racy even when the
-        # resulting configuration is correct. Retry for a small bounded window
-        # instead of rolling back a healthy configuration on the first lookup.
+        # Starting/restarting the dnsmasq service and pushing the routing
+        # domain to systemd-resolved is not instantaneous. Retry for a small
+        # bounded window instead of rolling back a healthy configuration on
+        # the first lookup.
         deadline = time.monotonic() + max(0.0, timeout)
         while True:
             if self.dns_ready():
@@ -253,90 +274,109 @@ class LocalDevManager:
                 return False
             time.sleep(max(0.01, interval))
 
-    def _set_networkmanager_local_dns(self) -> None:
-        result = self.runner.run(
-            ["nmcli", "-t", "-f", "NAME", "connection", "show", "--active"],
-            privileged=False,
-            check=True,
-            timeout=30,
-        )
-        connections = [line.strip() for line in result.output.splitlines() if line.strip()]
-        if not connections:
-            raise RuntimeError("No active NetworkManager connection found for DNS configuration")
+    def _dns_binaries(self) -> tuple[str, str, str]:
+        ip_bin = shutil.which("ip")
+        resolvectl_bin = shutil.which("resolvectl")
+        dnsmasq_bin = shutil.which("dnsmasq")
+        missing = [name for name, path in (("ip", ip_bin), ("resolvectl", resolvectl_bin), ("dnsmasq", dnsmasq_bin)) if not path]
+        if missing:
+            raise RuntimeError(f"Required binaries not found on PATH: {', '.join(missing)}")
+        return ip_bin, resolvectl_bin, dnsmasq_bin
 
-        connection = connections[0]
-        self.runner.run(
-            [
-                "nmcli",
-                "connection",
-                "modify",
-                connection,
-                "ipv4.dns",
-                "127.0.0.1",
-            ],
-            privileged=False,
-            check=True,
-            timeout=30,
+    def _dns_unit_text(self, ip_bin: str, resolvectl_bin: str, dnsmasq_bin: str) -> str:
+        # `-` before the "link add" prefix means "ignore failure": the link
+        # may already exist from a previous run, which is fine.
+        return (
+            "# Managed by NativeDev Local Development. Do not edit by hand.\n"
+            "[Unit]\n"
+            f"Description=NativeDev wildcard DNS for *.{self.config.domain}\n"
+            "After=systemd-resolved.service network.target\n"
+            "Wants=systemd-resolved.service\n"
+            "\n"
+            "[Service]\n"
+            "Type=simple\n"
+            f"ExecStartPre=-{ip_bin} link add {DNS_LINK_NAME} type dummy\n"
+            f"ExecStartPre={ip_bin} link set {DNS_LINK_NAME} up\n"
+            f"ExecStartPre={ip_bin} addr replace {DNS_LINK_ADDR} dev {DNS_LINK_NAME}\n"
+            f"ExecStartPre={resolvectl_bin} dns {DNS_LINK_NAME} {DNS_LISTEN_ADDR}\n"
+            f"ExecStartPre={resolvectl_bin} domain {DNS_LINK_NAME} '~{self.config.domain}'\n"
+            f"ExecStart={dnsmasq_bin} --keep-in-foreground --no-resolv --no-hosts "
+            f"--bind-interfaces --listen-address={DNS_LISTEN_ADDR} --port=53 "
+            f"--conf-file=/dev/null --conf-dir={NATIVEDEV_DNS_CONF_DIR} "
+            f"--pid-file={NATIVEDEV_DNS_PIDFILE}\n"
+            f"ExecStopPost=-{resolvectl_bin} revert {DNS_LINK_NAME}\n"
+            f"ExecStopPost=-{ip_bin} link del {DNS_LINK_NAME}\n"
+            "Restart=on-failure\n"
+            "RestartSec=2\n"
+            "\n"
+            "[Install]\n"
+            "WantedBy=multi-user.target\n"
         )
-
-    def _reload_networkmanager_dns(self) -> None:
-        # Do not restart NetworkManager: that can bounce active connections.
-        self.runner.run(["nmcli", "general", "reload", "conf"], privileged=True, check=True, timeout=30)
-        self.runner.run(["nmcli", "general", "reload", "dns-full"], privileged=True, check=True, timeout=30)
 
     def configure_dns(self) -> None:
-        if self.dns_strategy() != "networkmanager":
+        if self.dns_strategy() != "systemd-resolved":
             raise RuntimeError(
-                "Automatic wildcard DNS currently supports NetworkManager-based Debian/Ubuntu-family desktops only. "
-                "NativeDev will not overwrite /etc/resolv.conf as a fallback."
+                "Automatic wildcard DNS requires systemd-resolved plus the `resolvectl`/`ip` "
+                "tools (present on Debian/Ubuntu-family desktops). NativeDev will not "
+                "overwrite /etc/resolv.conf as a fallback."
             )
         if not self.apt.is_installed("dnsmasq-base"):
             self.apt.install(["dnsmasq-base"])
 
-        previous_conf = NM_CONF.read_text(encoding="utf-8") if NM_CONF.exists() else None
-        previous_dnsmasq = NM_DNSMASQ.read_text(encoding="utf-8") if NM_DNSMASQ.exists() else None
+        ip_bin, resolvectl_bin, dnsmasq_bin = self._dns_binaries()
 
         with tempfile.TemporaryDirectory(prefix="nativedev-dns-", dir="/tmp") as temp_dir:
             temp = Path(temp_dir)
-            nm_conf = temp / "nativedev-dns.conf"
-            nm_dnsmasq = temp / "nativedev-test.conf"
-            nm_conf.write_text(
-                "# Managed by NativeDev Local Development\n[main]\ndns=dnsmasq\n",
-                encoding="utf-8",
-            )
-            nm_dnsmasq.write_text(
+            dnsmasq_conf = temp / "wildcard.conf"
+            dnsmasq_conf.write_text(
                 f"# Managed by NativeDev Local Development\naddress=/.{self.config.domain}/127.0.0.1\n",
                 encoding="utf-8",
             )
-            self.runner.run(["mkdir", "-p", str(NM_CONF.parent), str(NM_DNSMASQ.parent)], privileged=True, check=True)
+            unit_file = temp / "nativedev-dns.service"
+            unit_file.write_text(self._dns_unit_text(ip_bin, resolvectl_bin, dnsmasq_bin), encoding="utf-8")
+
+            self.runner.run(["mkdir", "-p", str(NATIVEDEV_DNS_CONF_DIR)], privileged=True, check=True)
+            self.runner.run(
+                ["install", "-m", "0644", str(dnsmasq_conf), str(NATIVEDEV_DNS_CONF)], privileged=True, check=True
+            )
+            self.runner.run(
+                ["install", "-m", "0644", str(unit_file), str(NATIVEDEV_DNS_UNIT)], privileged=True, check=True
+            )
+            self.runner.run(["systemctl", "daemon-reload"], privileged=True, check=True, timeout=30)
 
             try:
-                self.runner.run(["install", "-m", "0644", str(nm_conf), str(NM_CONF)], privileged=True, check=True)
-                self.runner.run(["install", "-m", "0644", str(nm_dnsmasq), str(NM_DNSMASQ)], privileged=True, check=True)
-                self._set_networkmanager_local_dns()
-                self._reload_networkmanager_dns()
+                # Everything NativeDev writes above (dnsmasq conf, unit file)
+                # is idempotent, so a re-run for a changed TLD just needs a
+                # restart to pick up the new content -- no "previous state"
+                # bookkeeping is needed since nothing pre-existing is touched.
+                self.runner.run(
+                    ["systemctl", "enable", "--now", DNS_SERVICE], privileged=True, check=True, timeout=30
+                )
+                self.runner.run(["systemctl", "restart", DNS_SERVICE], privileged=True, check=True, timeout=30)
                 if not self._wait_for_dns_ready():
                     raise RuntimeError(
                         f"*.{self.config.domain} did not resolve to 127.0.0.1 within 8 seconds after DNS reload"
                     )
-            except Exception as exc:
-                # Restore only NativeDev-owned files. Never rewrite resolv.conf
-                # or connection profiles while recovering from a failed setup.
-                for old, dest, name in (
-                    (previous_conf, NM_CONF, "rollback-nm.conf"),
-                    (previous_dnsmasq, NM_DNSMASQ, "rollback-dnsmasq.conf"),
-                ):
-                    if old is None:
-                        self.runner.run(["rm", "-f", str(dest)], privileged=True, check=True)
-                    else:
-                        rollback = temp / name
-                        rollback.write_text(old, encoding="utf-8")
-                        self.runner.run(["install", "-m", "0644", str(rollback), str(dest)], privileged=True, check=True)
-                try:
-                    self._reload_networkmanager_dns()
-                except Exception as rollback_exc:
-                    raise RuntimeError(f"DNS setup failed and DNS reload rollback also failed: {rollback_exc}") from exc
+            except Exception:
+                # Nothing here is pre-existing system state, so recovering
+                # from a failed setup is a full, unconditional teardown
+                # rather than a restore.
+                self.teardown_dns()
                 raise
+
+    def teardown_dns(self) -> None:
+        """Remove NativeDev's wildcard DNS integration entirely (best-effort)."""
+        self.runner.run(["systemctl", "disable", "--now", DNS_SERVICE], privileged=True, check=False, timeout=30)
+        self.runner.run(["rm", "-f", str(NATIVEDEV_DNS_UNIT)], privileged=True, check=False)
+        self.runner.run(["rm", "-f", str(NATIVEDEV_DNS_CONF)], privileged=True, check=False)
+        self.runner.run(["systemctl", "daemon-reload"], privileged=True, check=False, timeout=30)
+        resolvectl_bin = shutil.which("resolvectl") or "resolvectl"
+        ip_bin = shutil.which("ip") or "ip"
+        # The unit's own ExecStopPost already does this on a normal stop;
+        # repeated here (with check=False) to also cover a link left behind
+        # by an interrupted/failed run.
+        self.runner.run([resolvectl_bin, "revert", DNS_LINK_NAME], privileged=True, check=False, timeout=10)
+        self.runner.run([ip_bin, "link", "del", DNS_LINK_NAME], privileged=True, check=False, timeout=10)
 
     # ---- Nginx ---------------------------------------------------------------
 

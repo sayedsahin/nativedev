@@ -148,10 +148,8 @@ FPM_POOL_RE = re.compile(r"^/etc/php/(?P<version>\d+\.\d+)/fpm/pool\.d/nativedev
 TEMP_SOURCE_RE = re.compile(r"^/tmp/nativedev-[^/]+/.+$")
 SURY_KEYRING_URL = "https://packages.sury.org/debsuryorg-archive-keyring.deb"
 SURY_SOURCE_FILE = Path("/etc/apt/sources.list.d/nativedev-sury-php.sources")
-SURY_SUPPORTED_CODENAMES = {"bullseye", "bookworm", "trixie"}
 ONDREJ_PPA = "ppa:ondrej/php"
 ONDREJ_PPA_URI = "https://ppa.launchpadcontent.net/ondrej/php/ubuntu"
-ONDREJ_SUPPORTED_CODENAMES = {"jammy", "noble"}
 
 
 MAILPIT_RELEASE_API = "https://api.github.com/repos/axllent/mailpit/releases/latest"
@@ -259,13 +257,17 @@ def _validate_php_multi_repo_request(request: dict) -> tuple[str, str]:
     backend = request.get("backend")
     codename = request.get("codename")
     actual_backend, actual_codename = _php_multi_repo_target()
-    if backend != actual_backend or codename != actual_codename:
+    # The client can never supply an arbitrary backend/codename pair: it
+    # must exactly match what this system's own /etc/os-release resolves to
+    # (re-derived here root-side, not trusted from the request). An empty
+    # actual_backend means an unrecognized distro family -- nothing to
+    # configure. Beyond that, no fixed per-codename allowlist is enforced:
+    # Sury/Ondřej each maintain their own repo per release, so whether a
+    # given codename's repo actually exists is for apt to report, not for
+    # NativeDev to pre-guess with a list that goes stale on every new release.
+    if not actual_backend or backend != actual_backend or codename != actual_codename:
         raise RuntimeError("Multi-PHP repository request does not match the detected system")
-    if backend == "sury" and codename in SURY_SUPPORTED_CODENAMES:
-        return backend, codename
-    if backend == "ondrej" and codename in ONDREJ_SUPPORTED_CODENAMES:
-        return backend, codename
-    raise RuntimeError("Unsupported multi-PHP repository suite")
+    return backend, codename
 
 
 def _safe_temp_source(value: str) -> bool:

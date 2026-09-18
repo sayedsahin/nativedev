@@ -20,8 +20,6 @@ ONDREJ_PPA_URIS = (
 )
 APT_SOURCES_LIST = Path("/etc/apt/sources.list")
 APT_SOURCES_DIR = Path("/etc/apt/sources.list.d")
-SURY_SUPPORTED_CODENAMES = {"bullseye", "bookworm", "trixie"}
-ONDREJ_SUPPORTED_CODENAMES = {"jammy", "noble"}
 # NativeDev installs a practical local-development baseline rather than only the
 # minimum PHP runtime. These cover Laravel/Symfony requirements plus the common
 # database/image/archive modules used by typical projects. Core/common modules
@@ -264,12 +262,16 @@ class PhpManager:
 
     @property
     def multi_php_supported(self) -> bool:
-        backend = self.expected_multi_php_backend
-        if backend == "ondrej":
-            return self.distro.codename in ONDREJ_SUPPORTED_CODENAMES
-        if backend == "sury":
-            return self.distro.codename in SURY_SUPPORTED_CODENAMES
-        return False
+        # Sury and Ondřej each maintain their own repo per Debian/Ubuntu
+        # release -- NativeDev doesn't second-guess that with its own
+        # hardcoded per-codename allowlist (which would need a manual update
+        # on every new release, and would block a release those repos
+        # already support before we've gotten around to updating it).
+        # Support here means only "this distro family maps to a known
+        # backend"; if that backend doesn't actually have a repo for this
+        # specific codename yet, apt itself will report that plainly when
+        # configure_multi_php() runs.
+        return bool(self.expected_multi_php_backend)
 
     def configure_multi_php(self, *, explicit: bool = False) -> None:
         """Configure the distro-appropriate third-party multi-PHP repository."""
@@ -286,9 +288,10 @@ class PhpManager:
                 f"A different multi-PHP repository backend is already active ({active}). "
                 f"{self.distro.pretty_name} requires {required_name}."
             )
-        if not expected or not self.multi_php_supported:
+        if not expected:
             raise RuntimeError(
-                f"Multi-PHP is not supported for {self.distro.pretty_name} suite '{self.distro.codename}'."
+                f"Multi-PHP is not supported on {self.distro.pretty_name} "
+                "(not a recognized Debian- or Ubuntu-family distro)."
             )
 
         self.runner.privileged_operation(

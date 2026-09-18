@@ -1854,6 +1854,34 @@ class ProviderMigrationTests(unittest.TestCase):
         self.assertIn(ubuntu_derivative.multi_php_repository_name, ("Ondřej PHP PPA", "Sury"))
         self.assertTrue(ubuntu_derivative.multi_php_supported)
 
+    def test_multi_php_supported_does_not_hardcode_specific_codenames(self):
+        # Sury/Ondřej each maintain their own repo per release; NativeDev
+        # must not pre-block a codename it simply hasn't been updated to
+        # recognize yet (e.g. a new Ubuntu/Debian release at the time of
+        # writing). Support only requires knowing which backend applies to
+        # the distro family -- whether that backend's repo actually has this
+        # specific codename is for apt itself to report.
+        from nativedev.system import DistroInfo
+
+        future_ubuntu = PhpManager(None, object(), None, DistroInfo("ubuntu", "Ubuntu", "26.04", "resolute", (), "Ubuntu 26.04"))
+        future_debian = PhpManager(None, object(), None, DistroInfo("debian", "Debian", "14", "forky", (), "Debian 14"))
+        self.assertTrue(future_ubuntu.multi_php_supported)
+        self.assertTrue(future_debian.multi_php_supported)
+
+        unrecognized_family = PhpManager(None, object(), None, DistroInfo("fedora", "Fedora", "42", "", (), "Fedora 42"))
+        self.assertFalse(unrecognized_family.multi_php_supported)
+        with self.assertRaises(RuntimeError):
+            unrecognized_family.configure_multi_php(explicit=True)
+
+    def test_root_side_multi_repo_validation_has_no_codename_allowlist_either(self):
+        # The client/root boundary is enforced by exact-matching the
+        # request against os-release re-derived root-side (see
+        # _php_multi_repo_target), not by a separate hardcoded codename set
+        # that would need updating on every new release.
+        from nativedev import privileged_helper as ph
+        self.assertFalse(hasattr(ph, "SURY_SUPPORTED_CODENAMES"))
+        self.assertFalse(hasattr(ph, "ONDREJ_SUPPORTED_CODENAMES"))
+
     def test_php_multi_repo_detection_recognizes_existing_sury_and_ondrej_sources(self):
         from unittest.mock import patch
         from nativedev.system import DistroInfo

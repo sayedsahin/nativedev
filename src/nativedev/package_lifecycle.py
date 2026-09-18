@@ -21,6 +21,8 @@ TOOLS_HOSTS = (
 DNS_UNIT = Path("/etc/systemd/system/nativedev-dns.service")
 DNS_CONF = Path("/etc/nativedev/dnsmasq.d/wildcard.conf")
 DNS_SERVICE = "nativedev-dns.service"
+NM_CONF = Path("/etc/NetworkManager/conf.d/nativedev-dns.conf")
+NM_DNSMASQ = Path("/etc/NetworkManager/dnsmasq.d/nativedev-test.conf")
 DNS_MARKER = "# Managed by NativeDev Local Development"
 OLD_ADMINER_SQLITE = Path("/usr/lib/nativedev/adminer-sqlite/index.php")
 OLD_ADMINER_SQLITE_ROOT = OLD_ADMINER_SQLITE.parent
@@ -68,6 +70,15 @@ def _stop_dns_service() -> None:
             _warn(f"could not run '{' '.join(argv)}' during Local Development DNS cleanup")
 
 
+def _reload_networkmanager_dns() -> None:
+    if not shutil.which("nmcli"):
+        return
+    for scope in ("conf", "dns-full"):
+        result = _run(["nmcli", "general", "reload", scope])
+        if result.returncode != 0:
+            _warn(f"could not reload NetworkManager {scope} state after Local Development DNS cleanup")
+
+
 def _read_text(path: Path) -> str | None:
     try:
         if path.is_file() and not path.is_symlink():
@@ -92,6 +103,16 @@ def _managed_dnsmasq(path: Path) -> bool:
         return True
     lines = [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
     return len(lines) == 1 and bool(re.fullmatch(r"address=/\.[A-Za-z0-9._-]+/127\.0\.0\.1", lines[0]))
+
+
+def _managed_nm_conf(path: Path) -> bool:
+    text = _read_text(path)
+    if text is None:
+        return False
+    if DNS_MARKER in text:
+        return True
+    normalized = "\n".join(line.strip() for line in text.strip().splitlines())
+    return normalized in ("[main]\ndns=dnsmasq", "[main]\ndns=dnsmasq\nrc-manager=symlink")
 
 
 def _enabled_points_to_localdev() -> bool:
@@ -126,6 +147,20 @@ def cleanup_localdev() -> None:
             DNS_CONF.parent.rmdir()
         except OSError:
             pass  # not empty, or already gone -- fine either way
+
+    nm_dns_changed = False
+    for path, predicate in ((NM_CONF, _managed_nm_conf), (NM_DNSMASQ, _managed_dnsmasq)):
+        if path.exists() or path.is_symlink():
+            if predicate(path):
+                try:
+                    path.unlink()
+                    nm_dns_changed = True
+                except OSError as exc:
+                    _warn(f"could not remove {path}: {exc}")
+            else:
+                _warn(f"left unrecognised file untouched: {path}")
+    if nm_dns_changed:
+        _reload_networkmanager_dns()
 
     site_text = _read_text(LOCALDEV_NGINX_SITE)
     site_managed = bool(site_text and LOCALDEV_NGINX_MARKER in site_text)

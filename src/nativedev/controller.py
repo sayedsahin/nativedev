@@ -105,7 +105,7 @@ class NativeDevController:
                 raise
 
             try:
-                if domain_changed and dns_strategy == "systemd-resolved":
+                if domain_changed and dns_strategy != "unsupported":
                     self.localdev.configure_dns()
 
                 # HTTPS certificates contain the TLD, so a domain change must
@@ -120,7 +120,7 @@ class NativeDevController:
                 config.save()
 
                 rollback_errors: list[str] = []
-                if domain_changed and dns_strategy == "systemd-resolved":
+                if domain_changed and dns_strategy != "unsupported":
                     try:
                         self.localdev.configure_dns()
                     except Exception as rollback_exc:

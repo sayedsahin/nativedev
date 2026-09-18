@@ -22,6 +22,11 @@ class AppConfig:
     # LocalDevManager.project_php_version).
     php_version: str = ""
     https_enabled: bool = False
+    # Empty string means "auto-detect from distro" (see
+    # DEFAULT_DNS_MODEL_BY_DISTRO in managers/localdev.py). Set explicitly to
+    # "networkmanager-dnsmasq" or "dedicated-link" to override, e.g. for a
+    # newly-supported distro before it's added to the built-in map.
+    dns_model: str = ""
     projects: dict[str, dict[str, str]] = field(default_factory=dict)
     developer_tools: dict[str, dict[str, str]] = field(default_factory=dict)
 

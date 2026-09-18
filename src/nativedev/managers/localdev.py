@@ -11,22 +11,49 @@ import time
 from pathlib import Path
 
 from ..config import AppConfig, STATE_DIR
-from ..system import AptManager, CommandRunner, SystemdManager
+from ..system import AptManager, CommandRunner, DistroInfo, SystemdManager
 from .php import PhpManager
 
 NGINX_SITE = Path("/etc/nginx/sites-available/nativedev-sites.conf")
 NGINX_ENABLED = Path("/etc/nginx/sites-enabled/nativedev-sites.conf")
-# Wildcard DNS talks to systemd-resolved directly on a dedicated, NativeDev-
-# owned link rather than switching NetworkManager's global DNS backend. That
-# older approach (NM_CONF/NM_DNSMASQ, an NM main-config dnsmasq backend
-# directive) was abandoned: on Ubuntu it silently failed to commit through
-# the `resolvconf` package's NM integration, and even after fixing that,
-# mixing the wildcard server into the same link as the default upstream made
-# systemd-resolved's server selection unreliable (it would keep answering
-# from the real upstream's NXDOMAIN instead of falling back to dnsmasq). A
-# dedicated dummy link carrying only the `~<domain>` routing domain avoids
-# both problems and needs nothing NetworkManager-specific -- only
-# systemd-resolved.
+
+# NativeDev supports two wildcard-DNS implementations ("models"), because no
+# single one has proven reliable across every distro we've tested:
+#
+# - "networkmanager-dnsmasq": switches NetworkManager's own DNS backend to
+#   its bundled dnsmasq plugin. Simple (two static conf files, no extra
+#   service, easy uninstall) and matches Debian/MX's default environment.
+#   On Ubuntu this fails: the `resolvconf` package installed there conflicts
+#   with NM's own DNS-commit step.
+# - "dedicated-link": runs NativeDev's own dnsmasq as a systemd service on a
+#   NativeDev-owned dummy network link, registered with systemd-resolved via
+#   a `~<domain>` routing domain. More moving parts, but doesn't depend on
+#   NetworkManager or any particular resolvconf implementation, so it's the
+#   safe default for anything not already known-good on the simpler model.
+#
+# Which model runs on a given host is: an explicit `dns_model` in config.json
+# (set via `nativedev dns-model <name>`, or the future GUI control), else
+# DEFAULT_DNS_MODEL_BY_DISTRO keyed on /etc/os-release ID, else
+# DNS_MODEL_DEDICATED_LINK. Adding support for a new distro is then just
+# adding one line to DEFAULT_DNS_MODEL_BY_DISTRO (or telling the user to set
+# dns_model) once it's been verified -- no code branching needed elsewhere.
+DNS_MODEL_NETWORKMANAGER = "networkmanager-dnsmasq"
+DNS_MODEL_DEDICATED_LINK = "dedicated-link"
+DNS_MODELS = {DNS_MODEL_NETWORKMANAGER, DNS_MODEL_DEDICATED_LINK}
+DEFAULT_DNS_MODEL_BY_DISTRO = {
+    "debian": DNS_MODEL_NETWORKMANAGER,
+    # MX Linux's /etc/os-release ID as observed at the time this was written.
+    # If a future MX release changes it, override with `dns_model` in
+    # config.json rather than relying on this default.
+    "mx": DNS_MODEL_NETWORKMANAGER,
+    "ubuntu": DNS_MODEL_DEDICATED_LINK,
+}
+
+# -- "networkmanager-dnsmasq" model --
+NM_CONF = Path("/etc/NetworkManager/conf.d/nativedev-dns.conf")
+NM_DNSMASQ = Path("/etc/NetworkManager/dnsmasq.d/nativedev-test.conf")
+
+# -- "dedicated-link" model --
 DNS_LINK_NAME = "nativedev0"
 DNS_LINK_ADDR = "169.254.100.1/32"  # link-local scope; never conflicts with real addressing
 DNS_LISTEN_ADDR = "127.0.0.1"
@@ -35,6 +62,7 @@ NATIVEDEV_DNS_CONF = NATIVEDEV_DNS_CONF_DIR / "wildcard.conf"
 NATIVEDEV_DNS_UNIT = Path("/etc/systemd/system/nativedev-dns.service")
 NATIVEDEV_DNS_PIDFILE = "/run/nativedev-dnsmasq.pid"
 DNS_SERVICE = "nativedev-dns.service"
+
 NGINX_CERT_DIR = Path("/etc/nginx/nativedev")
 NGINX_CERT = NGINX_CERT_DIR / "nativedev.pem"
 NGINX_KEY = NGINX_CERT_DIR / "nativedev-key.pem"
@@ -52,12 +80,14 @@ class LocalDevManager:
         systemd: SystemdManager,
         config: AppConfig,
         php: PhpManager,
+        distro: DistroInfo | None = None,
     ):
         self.runner = runner
         self.apt = apt
         self.systemd = systemd
         self.config = config
         self.php = php
+        self.distro = distro
 
     @property
     def park_dir(self) -> Path:
@@ -245,16 +275,30 @@ class LocalDevManager:
 
     # ---- DNS ----------------------------------------------------------------
 
+    def dns_model(self) -> str:
+        configured = self.config.dns_model
+        if configured in DNS_MODELS:
+            return configured
+        distro_id = self.distro.id if self.distro else ""
+        return DEFAULT_DNS_MODEL_BY_DISTRO.get(distro_id, DNS_MODEL_DEDICATED_LINK)
+
     def dns_strategy(self) -> str:
-        # The wildcard integration only needs a live systemd-resolved plus
-        # the `ip`/`resolvectl` tools -- NetworkManager itself is incidental
-        # (it happens to be what starts systemd-resolved on most desktops,
-        # but nothing here talks to NM directly anymore).
-        if not shutil.which("resolvectl"):
+        model = self.dns_model()
+        if model == DNS_MODEL_NETWORKMANAGER:
+            if self.systemd.is_active("NetworkManager") or self.systemd.is_active("NetworkManager.service"):
+                return model
             return "unsupported"
-        if not (self.systemd.is_active("systemd-resolved") or self.systemd.is_active("systemd-resolved.service")):
-            return "unsupported"
-        return "systemd-resolved"
+        if model == DNS_MODEL_DEDICATED_LINK:
+            # This model only needs a live systemd-resolved plus the
+            # `resolvectl`/`ip` tools -- NetworkManager itself is incidental
+            # here (it happens to be what starts systemd-resolved on most
+            # desktops, but nothing in this model talks to NM directly).
+            if not shutil.which("resolvectl"):
+                return "unsupported"
+            if not (self.systemd.is_active("systemd-resolved") or self.systemd.is_active("systemd-resolved.service")):
+                return "unsupported"
+            return model
+        return "unsupported"
 
     def dns_ready(self) -> bool:
         try:
@@ -263,10 +307,9 @@ class LocalDevManager:
             return False
 
     def _wait_for_dns_ready(self, timeout: float = 8.0, interval: float = 0.25) -> bool:
-        # Starting/restarting the dnsmasq service and pushing the routing
-        # domain to systemd-resolved is not instantaneous. Retry for a small
-        # bounded window instead of rolling back a healthy configuration on
-        # the first lookup.
+        # Neither model's reload/restart step is instantaneous. Retry for a
+        # small bounded window instead of rolling back a healthy
+        # configuration on the first lookup.
         deadline = time.monotonic() + max(0.0, timeout)
         while True:
             if self.dns_ready():
@@ -274,6 +317,109 @@ class LocalDevManager:
             if time.monotonic() >= deadline:
                 return False
             time.sleep(max(0.01, interval))
+
+    def configure_dns(self) -> None:
+        model = self.dns_model()
+        if self.dns_strategy() != model:
+            raise RuntimeError(
+                f"Automatic wildcard DNS ({model}) is not supported on this host. "
+                "NativeDev will not overwrite /etc/resolv.conf as a fallback."
+            )
+        if not self.apt.is_installed("dnsmasq-base"):
+            self.apt.install(["dnsmasq-base"])
+        if model == DNS_MODEL_NETWORKMANAGER:
+            self._configure_dns_networkmanager()
+        else:
+            self._configure_dns_dedicated_link()
+
+    def teardown_dns(self) -> None:
+        """Remove NativeDev's wildcard DNS integration entirely (best-effort).
+
+        Tears down whichever model is currently selected. If the selected
+        model was switched (e.g. via config) after a different model had
+        already been configured, call the specific `_teardown_dns_*` method
+        for the old model instead -- this only cleans up the active one.
+        """
+        if self.dns_model() == DNS_MODEL_NETWORKMANAGER:
+            self._teardown_dns_networkmanager()
+        else:
+            self._teardown_dns_dedicated_link()
+
+    # -- "networkmanager-dnsmasq" model ---------------------------------------
+
+    def _reload_networkmanager_dns(self) -> None:
+        # Do not restart NetworkManager: that can bounce active connections,
+        # delay connectivity after boot, and interfere with VPN/Wi-Fi state.
+        # Reload only NetworkManager.conf and its DNS plugin.
+        self.runner.run(["nmcli", "general", "reload", "conf"], privileged=True, check=True, timeout=30)
+        self.runner.run(["nmcli", "general", "reload", "dns-full"], privileged=True, check=True, timeout=30)
+
+    def _configure_dns_networkmanager(self) -> None:
+        previous_conf = NM_CONF.read_text(encoding="utf-8") if NM_CONF.exists() else None
+        previous_dnsmasq = NM_DNSMASQ.read_text(encoding="utf-8") if NM_DNSMASQ.exists() else None
+
+        with tempfile.TemporaryDirectory(prefix="nativedev-dns-", dir="/tmp") as temp_dir:
+            temp = Path(temp_dir)
+            nm_conf = temp / "nativedev-dns.conf"
+            nm_dnsmasq = temp / "nativedev-test.conf"
+            nm_conf.write_text(
+                # rc-manager is forced to "symlink" rather than left on NM's
+                # auto-detected default. When the (separate, non-systemd)
+                # `resolvconf` package is installed, NM can auto-select
+                # rc-manager=resolvconf and hand it the pseudo-interface name
+                # "NetworkManager", which that resolvconf implementation
+                # cannot resolve to a real device -- the commit then fails
+                # silently (the dnsmasq plugin still starts and logs look
+                # healthy) and /etc/resolv.conf never gets pointed at
+                # dnsmasq. This is exactly why this model is opt-in per
+                # distro rather than the universal default; symlink avoids
+                # the failure mode where it's known to occur, but a host
+                # with an unusual resolvconf setup could still surprise us.
+                "# Managed by NativeDev Local Development\n[main]\ndns=dnsmasq\nrc-manager=symlink\n",
+                encoding="utf-8",
+            )
+            nm_dnsmasq.write_text(
+                f"# Managed by NativeDev Local Development\naddress=/.{self.config.domain}/127.0.0.1\n",
+                encoding="utf-8",
+            )
+            self.runner.run(["mkdir", "-p", str(NM_CONF.parent), str(NM_DNSMASQ.parent)], privileged=True, check=True)
+
+            try:
+                self.runner.run(["install", "-m", "0644", str(nm_conf), str(NM_CONF)], privileged=True, check=True)
+                self.runner.run(["install", "-m", "0644", str(nm_dnsmasq), str(NM_DNSMASQ)], privileged=True, check=True)
+                self._reload_networkmanager_dns()
+                if not self._wait_for_dns_ready():
+                    raise RuntimeError(
+                        f"*.{self.config.domain} did not resolve to 127.0.0.1 within 8 seconds after DNS reload"
+                    )
+            except Exception as exc:
+                # Restore only NativeDev-owned files. Never rewrite resolv.conf
+                # or connection profiles while recovering from a failed setup.
+                for old, dest, name in (
+                    (previous_conf, NM_CONF, "rollback-nm.conf"),
+                    (previous_dnsmasq, NM_DNSMASQ, "rollback-dnsmasq.conf"),
+                ):
+                    if old is None:
+                        self.runner.run(["rm", "-f", str(dest)], privileged=True, check=True)
+                    else:
+                        rollback = temp / name
+                        rollback.write_text(old, encoding="utf-8")
+                        self.runner.run(["install", "-m", "0644", str(rollback), str(dest)], privileged=True, check=True)
+                try:
+                    self._reload_networkmanager_dns()
+                except Exception as rollback_exc:
+                    raise RuntimeError(f"DNS setup failed and DNS reload rollback also failed: {rollback_exc}") from exc
+                raise
+
+    def _teardown_dns_networkmanager(self) -> None:
+        self.runner.run(["rm", "-f", str(NM_CONF)], privileged=True, check=False)
+        self.runner.run(["rm", "-f", str(NM_DNSMASQ)], privileged=True, check=False)
+        try:
+            self._reload_networkmanager_dns()
+        except Exception:
+            pass  # best-effort teardown
+
+    # -- "dedicated-link" model ------------------------------------------------
 
     def _dns_binaries(self) -> tuple[str, str, str]:
         ip_bin = shutil.which("ip")
@@ -314,16 +460,7 @@ class LocalDevManager:
             "WantedBy=multi-user.target\n"
         )
 
-    def configure_dns(self) -> None:
-        if self.dns_strategy() != "systemd-resolved":
-            raise RuntimeError(
-                "Automatic wildcard DNS requires systemd-resolved plus the `resolvectl`/`ip` "
-                "tools (present on Debian/Ubuntu-family desktops). NativeDev will not "
-                "overwrite /etc/resolv.conf as a fallback."
-            )
-        if not self.apt.is_installed("dnsmasq-base"):
-            self.apt.install(["dnsmasq-base"])
-
+    def _configure_dns_dedicated_link(self) -> None:
         ip_bin, resolvectl_bin, dnsmasq_bin = self._dns_binaries()
 
         with tempfile.TemporaryDirectory(prefix="nativedev-dns-", dir="/tmp") as temp_dir:
@@ -362,11 +499,11 @@ class LocalDevManager:
                 # Nothing here is pre-existing system state, so recovering
                 # from a failed setup is a full, unconditional teardown
                 # rather than a restore.
-                self.teardown_dns()
+                self._teardown_dns_dedicated_link()
                 raise
 
-    def teardown_dns(self) -> None:
-        """Remove NativeDev's wildcard DNS integration entirely (best-effort).
+    def _teardown_dns_dedicated_link(self) -> None:
+        """Remove the dedicated-link DNS integration entirely (best-effort).
 
         Stopping the service is enough to also undo the dummy link and the
         resolvectl registration: the unit's own ExecStopPost runs `resolvectl

@@ -38,6 +38,10 @@ GITHUB_RELEASE_MAX_DEB = 64 * 1024 * 1024
 
 MANAGED_FILES = {
     "/etc/apt/sources.list.d/nativedev-sury-php.sources",
+    # DNS: "networkmanager-dnsmasq" model (Debian/MX default)
+    "/etc/NetworkManager/conf.d/nativedev-dns.conf",
+    "/etc/NetworkManager/dnsmasq.d/nativedev-test.conf",
+    # DNS: "dedicated-link" model (Ubuntu default)
     "/etc/nativedev/dnsmasq.d/wildcard.conf",
     "/etc/systemd/system/nativedev-dns.service",
     "/etc/nginx/sites-available/nativedev-sites.conf",
@@ -47,6 +51,8 @@ MANAGED_FILES = {
     "/etc/nginx/nativedev/nativedev-key.pem",
 }
 MANAGED_DIRS = {
+    "/etc/NetworkManager/conf.d",
+    "/etc/NetworkManager/dnsmasq.d",
     "/etc/nativedev/dnsmasq.d",
     "/etc/nginx/nativedev",
 }
@@ -284,6 +290,8 @@ def _installable_file(value: str, uid: int | None = None) -> bool:
     # The Nginx enablement path is a symlink managed only by nginx.enable_site,
     # and the Sury source is written only by the semantic php.multi_repo.configure action.
     if value in {
+        "/etc/NetworkManager/conf.d/nativedev-dns.conf",
+        "/etc/NetworkManager/dnsmasq.d/nativedev-test.conf",
         "/etc/nativedev/dnsmasq.d/wildcard.conf",
         "/etc/systemd/system/nativedev-dns.service",
         "/etc/nginx/sites-available/nativedev-sites.conf",

@@ -2441,15 +2441,25 @@ class LocalDevPage(Page):
             dns = [label(f"*.{self.context.config.domain} DNS", "section-title")]
             dns.append(status_pill("Ready" if data["dns"] else f"Not configured ({data['strategy']})", data["dns"]))
             dns_btn = Gtk.Button(label="Configure automatically")
-            dns_btn.set_sensitive(data["strategy"] == "systemd-resolved")
+            dns_btn.set_sensitive(data["strategy"] != "unsupported")
             dns_btn.add_css_class("suggested-action")
+            if data["strategy"] == "networkmanager-dnsmasq":
+                dns_description = (
+                    "NativeDev will add its own NetworkManager dnsmasq snippets and reload only NetworkManager DNS "
+                    "configuration. It will not restart NetworkManager or overwrite /etc/resolv.conf."
+                )
+            else:
+                dns_description = (
+                    "NativeDev will run its own dnsmasq on a dedicated network link and register it with "
+                    "systemd-resolved for this TLD only. It will not touch NetworkManager's DNS backend or "
+                    "overwrite /etc/resolv.conf."
+                )
             dns_btn.connect(
                 "clicked",
                 lambda *_: confirm(
                     self.window,
                     "Configure wildcard DNS?",
-                    "NativeDev will run its own dnsmasq on a dedicated network link and register it with systemd-resolved "
-                    "for this TLD only. It will not touch NetworkManager's DNS backend or overwrite /etc/resolv.conf.",
+                    dns_description,
                     lambda: self.action(dns_btn, self.context.localdev.configure_dns, success_message="Wildcard DNS configured", after=self.refresh),
                 ),
             )

@@ -17,7 +17,9 @@ cleanup_localdev() {
     # NativeDev's uninstall boundary is intentionally narrow: only the core
     # Local Development integration is removed.  Standalone service/tool
     # integrations (.localhost tools, Mailpit, PHP INI, databases, etc.) are
-    # preserved.
+    # preserved.  Only one of the two DNS models below will actually be
+    # present on a given host; harmlessly removing files that don't exist is
+    # fine (rm -f).
     if command -v systemctl >/dev/null 2>&1; then
         systemctl disable --now nativedev-dns.service >/dev/null 2>&1 || true
     fi
@@ -30,6 +32,15 @@ cleanup_localdev() {
 
     if command -v systemctl >/dev/null 2>&1; then
         systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+
+    rm -f \
+        /etc/NetworkManager/conf.d/nativedev-dns.conf \
+        /etc/NetworkManager/dnsmasq.d/nativedev-test.conf
+
+    if command -v nmcli >/dev/null 2>&1; then
+        nmcli general reload conf >/dev/null 2>&1 || true
+        nmcli general reload dns-full >/dev/null 2>&1 || true
     fi
 
     rm -f \

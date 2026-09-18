@@ -1,5 +1,6 @@
 import json
 import tempfile
+import inspect
 import unittest
 from pathlib import Path
 
@@ -184,22 +185,63 @@ class NginxRenderTests(unittest.TestCase):
 
 
 class DnsRegressionTests(unittest.TestCase):
-    def test_dns_config_never_touches_networkmanager_or_resolv_conf(self):
-        localdev = (
-            Path(__file__).resolve().parents[1] / "src" / "nativedev" / "managers" / "localdev.py"
-        ).read_text()
-        # The wildcard integration runs on a NativeDev-owned dummy link via
-        # systemd-resolved/dnsmasq. It must never fall back to rewriting
-        # NetworkManager's global DNS backend, restarting NetworkManager, or
-        # touching /etc/resolv.conf directly.
-        self.assertIn('"ExecStart=', localdev)
-        self.assertIn("resolvectl", localdev)
-        self.assertNotIn("dns=dnsmasq", localdev)
-        self.assertNotIn("rc-manager", localdev)
-        self.assertNotIn('self.systemd.restart("NetworkManager")', localdev)
-        self.assertNotIn('"/etc/resolv.conf"', localdev)
-        self.assertNotIn("Path(\"/etc/resolv.conf\")", localdev)
-        self.assertNotIn('["nmcli"', localdev)
+    def test_dedicated_link_model_never_touches_networkmanager_or_resolv_conf(self):
+        # The dedicated-link model (Ubuntu default) runs on a NativeDev-owned
+        # dummy link via systemd-resolved/dnsmasq. It must never fall back to
+        # rewriting NetworkManager's global DNS backend, restarting
+        # NetworkManager, or touching /etc/resolv.conf directly -- that's
+        # what the separate networkmanager-dnsmasq model is for.
+        from nativedev.managers import localdev
+        source = "".join(inspect.getsource(fn) for fn in (
+            localdev.LocalDevManager._configure_dns_dedicated_link,
+            localdev.LocalDevManager._teardown_dns_dedicated_link,
+            localdev.LocalDevManager._dns_unit_text,
+        ))
+        self.assertIn("ExecStart=", source)
+        self.assertIn("resolvectl", source)
+        self.assertNotIn("dns=dnsmasq", source)
+        self.assertNotIn("rc-manager", source)
+        self.assertNotIn('self.systemd.restart("NetworkManager")', source)
+        self.assertNotIn("/etc/resolv.conf", source)
+        self.assertNotIn("nmcli", source)
+
+    def test_networkmanager_model_never_restarts_networkmanager_or_touches_resolv_conf(self):
+        # The networkmanager-dnsmasq model (Debian/MX default) reloads only
+        # NetworkManager's own DNS plugin. It must never restart
+        # NetworkManager outright or write /etc/resolv.conf directly -- NM
+        # itself owns that file for this model.
+        from nativedev.managers import localdev
+        source = "".join(inspect.getsource(fn) for fn in (
+            localdev.LocalDevManager._configure_dns_networkmanager,
+            localdev.LocalDevManager._teardown_dns_networkmanager,
+            localdev.LocalDevManager._reload_networkmanager_dns,
+        ))
+        self.assertIn("dns=dnsmasq", source)
+        self.assertIn("rc-manager", source)
+        self.assertIn("nmcli", source)
+        self.assertNotIn('self.systemd.restart("NetworkManager")', source)
+        self.assertNotIn('"/etc/resolv.conf"', source)
+        self.assertNotIn("Path(\"/etc/resolv.conf\")", source)
+
+    def test_dns_model_selection_is_config_overridable_and_distro_defaulted(self):
+        from nativedev.managers.localdev import DNS_MODEL_DEDICATED_LINK, DNS_MODEL_NETWORKMANAGER, LocalDevManager
+        from nativedev.config import AppConfig
+        from nativedev.system import DistroInfo
+
+        def make(distro_id: str, dns_model: str = ""):
+            config = AppConfig()
+            config.dns_model = dns_model
+            distro = DistroInfo(id=distro_id, name="", version_id="", codename="", id_like=(), pretty_name="")
+            return LocalDevManager(runner=None, apt=None, systemd=None, config=config, php=None, distro=distro)
+
+        self.assertEqual(make("debian").dns_model(), DNS_MODEL_NETWORKMANAGER)
+        self.assertEqual(make("mx").dns_model(), DNS_MODEL_NETWORKMANAGER)
+        self.assertEqual(make("ubuntu").dns_model(), DNS_MODEL_DEDICATED_LINK)
+        # Unknown/future distro without an explicit override: safe default.
+        self.assertEqual(make("some-future-distro").dns_model(), DNS_MODEL_DEDICATED_LINK)
+        # An explicit config override always wins over the distro default.
+        self.assertEqual(make("ubuntu", DNS_MODEL_NETWORKMANAGER).dns_model(), DNS_MODEL_NETWORKMANAGER)
+        self.assertEqual(make("debian", DNS_MODEL_DEDICATED_LINK).dns_model(), DNS_MODEL_DEDICATED_LINK)
 
 
 class HttpsKeyPermissionTests(unittest.TestCase):
@@ -336,11 +378,12 @@ class PrivilegedHelperTests(unittest.TestCase):
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.enable_modules", "version": "8.4", "sapi": "cli", "modules": ["xdebug"]}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.extension_enable", "version": "8.4", "extension": "evil"}))
         self.assertFalse(self.operation_ok({"protocol": protocol, "action": "php.extension_install", "version": "8.5", "extension": "opcache"}))
-        # Retired NM-based DNS paths and raw ip/resolvectl argv must stay
-        # rejected -- the client never gets to hand the helper an arbitrary
-        # binary, even one this app happens to need for DNS.
-        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.mkdir", "paths": ["/etc/NetworkManager/conf.d"]}))
-        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.install", "mode": "0644", "source": "/tmp/nativedev-dns-test/x.conf", "destination": "/etc/NetworkManager/conf.d/nativedev-dns.conf"}))
+        # Neither DNS model's file paths are a blank check -- an unrelated
+        # system path must still be rejected -- and raw ip/resolvectl argv
+        # must stay rejected: the client never gets to hand the helper an
+        # arbitrary binary, even one this app happens to need for DNS.
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.mkdir", "paths": ["/etc/cron.d"]}))
+        self.assertFalse(self.operation_ok({"protocol": protocol, "action": "file.install", "mode": "0644", "source": "/tmp/nativedev-dns-test/x.conf", "destination": "/etc/NetworkManager/conf.d/some-other-file.conf"}))
         from nativedev.system import privileged_operation_for_command as _translate
         with self.assertRaises(RuntimeError):
             _translate(["resolvectl", "revert", "nativedev0"])

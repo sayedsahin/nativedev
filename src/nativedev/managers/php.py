@@ -103,7 +103,7 @@ class PhpManager:
         uri = value.rstrip("/")
         if uri in {"https://packages.sury.org/php", "http://packages.sury.org/php"}:
             return "sury"
-        if uri in {item.rstrip("/") for item in ONDREJ_PPA_URIS}:
+        if uri in {item.rstrip("/") for item in LEGACY_ONDREJ_PPA_URIS}:
             return "ondrej"
         return ""
 

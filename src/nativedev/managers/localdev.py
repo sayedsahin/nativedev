@@ -32,22 +32,33 @@ NGINX_ENABLED = Path("/etc/nginx/sites-enabled/nativedev-sites.conf")
 #   safe default for anything not already known-good on the simpler model.
 #
 # Which model runs on a given host is: an explicit `dns_model` in config.json
-# (set via `nativedev dns-model <name>`, or the future GUI control), else
-# DEFAULT_DNS_MODEL_BY_DISTRO keyed on /etc/os-release ID, else
-# DNS_MODEL_DEDICATED_LINK. Adding support for a new distro is then just
-# adding one line to DEFAULT_DNS_MODEL_BY_DISTRO (or telling the user to set
-# dns_model) once it's been verified -- no code branching needed elsewhere.
+# (set via `nativedev dns-model <name>`, or the future GUI control), else a
+# classification of /etc/os-release's ID/ID_LIKE/UBUNTU_CODENAME (see
+# default_dns_model_for_distro below), else DNS_MODEL_DEDICATED_LINK. This is
+# family-based rather than a fixed per-distro-name table, so any current or
+# future Ubuntu derivative (Mint, Pop!_OS, Zorin, elementary...) or pure
+# Debian derivative (MX Linux, etc.) is classified automatically -- no code
+# change needed per new distro. An exception that doesn't fit its family's
+# default is handled with `dns_model` in config.json, not a code change.
 DNS_MODEL_NETWORKMANAGER = "networkmanager-dnsmasq"
 DNS_MODEL_DEDICATED_LINK = "dedicated-link"
 DNS_MODELS = {DNS_MODEL_NETWORKMANAGER, DNS_MODEL_DEDICATED_LINK}
-DEFAULT_DNS_MODEL_BY_DISTRO = {
-    "debian": DNS_MODEL_NETWORKMANAGER,
-    # MX Linux's /etc/os-release ID as observed at the time this was written.
-    # If a future MX release changes it, override with `dns_model` in
-    # config.json rather than relying on this default.
-    "mx": DNS_MODEL_NETWORKMANAGER,
-    "ubuntu": DNS_MODEL_DEDICATED_LINK,
-}
+
+
+def default_dns_model_for_distro(distro: DistroInfo | None) -> str:
+    if distro is None:
+        return DNS_MODEL_DEDICATED_LINK
+    # Ubuntu itself and every Ubuntu derivative (checked first: Ubuntu is
+    # also a Debian derivative, so this order is what makes "pure Debian-
+    # based" mean "Debian-based but NOT Ubuntu-based").
+    if distro.is_ubuntu_family:
+        return DNS_MODEL_DEDICATED_LINK
+    if "debian" in {distro.id, *distro.id_like}:
+        return DNS_MODEL_NETWORKMANAGER
+    # Unknown family entirely (not Debian- or Ubuntu-based) -- untested,
+    # so fall back to the model with no NetworkManager/resolvconf
+    # assumptions baked in.
+    return DNS_MODEL_DEDICATED_LINK
 
 # -- "networkmanager-dnsmasq" model --
 NM_CONF = Path("/etc/NetworkManager/conf.d/nativedev-dns.conf")
@@ -279,8 +290,7 @@ class LocalDevManager:
         configured = self.config.dns_model
         if configured in DNS_MODELS:
             return configured
-        distro_id = self.distro.id if self.distro else ""
-        return DEFAULT_DNS_MODEL_BY_DISTRO.get(distro_id, DNS_MODEL_DEDICATED_LINK)
+        return default_dns_model_for_distro(self.distro)
 
     def dns_strategy(self) -> str:
         model = self.dns_model()

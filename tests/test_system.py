@@ -223,25 +223,41 @@ class DnsRegressionTests(unittest.TestCase):
         self.assertNotIn('"/etc/resolv.conf"', source)
         self.assertNotIn("Path(\"/etc/resolv.conf\")", source)
 
-    def test_dns_model_selection_is_config_overridable_and_distro_defaulted(self):
+    def test_dns_model_selection_is_config_overridable_and_family_based(self):
         from nativedev.managers.localdev import DNS_MODEL_DEDICATED_LINK, DNS_MODEL_NETWORKMANAGER, LocalDevManager
         from nativedev.config import AppConfig
         from nativedev.system import DistroInfo
 
-        def make(distro_id: str, dns_model: str = ""):
+        def make(distro: DistroInfo | None, dns_model: str = ""):
             config = AppConfig()
             config.dns_model = dns_model
-            distro = DistroInfo(id=distro_id, name="", version_id="", codename="", id_like=(), pretty_name="")
             return LocalDevManager(runner=None, apt=None, systemd=None, config=config, php=None, distro=distro)
 
-        self.assertEqual(make("debian").dns_model(), DNS_MODEL_NETWORKMANAGER)
-        self.assertEqual(make("mx").dns_model(), DNS_MODEL_NETWORKMANAGER)
-        self.assertEqual(make("ubuntu").dns_model(), DNS_MODEL_DEDICATED_LINK)
-        # Unknown/future distro without an explicit override: safe default.
-        self.assertEqual(make("some-future-distro").dns_model(), DNS_MODEL_DEDICATED_LINK)
-        # An explicit config override always wins over the distro default.
-        self.assertEqual(make("ubuntu", DNS_MODEL_NETWORKMANAGER).dns_model(), DNS_MODEL_NETWORKMANAGER)
-        self.assertEqual(make("debian", DNS_MODEL_DEDICATED_LINK).dns_model(), DNS_MODEL_DEDICATED_LINK)
+        def distro(id_="", id_like=(), ubuntu_codename=""):
+            return DistroInfo(id=id_, name="", version_id="", codename="", id_like=id_like, pretty_name="", ubuntu_codename=ubuntu_codename)
+
+        # Pure Debian-based (not Ubuntu-based): networkmanager-dnsmasq.
+        self.assertEqual(make(distro("debian")).dns_model(), DNS_MODEL_NETWORKMANAGER)
+        # MX Linux: ID=mx, ID_LIKE=debian -- classified via family, no
+        # per-distro-name entry needed.
+        self.assertEqual(make(distro("mx", id_like=("debian",))).dns_model(), DNS_MODEL_NETWORKMANAGER)
+        # Ubuntu itself, and any Ubuntu derivative that lists it in ID_LIKE.
+        self.assertEqual(make(distro("ubuntu")).dns_model(), DNS_MODEL_DEDICATED_LINK)
+        self.assertEqual(make(distro("neon", id_like=("ubuntu", "debian"))).dns_model(), DNS_MODEL_DEDICATED_LINK)
+        # An Ubuntu derivative that doesn't list "ubuntu" in ID_LIKE but does
+        # set UBUNTU_CODENAME (e.g. Linux Mint, Pop!_OS) -- still Ubuntu
+        # family, not "pure Debian-based", even though ID_LIKE says debian.
+        self.assertEqual(
+            make(distro("linuxmint", id_like=("ubuntu", "debian"), ubuntu_codename="jammy")).dns_model(),
+            DNS_MODEL_DEDICATED_LINK,
+        )
+        # Unknown/untested family entirely, and no distro info at all: safe
+        # default, no NetworkManager/resolvconf assumptions.
+        self.assertEqual(make(distro("some-future-distro")).dns_model(), DNS_MODEL_DEDICATED_LINK)
+        self.assertEqual(make(None).dns_model(), DNS_MODEL_DEDICATED_LINK)
+        # An explicit config override always wins over the family default.
+        self.assertEqual(make(distro("ubuntu"), DNS_MODEL_NETWORKMANAGER).dns_model(), DNS_MODEL_NETWORKMANAGER)
+        self.assertEqual(make(distro("debian"), DNS_MODEL_DEDICATED_LINK).dns_model(), DNS_MODEL_DEDICATED_LINK)
 
 
 class HttpsKeyPermissionTests(unittest.TestCase):

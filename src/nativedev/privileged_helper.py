@@ -254,7 +254,7 @@ def _php_multi_repo_target() -> tuple[str, str]:
     ubuntu_codename = data.get("UBUNTU_CODENAME", "").lower()
     if ubuntu_codename or distro_id == "ubuntu" or "ubuntu" in id_like:
         codename = ubuntu_codename or data.get("VERSION_CODENAME", "").lower()
-        return "ondrej", codename
+        return "sury", codename
     if distro_id == "debian" or "debian" in id_like:
         codename = (data.get("DEBIAN_CODENAME") or data.get("VERSION_CODENAME") or "").lower()
         return "sury", codename

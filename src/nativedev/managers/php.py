@@ -12,7 +12,7 @@ from ..system import AptManager, CommandRunner, DistroInfo, SystemdManager
 
 
 SURY_SOURCE_FILE = Path("/etc/apt/sources.list.d/nativedev-sury-php.sources")
-ONDREJ_PPA_URIS = (
+LEGACY_ONDREJ_PPA_URIS = (
     "https://ppa.launchpadcontent.net/ondrej/php/ubuntu",
     "http://ppa.launchpadcontent.net/ondrej/php/ubuntu",
     "https://ppa.launchpad.net/ondrej/php/ubuntu",
@@ -156,7 +156,7 @@ class PhpManager:
     @property
     def expected_multi_php_backend(self) -> str:
         if self.distro.is_ubuntu_family:
-            return "ondrej"
+            return "sury"
         if self.distro.is_debian_family:
             return "sury"
         return ""

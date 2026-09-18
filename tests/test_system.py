@@ -433,8 +433,16 @@ class PrivilegedHelperTests(unittest.TestCase):
         with patch("nativedev.privileged_helper._read_os_release", return_value=release):
             self.assertEqual(_php_multi_repo_target(), ("ondrej", "noble"))
 
-    def test_php_multi_repo_ubuntu_configure_uses_fixed_ondrej_ppa(self):
-        from unittest.mock import patch
+    def test_php_multi_repo_ubuntu_configure_fetches_key_and_writes_signed_deb822_source(self):
+        # Regression test for the bug where add-apt-repository's own
+        # PPA key-fetch never triggers when given --sourceslist, silently
+        # producing an unsigned/unusable repo (NO_PUBKEY on the next
+        # `apt update`). The fix fetches the signing key explicitly and
+        # writes a Signed-By deb822 source, the same way Sury's path
+        # already does -- no add-apt-repository/software-properties-common
+        # involved at all anymore.
+        from unittest.mock import patch, MagicMock
+        from pathlib import Path as _Path
         from nativedev.privileged_helper import execute_operation
         import subprocess
 
@@ -444,18 +452,39 @@ class PrivilegedHelperTests(unittest.TestCase):
             "backend": "ondrej",
             "codename": "noble",
         }
-        completed = subprocess.CompletedProcess(["add-apt-repository"], 0, "", "")
+
+        fake_response = MagicMock()
+        fake_response.__enter__.return_value.read.return_value = b"FAKE-ARMORED-KEY"
+        fake_response.__exit__.return_value = False
+
+        installed: dict[str, bytes] = {}
+
+        def fake_run(argv, **kwargs):
+            if argv[:2] == ["/usr/bin/gpg", "--dearmor"]:
+                self.assertEqual(kwargs.get("input"), b"FAKE-ARMORED-KEY")
+                return subprocess.CompletedProcess(argv, 0, stdout=b"FAKE-BINARY-KEYRING", stderr=b"")
+            if argv[0] == "/usr/bin/install":
+                src, dest = argv[-2], argv[-1]
+                content = _Path(src).read_bytes()
+                installed[dest] = content
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            raise AssertionError(f"unexpected subprocess.run call: {argv}")
+
         with patch("nativedev.privileged_helper._validate_php_multi_repo_request", return_value=("ondrej", "noble")), \
-             patch("nativedev.privileged_helper.shutil.which", return_value="/usr/bin/add-apt-repository"), \
-             patch("nativedev.privileged_helper.subprocess.run", return_value=completed) as run:
+             patch("nativedev.privileged_helper.shutil.which", return_value="/usr/bin/gpg"), \
+             patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
+             patch("nativedev.privileged_helper.urllib.request.urlopen", return_value=fake_response), \
+             patch("nativedev.privileged_helper.subprocess.run", side_effect=fake_run):
             result = execute_operation(request, uid=1000, timeout=120)
 
         self.assertEqual(result.returncode, 0)
-        argv = run.call_args.args[0]
-        kwargs = run.call_args.kwargs
-        self.assertEqual(argv, ["/usr/bin/add-apt-repository", "-y", "--sourceslist", "deb https://ppa.launchpadcontent.net/ondrej/php/ubuntu noble main"])
-        self.assertEqual(kwargs["env"]["LC_ALL"], "C.UTF-8")
-        self.assertEqual(kwargs["env"]["PATH"], "/usr/sbin:/usr/bin:/sbin:/bin")
+        source_dest = "/etc/apt/sources.list.d/nativedev-ondrej-php.sources"
+        keyring_dest = "/usr/share/keyrings/nativedev-ondrej-php-archive-keyring.gpg"
+        self.assertEqual(installed[keyring_dest], b"FAKE-BINARY-KEYRING")
+        source_text = installed[source_dest].decode("utf-8")
+        self.assertIn("URIs: https://ppa.launchpadcontent.net/ondrej/php/ubuntu", source_text)
+        self.assertIn("Suites: noble", source_text)
+        self.assertIn(f"Signed-By: {keyring_dest}", source_text)
 
     def test_apt_remove_fails_immediately_when_dpkg_is_busy(self):
         from unittest.mock import patch

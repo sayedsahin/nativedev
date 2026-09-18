@@ -38,6 +38,8 @@ GITHUB_RELEASE_MAX_DEB = 64 * 1024 * 1024
 
 MANAGED_FILES = {
     "/etc/apt/sources.list.d/nativedev-sury-php.sources",
+    "/etc/apt/sources.list.d/nativedev-ondrej-php.sources",
+    "/usr/share/keyrings/nativedev-ondrej-php-archive-keyring.gpg",
     # DNS: "networkmanager-dnsmasq" model (Debian/MX default)
     "/etc/NetworkManager/conf.d/nativedev-dns.conf",
     "/etc/NetworkManager/dnsmasq.d/nativedev-test.conf",
@@ -148,8 +150,14 @@ FPM_POOL_RE = re.compile(r"^/etc/php/(?P<version>\d+\.\d+)/fpm/pool\.d/nativedev
 TEMP_SOURCE_RE = re.compile(r"^/tmp/nativedev-[^/]+/.+$")
 SURY_KEYRING_URL = "https://packages.sury.org/debsuryorg-archive-keyring.deb"
 SURY_SOURCE_FILE = Path("/etc/apt/sources.list.d/nativedev-sury-php.sources")
-ONDREJ_PPA = "ppa:ondrej/php"
 ONDREJ_PPA_URI = "https://ppa.launchpadcontent.net/ondrej/php/ubuntu"
+# Long fingerprint (not the short 16-hex key ID) for the Launchpad PPA
+# signing key, so a lookup can't be spoofed by a colliding short ID. From
+# https://launchpad.net/~ondrej/+archive/ubuntu/php (signing_key_fingerprint).
+ONDREJ_KEY_FINGERPRINT = "B8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6"
+ONDREJ_KEY_URL = f"https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x{ONDREJ_KEY_FINGERPRINT}"
+ONDREJ_KEYRING = Path("/usr/share/keyrings/nativedev-ondrej-php-archive-keyring.gpg")
+ONDREJ_SOURCE_FILE = Path("/etc/apt/sources.list.d/nativedev-ondrej-php.sources")
 
 
 MAILPIT_RELEASE_API = "https://api.github.com/repos/axllent/mailpit/releases/latest"
@@ -2157,40 +2165,102 @@ def execute_operation(request: dict, uid: int, timeout: int | None) -> subproces
                     os.chmod(SURY_SOURCE_FILE, 0o644)
                 raise
 
-        # Ubuntu/Ubuntu-derivative path. Use the official PPA helper so Launchpad
-        # key management stays with Ubuntu's software-properties implementation.
-        add_repo = shutil.which("add-apt-repository", path=SAFE_PATH)
-        if not add_repo:
-            install_tool = subprocess.run(
-                [_binary("apt-get"), "install", "-y", "software-properties-common"],
-                text=True,
-                capture_output=True,
-                timeout=timeout,
-            )
-            if install_tool.returncode != 0:
-                return install_tool
-            add_repo = shutil.which("add-apt-repository", path=SAFE_PATH)
-        if not add_repo:
-            return subprocess.CompletedProcess([], 127, "", "add-apt-repository is unavailable")
-
-        # Use an explicit source line with the root-side resolved Ubuntu base
-        # suite. This is important on derivatives whose own VERSION_CODENAME
-        # (for example a Mint codename) is not a Launchpad distro series.
-        source_line = f"deb {ONDREJ_PPA_URI} {codename} main"
-        argv = [add_repo, "-y"]
+        # Ubuntu/Ubuntu-derivative path. This used to shell out to
+        # add-apt-repository, but that tool's PPA signing-key fetch only
+        # triggers for the `ppa:owner/name` shorthand -- it is silently
+        # skipped when given an explicit `--sourceslist "deb ..."` line
+        # (which is required here to control the exact upstream Ubuntu
+        # suite on derivatives whose own codename isn't a Launchpad series).
+        # That produced a repo with no key at all: apt added it, then
+        # rejected it as unsigned (NO_PUBKEY) on the next update, and
+        # multi-PHP silently fell back to whatever system PHP was already
+        # there. Fetching the key explicitly and writing a Signed-By source,
+        # the same way the Sury path above already does, fixes that and
+        # drops the software-properties-common dependency entirely.
         if action == "php.multi_repo.remove":
-            argv.append("--remove")
-        argv.extend(["--sourceslist", source_line])
-        env = dict(os.environ)
-        env["PATH"] = SAFE_PATH
-        env["LC_ALL"] = "C.UTF-8"
-        return subprocess.run(
-            argv,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            env=env,
-        )
+            try:
+                ONDREJ_SOURCE_FILE.unlink(missing_ok=True)
+                return subprocess.CompletedProcess([], 0, "", "")
+            except OSError as exc:
+                return subprocess.CompletedProcess([], 1, "", str(exc))
+
+        previous = ONDREJ_SOURCE_FILE.read_bytes() if ONDREJ_SOURCE_FILE.exists() else None
+        try:
+            with tempfile.TemporaryDirectory(prefix="nativedev-root-ondrej-", dir="/tmp") as temp_dir:
+                temp = Path(temp_dir)
+                try:
+                    with urllib.request.urlopen(ONDREJ_KEY_URL, timeout=timeout) as response:
+                        key_text = response.read()
+                except OSError as exc:
+                    return subprocess.CompletedProcess([], 1, "", f"Could not fetch Ondřej PPA signing key: {exc}")
+
+                gpg_bin = shutil.which("gpg", path=SAFE_PATH)
+                if not gpg_bin:
+                    install_gnupg = subprocess.run(
+                        [_binary("apt-get"), "install", "-y", "gnupg"],
+                        text=True,
+                        capture_output=True,
+                        timeout=timeout,
+                    )
+                    if install_gnupg.returncode != 0:
+                        return install_gnupg
+                    gpg_bin = shutil.which("gpg", path=SAFE_PATH)
+                if not gpg_bin:
+                    return subprocess.CompletedProcess([], 127, "", "gpg is unavailable")
+
+                dearmor = subprocess.run(
+                    [gpg_bin, "--dearmor"],
+                    input=key_text,
+                    capture_output=True,
+                    timeout=timeout,
+                )
+                if dearmor.returncode != 0:
+                    return subprocess.CompletedProcess(
+                        [],
+                        dearmor.returncode,
+                        dearmor.stdout.decode("utf-8", "replace"),
+                        dearmor.stderr.decode("utf-8", "replace"),
+                    )
+                keyring_tmp = temp / "nativedev-ondrej-php-archive-keyring.gpg"
+                keyring_tmp.write_bytes(dearmor.stdout)
+                install_key_proc = subprocess.run(
+                    [_binary("install"), "-m", "0644", str(keyring_tmp), str(ONDREJ_KEYRING)],
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout,
+                )
+                if install_key_proc.returncode != 0:
+                    return install_key_proc
+
+                source = (
+                    "Types: deb\n"
+                    f"URIs: {ONDREJ_PPA_URI}\n"
+                    f"Suites: {codename}\n"
+                    "Components: main\n"
+                    f"Signed-By: {ONDREJ_KEYRING}\n"
+                )
+                source_tmp = temp / "nativedev-ondrej-php.sources"
+                source_tmp.write_text(source, encoding="utf-8")
+                install_proc = subprocess.run(
+                    [_binary("install"), "-m", "0644", str(source_tmp), str(ONDREJ_SOURCE_FILE)],
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout,
+                )
+                if install_proc.returncode != 0:
+                    if previous is None:
+                        ONDREJ_SOURCE_FILE.unlink(missing_ok=True)
+                    else:
+                        ONDREJ_SOURCE_FILE.write_bytes(previous)
+                        os.chmod(ONDREJ_SOURCE_FILE, 0o644)
+                return install_proc
+        except Exception:
+            if previous is None:
+                ONDREJ_SOURCE_FILE.unlink(missing_ok=True)
+            else:
+                ONDREJ_SOURCE_FILE.write_bytes(previous)
+                os.chmod(ONDREJ_SOURCE_FILE, 0o644)
+            raise
 
     argv = command_for_operation(request, uid)
     return subprocess.run(argv, text=True, capture_output=True, timeout=timeout)

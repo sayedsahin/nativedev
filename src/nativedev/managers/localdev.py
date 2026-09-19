@@ -104,6 +104,17 @@ class LocalDevManager:
     def park_dir(self) -> Path:
         return Path(self.config.park_dir).expanduser().resolve()
 
+    def ensure_park_dir(self) -> Path:
+        """Create the configured park directory if it doesn't exist yet.
+
+        Runs unprivileged: the park directory always lives under the
+        developer's own home (or another location they picked themselves
+        via the folder chooser), so no root helper call is needed here.
+        """
+        root = self.park_dir
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
     def projects(self) -> list[Path]:
         root = self.park_dir
         if not root.is_dir():
@@ -850,6 +861,23 @@ class LocalDevManager:
                     )
                 raise RuntimeError(check.output or "nginx -t failed; configuration rolled back")
         if self.systemd.is_active("nginx"):
+            self.systemd.reload("nginx")
+
+    def teardown_nginx_sites(self) -> None:
+        """Remove NativeDev's wildcard Nginx routing config entirely (best-effort).
+
+        Mirrors configure_nginx_sites(): removes the same two files it
+        installs (the sites-enabled symlink and the sites-available config),
+        then validates and reloads Nginx the same way. Nothing else Nginx
+        manages (other sites, the ACL on the park directory, mkcert
+        certificates) is touched.
+        """
+        self.runner.run(["rm", "-f", str(NGINX_ENABLED)], privileged=True, check=False)
+        self.runner.run(["rm", "-f", str(NGINX_SITE)], privileged=True, check=False)
+        if not shutil.which("nginx"):
+            return
+        check = self.runner.run(["nginx", "-t"], privileged=True, timeout=30)
+        if check.ok and self.systemd.is_active("nginx"):
             self.systemd.reload("nginx")
 
     def mkcert_installed(self) -> bool:

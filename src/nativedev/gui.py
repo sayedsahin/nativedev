@@ -2463,7 +2463,23 @@ class LocalDevPage(Page):
                     lambda: self.action(dns_btn, self.context.localdev.configure_dns, success_message="Wildcard DNS configured", after=self.refresh),
                 ),
             )
-            dns.append(dns_btn)
+            dns_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            dns_row.append(dns_btn)
+            dns_remove_btn = Gtk.Button(label="Remove")
+            dns_remove_btn.add_css_class("destructive-action")
+            dns_remove_btn.connect(
+                "clicked",
+                lambda *_: confirm(
+                    self.window,
+                    "Remove wildcard DNS configuration?",
+                    f"NativeDev will remove exactly what it added to configure *.{self.context.config.domain} DNS "
+                    "(the same files/service the Configure step installs) and reload accordingly. Nothing else on "
+                    "the system is touched.",
+                    lambda: self.action(dns_remove_btn, self.context.localdev.teardown_dns, success_message="Wildcard DNS configuration removed", after=self.refresh),
+                ),
+            )
+            dns_row.append(dns_remove_btn)
+            dns.append(dns_row)
             self._replace(self.dns_card, dns)
 
             sites = [label("Wildcard Nginx routing", "section-title")]
@@ -2491,7 +2507,24 @@ class LocalDevPage(Page):
                     lambda: self.action(site_btn, self.context.localdev.configure_nginx_sites, success_message="Wildcard Nginx routing ready", after=self.refresh),
                 ),
             )
-            sites.append(site_btn)
+            nginx_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            nginx_row.append(site_btn)
+            nginx_remove_btn = Gtk.Button(label="Remove")
+            nginx_remove_btn.add_css_class("destructive-action")
+            nginx_remove_btn.connect(
+                "clicked",
+                lambda *_: confirm(
+                    self.window,
+                    "Remove wildcard Nginx routing?",
+                    f"NativeDev will remove exactly what it added to configure wildcard routing for "
+                    f"*.{self.context.config.domain} (the sites-available config and its sites-enabled symlink), "
+                    "validate with nginx -t and reload Nginx. Other sites, the park directory ACL, and mkcert "
+                    "certificates are left untouched.",
+                    lambda: self.action(nginx_remove_btn, self.context.localdev.teardown_nginx_sites, success_message="Wildcard Nginx routing removed", after=self.refresh),
+                ),
+            )
+            nginx_row.append(nginx_remove_btn)
+            sites.append(nginx_row)
             self._replace(self.nginx_card, sites)
 
             https = [label("Local HTTPS", "section-title")]
@@ -2535,13 +2568,44 @@ class LocalDevPage(Page):
         self._replace(self.settings_card, [])
         self.settings_card.append(label("Project settings", "section-title"))
         grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+
+        # The park directory is chosen through a folder picker rather than
+        # typed freehand: it must be a real, existing directory, and a typo
+        # here would silently repoint every parked project. The Entry still
+        # shows the path (readable, copyable) but isn't user-editable.
+        park_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         park = Gtk.Entry()
         park.set_text(self.context.config.park_dir)
+        park.set_editable(False)
+        park.set_hexpand(True)
+        browse = Gtk.Button(label="Browse…")
+
+        def choose_park_dir(*_):
+            dialog = Gtk.FileDialog()
+            dialog.set_title("Choose park directory")
+            current = Path(park.get_text()).expanduser()
+            if current.is_dir():
+                dialog.set_initial_folder(Gio.File.new_for_path(str(current)))
+
+            def on_chosen(source, result):
+                try:
+                    folder = source.select_folder_finish(result)
+                except GLib.Error:
+                    return  # cancelled or failed; leave the current value as-is
+                if folder is not None:
+                    park.set_text(folder.get_path())
+
+            dialog.select_folder(self.window, None, on_chosen)
+
+        browse.connect("clicked", choose_park_dir)
+        park_box.append(park)
+        park_box.append(browse)
+
         domain = Gtk.Entry()
         domain.set_text(self.context.config.domain)
         domain.set_max_length(30)
         grid.attach(label("Park directory"), 0, 0, 1, 1)
-        grid.attach(park, 1, 0, 1, 1)
+        grid.attach(park_box, 1, 0, 1, 1)
         grid.attach(label("Local TLD"), 0, 1, 1, 1)
         grid.attach(domain, 1, 1, 1, 1)
         self.settings_card.append(grid)

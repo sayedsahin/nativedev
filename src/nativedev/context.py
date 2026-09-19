@@ -44,6 +44,10 @@ class AppContext:
         developer_tools = DeveloperToolManager(runner, apt, php, config, systemd)
         services = ServiceManager(runner, apt, systemd)
         localdev = LocalDevManager(runner, apt, systemd, config, php, distro)
+        try:
+            localdev.ensure_park_dir()
+        except OSError:
+            pass  # best-effort; the folder picker/Projects list handle a missing dir gracefully
         doctor = Doctor(distro, apt, systemd, php, node, developer_tools, services, localdev)
         controller = ProviderAwareNativeDevController(
             php,

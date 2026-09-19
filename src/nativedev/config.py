@@ -14,7 +14,7 @@ CONFIG_FILE = APP_DIR / "config.json"
 
 @dataclass(slots=True)
 class AppConfig:
-    park_dir: str = str(Path.home() / "Code")
+    park_dir: str = str(Path.home() / "www")
     domain: str = "test"
     # Kept only for backward compatibility with 0.1.4 config files that were
     # briefly written with a single global PHP-FPM version. Routing no longer

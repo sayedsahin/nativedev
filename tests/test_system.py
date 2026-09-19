@@ -61,6 +61,24 @@ class StubPhp:
 
 
 class NginxRenderTests(unittest.TestCase):
+    def test_default_park_dir_is_home_www(self):
+        from nativedev.config import AppConfig
+        self.assertEqual(AppConfig().park_dir, str(Path.home() / "www"))
+
+    def test_ensure_park_dir_creates_missing_directory(self):
+        from nativedev.config import AppConfig
+        from nativedev.managers.localdev import LocalDevManager
+
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "www"
+            self.assertFalse(target.exists())
+            manager = LocalDevManager(None, None, None, AppConfig(park_dir=str(target), domain="test"), StubPhp())
+            created = manager.ensure_park_dir()
+            self.assertTrue(target.is_dir())
+            self.assertEqual(created, target.resolve())
+            # Calling it again (folder already exists) must not raise.
+            manager.ensure_park_dir()
+
     def test_renders_one_persistent_wildcard_router(self):
         from nativedev.config import AppConfig
         from nativedev.managers.localdev import LocalDevManager, NGINX_WILDCARD_MARKER
@@ -182,6 +200,75 @@ class NginxRenderTests(unittest.TestCase):
         ).read_text()
         self.assertIn('self._setfacl(["-m", f"d:u:{WEB_USER}:r-x", "--", str(root)])', localdev)
         self.assertIn("self.ensure_park_readable()", localdev)
+
+    def test_teardown_nginx_sites_removes_exactly_what_configure_installs_and_reloads(self):
+        from nativedev.config import AppConfig
+        from nativedev.managers.localdev import LocalDevManager, NGINX_ENABLED, NGINX_SITE
+        from nativedev.system import CommandResult
+
+        class Runner:
+            def __init__(self):
+                self.removed_paths: list[str] = []
+                self.ran: list[list[str]] = []
+
+            def run(self, argv, **kwargs):
+                self.ran.append(list(argv))
+                if argv[:2] == ["rm", "-f"]:
+                    self.removed_paths.extend(argv[2:])
+                    return CommandResult(list(argv), 0, "", "")
+                if argv == ["nginx", "-t"]:
+                    return CommandResult(list(argv), 0, "", "")
+                return CommandResult(list(argv), 0, "", "")
+
+        class Systemd:
+            def is_active(self, service):
+                return service == "nginx"
+
+            def reload(self, service):
+                self.reloaded = service
+
+        runner = Runner()
+        systemd = Systemd()
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            manager = LocalDevManager(runner, None, systemd, AppConfig(park_dir=td, domain="test"), StubPhp())
+            with patch("shutil.which", return_value="/usr/sbin/nginx"):
+                manager.teardown_nginx_sites()
+
+        # Exactly the two files configure_nginx_sites() installs, and nothing
+        # else (no other sites, no ACL, no mkcert certs).
+        self.assertEqual(set(runner.removed_paths), {str(NGINX_ENABLED), str(NGINX_SITE)})
+        self.assertIn(["nginx", "-t"], runner.ran)
+        self.assertEqual(systemd.reloaded, "nginx")
+
+    def test_teardown_nginx_sites_skips_reload_when_nginx_not_installed(self):
+        from nativedev.config import AppConfig
+        from nativedev.managers.localdev import LocalDevManager
+        from nativedev.system import CommandResult
+
+        class Runner:
+            def __init__(self):
+                self.ran: list[list[str]] = []
+
+            def run(self, argv, **kwargs):
+                self.ran.append(list(argv))
+                return CommandResult(list(argv), 0, "", "")
+
+        class Systemd:
+            def is_active(self, service):
+                raise AssertionError("must not check systemd when nginx isn't installed")
+
+            def reload(self, service):
+                raise AssertionError("must not reload when nginx isn't installed")
+
+        runner = Runner()
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            manager = LocalDevManager(runner, None, Systemd(), AppConfig(park_dir=td, domain="test"), StubPhp())
+            with patch("shutil.which", return_value=None):
+                manager.teardown_nginx_sites()
+
+        self.assertNotIn(["nginx", "-t"], runner.ran)
 
 
 class DnsRegressionTests(unittest.TestCase):

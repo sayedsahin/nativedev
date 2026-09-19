@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -10,6 +11,22 @@ from pathlib import Path
 APP_DIR = Path.home() / ".config" / "nativedev"
 STATE_DIR = Path.home() / ".local" / "share" / "nativedev"
 CONFIG_FILE = APP_DIR / "config.json"
+LOCAL_DOMAIN_RE = re.compile(r"^[a-z0-9-]{1,30}$")
+
+
+def normalize_local_domain(value: object) -> str:
+    """Return NativeDev's canonical local TLD or reject unsafe input.
+
+    The value is persisted in user-writable config.json and later embedded in
+    privileged DNS/Nginx configuration, so this must be treated as a security
+    boundary rather than only a GUI validation rule.
+    """
+    if not isinstance(value, str):
+        raise ValueError("Local TLD must be a string")
+    normalized = value.strip().lower().lstrip(".")
+    if not LOCAL_DOMAIN_RE.fullmatch(normalized):
+        raise ValueError("Local TLD must contain 1-30 letters, numbers or hyphens")
+    return normalized
 
 
 @dataclass(slots=True)
@@ -30,6 +47,9 @@ class AppConfig:
     projects: dict[str, dict[str, str]] = field(default_factory=dict)
     developer_tools: dict[str, dict[str, str]] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        self.domain = normalize_local_domain(self.domain)
+
     @classmethod
     def load(cls) -> "AppConfig":
         try:
@@ -42,9 +62,20 @@ class AppConfig:
             values["projects"] = {}
         if not isinstance(values.get("developer_tools", {}), dict):
             values["developer_tools"] = {}
+        try:
+            values["domain"] = normalize_local_domain(values.get("domain", "test"))
+        except ValueError:
+            # A hand-edited/corrupted config must never become privileged DNS
+            # or Nginx input. Keep the rest of the user's settings and fall
+            # back only the unsafe TLD to NativeDev's safe default.
+            values["domain"] = "test"
         return cls(**values)
 
     def save(self) -> None:
+        # Re-validate here as well because callers can mutate dataclass fields
+        # after construction. This prevents an invalid in-memory TLD from ever
+        # being persisted for a later privileged operation.
+        self.domain = normalize_local_domain(self.domain)
         APP_DIR.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(asdict(self), indent=2) + "\n"
         fd, temp_name = tempfile.mkstemp(prefix="config-", suffix=".json.tmp", dir=APP_DIR)

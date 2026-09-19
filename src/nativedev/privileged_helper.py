@@ -23,6 +23,26 @@ from pathlib import Path
 PROTOCOL_VERSION = 24
 SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 
+LOCAL_DOMAIN_RE = re.compile(r"^[a-z0-9-]{1,30}$")
+NATIVEDEV_DNS_LINK_NAME = "nativedev0"
+NATIVEDEV_DNS_LINK_ADDR = "169.254.100.1/32"
+NATIVEDEV_DNS_LISTEN_ADDR = "127.0.0.1"
+NATIVEDEV_DNS_CONF_DIR = "/etc/nativedev/dnsmasq.d"
+NATIVEDEV_DNS_PIDFILE = "/run/nativedev-dnsmasq.pid"
+NATIVEDEV_NM_CONF_CONTENT = (
+    "# Managed by NativeDev Local Development\n"
+    "[main]\n"
+    "dns=dnsmasq\n"
+    "rc-manager=symlink\n"
+)
+
+NATIVEDEV_DNS_INSTALL_DESTINATIONS = frozenset({
+    "/etc/NetworkManager/conf.d/nativedev-dns.conf",
+    "/etc/NetworkManager/dnsmasq.d/nativedev-test.conf",
+    "/etc/nativedev/dnsmasq.d/wildcard.conf",
+    "/etc/systemd/system/nativedev-dns.service",
+})
+
 GITHUB_OWNER = "sayedsahin"
 GITHUB_REPOSITORY = "nativedev"
 GITHUB_LATEST_RELEASE_API = (
@@ -323,6 +343,134 @@ def _installable_file(value: str, uid: int | None = None) -> bool:
     if not match:
         return False
     return uid is None or int(match.group("uid")) == uid
+
+
+def _validated_local_domain(value: str) -> str:
+    if not isinstance(value, str) or not LOCAL_DOMAIN_RE.fullmatch(value):
+        raise RuntimeError("NativeDev local TLD is invalid")
+    return value
+
+
+def _expected_nativedev_dns_unit(domain: str) -> str:
+    domain = _validated_local_domain(domain)
+    ip_bin = _binary("ip")
+    resolvectl_bin = _binary("resolvectl")
+    dnsmasq_bin = _binary("dnsmasq")
+    return (
+        "# Managed by NativeDev Local Development. Do not edit by hand.\n"
+        "[Unit]\n"
+        f"Description=NativeDev wildcard DNS for *.{domain}\n"
+        "After=systemd-resolved.service network.target\n"
+        "Wants=systemd-resolved.service\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"ExecStartPre=-{ip_bin} link add {NATIVEDEV_DNS_LINK_NAME} type dummy\n"
+        f"ExecStartPre={ip_bin} link set {NATIVEDEV_DNS_LINK_NAME} up\n"
+        f"ExecStartPre={ip_bin} addr replace {NATIVEDEV_DNS_LINK_ADDR} dev {NATIVEDEV_DNS_LINK_NAME}\n"
+        f"ExecStartPre={resolvectl_bin} dns {NATIVEDEV_DNS_LINK_NAME} {NATIVEDEV_DNS_LISTEN_ADDR}\n"
+        f"ExecStartPre={resolvectl_bin} domain {NATIVEDEV_DNS_LINK_NAME} '~{domain}'\n"
+        f"ExecStart={dnsmasq_bin} --keep-in-foreground --no-resolv --no-hosts "
+        f"--bind-interfaces --listen-address={NATIVEDEV_DNS_LISTEN_ADDR} --port=53 "
+        f"--conf-file=/dev/null --conf-dir={NATIVEDEV_DNS_CONF_DIR} "
+        f"--pid-file={NATIVEDEV_DNS_PIDFILE}\n"
+        f"ExecStopPost=-{resolvectl_bin} revert {NATIVEDEV_DNS_LINK_NAME}\n"
+        f"ExecStopPost=-{ip_bin} link del {NATIVEDEV_DNS_LINK_NAME}\n"
+        "Restart=on-failure\n"
+        "RestartSec=2\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def _validate_native_dns_install_source(source: str, destination: str) -> str | None:
+    """Validate client-rendered NativeDev DNS files again as root.
+
+    The GUI process may read user-writable config, so an authenticated helper
+    must not treat a temp file as trusted merely because its destination is on
+    an allowlist. Only the exact NativeDev DNS templates are accepted here.
+    """
+    if destination not in NATIVEDEV_DNS_INSTALL_DESTINATIONS:
+        return None
+
+    path = Path(source)
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError("NativeDev DNS install source must be a regular file")
+        if path.stat().st_size > 64 * 1024:
+            raise RuntimeError("NativeDev DNS install source is unexpectedly large")
+        text = path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError(f"Unable to validate NativeDev DNS install source: {exc}") from exc
+
+    if destination == "/etc/NetworkManager/conf.d/nativedev-dns.conf":
+        if text != NATIVEDEV_NM_CONF_CONTENT:
+            raise RuntimeError("NativeDev NetworkManager DNS config does not match the trusted template")
+        return text
+
+    if destination in {
+        "/etc/NetworkManager/dnsmasq.d/nativedev-test.conf",
+        "/etc/nativedev/dnsmasq.d/wildcard.conf",
+    }:
+        match = re.fullmatch(
+            r"# Managed by NativeDev Local Development\naddress=/\.([a-z0-9-]{1,30})/127\.0\.0\.1\n",
+            text,
+        )
+        if match is None:
+            raise RuntimeError("NativeDev dnsmasq config does not match the trusted template")
+        _validated_local_domain(match.group(1))
+        return text
+
+    match = re.search(
+        r"^Description=NativeDev wildcard DNS for \*\.([a-z0-9-]{1,30})$",
+        text,
+        flags=re.MULTILINE,
+    )
+    if match is None:
+        raise RuntimeError("NativeDev DNS service does not contain a valid local TLD")
+    domain = _validated_local_domain(match.group(1))
+    if text != _expected_nativedev_dns_unit(domain):
+        raise RuntimeError("NativeDev DNS service does not match the trusted template")
+    return text
+
+
+def _execute_native_dns_file_install(request: dict, uid: int, timeout: int | None) -> subprocess.CompletedProcess:
+    """Install the already-validated DNS bytes from a root-owned staging file.
+
+    Re-reading the original user-owned temp path with /usr/bin/install after
+    validation would leave a TOCTOU window. Capture the validated bytes, stage
+    them in a root-owned 0600 file, then install exactly those bytes.
+    """
+    # Validate the complete RPC shape/allowlists first. This also verifies the
+    # source once for ordinary validate_operation() callers.
+    command_for_operation(request, uid)
+    source = request["source"]
+    destination = request["destination"]
+    mode = request["mode"]
+    text = _validate_native_dns_install_source(source, destination)
+    if text is None:
+        raise RuntimeError("NativeDev DNS file installer received a non-DNS destination")
+
+    temp_path: Path | None = None
+    try:
+        fd, name = tempfile.mkstemp(prefix="nativedev-root-dns-", suffix=".conf", dir="/tmp")
+        temp_path = Path(name)
+        with os.fdopen(fd, "wb") as handle:
+            payload = text.encode("utf-8")
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_path, 0o600)
+        return subprocess.run(
+            [_binary("install"), "-m", mode, str(temp_path), destination],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def _safe_mkcert_caroot(value, uid: int) -> Path | None:
@@ -1191,6 +1339,7 @@ def command_for_operation(request: dict, uid: int) -> list[str]:
             raise RuntimeError("Source is outside NativeDev's temporary directory")
         if not isinstance(destination, str) or not _installable_file(destination, uid):
             raise RuntimeError("Destination is outside NativeDev-installable files")
+        _validate_native_dns_install_source(source, destination)
         return [_binary("install"), "-m", mode, source, destination]
 
     if action == "file.mkdir":
@@ -1318,7 +1467,8 @@ def _mailpit_release_architecture() -> str:
     return arch
 
 
-def _mailpit_latest_asset_url(timeout: int | None) -> str:
+def _mailpit_latest_asset(timeout: int | None) -> tuple[str, str]:
+    """Return the official asset URL and GitHub-published SHA-256 digest."""
     request = urllib.request.Request(
         MAILPIT_RELEASE_API,
         headers={
@@ -1348,27 +1498,47 @@ def _mailpit_latest_asset_url(timeout: int | None) -> str:
             parsed.scheme != "https"
             or parsed.netloc != "github.com"
             or not parsed.path.startswith("/axllent/mailpit/releases/download/")
+            or not parsed.path.endswith("/" + expected_name)
         ):
             raise RuntimeError("Mailpit release asset URL is outside the official upstream repository")
-        return url
+        digest = asset.get("digest")
+        digest_match = GITHUB_RELEASE_DIGEST_RE.fullmatch(digest) if isinstance(digest, str) else None
+        if digest_match is None:
+            raise RuntimeError("Mailpit release asset is missing GitHub's SHA-256 digest")
+        return url, digest_match.group("digest").lower()
     raise RuntimeError(f"Mailpit release does not contain {expected_name}")
 
 
-def _download_mailpit_asset(url: str, destination: Path, timeout: int | None) -> None:
+def _download_mailpit_asset(
+    url: str, destination: Path, expected_sha256: str, timeout: int | None
+) -> None:
     network_timeout = 120 if timeout is None else max(10, min(timeout, 120))
     request = urllib.request.Request(url, headers={"User-Agent": "NativeDev"})
     total = 0
-    with urllib.request.urlopen(request, timeout=network_timeout) as response, destination.open("wb") as handle:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > MAILPIT_MAX_DOWNLOAD_BYTES:
-                raise RuntimeError("Mailpit release asset exceeds NativeDev's download size limit")
-            handle.write(chunk)
+    hasher = hashlib.sha256()
+    try:
+        with urllib.request.urlopen(request, timeout=network_timeout) as response, destination.open("wb") as handle:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAILPIT_MAX_DOWNLOAD_BYTES:
+                    raise RuntimeError("Mailpit release asset exceeds NativeDev's download size limit")
+                handle.write(chunk)
+                hasher.update(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
     if total == 0:
+        destination.unlink(missing_ok=True)
         raise RuntimeError("Downloaded Mailpit release asset is empty")
+    if hasher.hexdigest().lower() != expected_sha256.lower():
+        destination.unlink(missing_ok=True)
+        raise RuntimeError("Mailpit release asset SHA-256 verification failed")
+    os.chmod(destination, 0o600)
 
 
 def _execute_mailpit_install(timeout: int | None) -> subprocess.CompletedProcess:
@@ -1390,8 +1560,8 @@ def _execute_mailpit_install(timeout: int | None) -> subprocess.CompletedProcess
             extracted = temp / "mailpit"
             unit = temp / "mailpit.service"
 
-            url = _mailpit_latest_asset_url(timeout)
-            _download_mailpit_asset(url, archive, timeout)
+            url, expected_sha256 = _mailpit_latest_asset(timeout)
+            _download_mailpit_asset(url, archive, expected_sha256, timeout)
 
             with tarfile.open(archive, mode="r:gz") as bundle:
                 members = [
@@ -1966,6 +2136,9 @@ def execute_operation(request: dict, uid: int, timeout: int | None) -> subproces
     if action == "application.update":
         command_for_operation(request, uid)
         return _execute_application_update(timeout)
+
+    if action == "file.install" and request.get("destination") in NATIVEDEV_DNS_INSTALL_DESTINATIONS:
+        return _execute_native_dns_file_install(request, uid, timeout)
 
     if action == "mailpit.install":
         command_for_operation(request, uid)

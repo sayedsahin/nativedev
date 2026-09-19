@@ -1,3 +1,5 @@
+import hashlib
+import io
 import json
 import tempfile
 import inspect
@@ -58,6 +60,36 @@ class StubPhp:
     @staticmethod
     def developer_socket_path(version):
         return Path(f"/run/php/php{version}-fpm-nativedev-1000.sock")
+
+
+class ConfigSecurityTests(unittest.TestCase):
+    def test_local_domain_normalization_rejects_config_injection(self):
+        from nativedev.config import AppConfig, normalize_local_domain
+
+        self.assertEqual(normalize_local_domain(".DEV"), "dev")
+        with self.assertRaises(ValueError):
+            AppConfig(domain="test\nExecStartPre=/bin/true")
+
+    def test_config_load_falls_back_only_unsafe_domain(self):
+        from unittest.mock import patch
+        from nativedev.config import AppConfig
+
+        with tempfile.TemporaryDirectory() as td:
+            config_file = Path(td) / "config.json"
+            config_file.write_text(
+                json.dumps({
+                    "park_dir": "/srv/projects",
+                    "domain": "test\nExecStartPre=/bin/true",
+                    "https_enabled": True,
+                }),
+                encoding="utf-8",
+            )
+            with patch("nativedev.config.CONFIG_FILE", config_file):
+                config = AppConfig.load()
+
+        self.assertEqual(config.domain, "test")
+        self.assertEqual(config.park_dir, "/srv/projects")
+        self.assertTrue(config.https_enabled)
 
 
 class NginxRenderTests(unittest.TestCase):
@@ -457,11 +489,110 @@ class PrivilegedHelperTests(unittest.TestCase):
         # Wildcard DNS: dedicated dummy-link + dnsmasq unit, not the retired
         # NetworkManager conf.d snippets.
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.mkdir", "paths": ["/etc/nativedev/dnsmasq.d"]}))
-        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.install", "mode": "0644", "source": "/tmp/nativedev-dns-test/wildcard.conf", "destination": "/etc/nativedev/dnsmasq.d/wildcard.conf"}))
-        self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.install", "mode": "0644", "source": "/tmp/nativedev-dns-test/nativedev-dns.service", "destination": "/etc/systemd/system/nativedev-dns.service"}))
+        with tempfile.TemporaryDirectory(prefix="nativedev-dns-test-", dir="/tmp") as td:
+            root = Path(td)
+            wildcard = root / "wildcard.conf"
+            unit = root / "nativedev-dns.service"
+            wildcard.write_text(
+                "# Managed by NativeDev Local Development\naddress=/.test/127.0.0.1\n",
+                encoding="utf-8",
+            )
+            unit.write_text(
+                "# Managed by NativeDev Local Development. Do not edit by hand.\n"
+                "[Unit]\n"
+                "Description=NativeDev wildcard DNS for *.test\n"
+                "After=systemd-resolved.service network.target\n"
+                "Wants=systemd-resolved.service\n"
+                "\n"
+                "[Service]\n"
+                "Type=simple\n"
+                "ExecStartPre=-/usr/bin/ip link add nativedev0 type dummy\n"
+                "ExecStartPre=/usr/bin/ip link set nativedev0 up\n"
+                "ExecStartPre=/usr/bin/ip addr replace 169.254.100.1/32 dev nativedev0\n"
+                "ExecStartPre=/usr/bin/resolvectl dns nativedev0 127.0.0.1\n"
+                "ExecStartPre=/usr/bin/resolvectl domain nativedev0 '~test'\n"
+                "ExecStart=/usr/bin/dnsmasq --keep-in-foreground --no-resolv --no-hosts "
+                "--bind-interfaces --listen-address=127.0.0.1 --port=53 "
+                "--conf-file=/dev/null --conf-dir=/etc/nativedev/dnsmasq.d "
+                "--pid-file=/run/nativedev-dnsmasq.pid\n"
+                "ExecStopPost=-/usr/bin/resolvectl revert nativedev0\n"
+                "ExecStopPost=-/usr/bin/ip link del nativedev0\n"
+                "Restart=on-failure\n"
+                "RestartSec=2\n"
+                "\n"
+                "[Install]\n"
+                "WantedBy=multi-user.target\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.install", "mode": "0644", "source": str(wildcard), "destination": "/etc/nativedev/dnsmasq.d/wildcard.conf"}))
+            self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.install", "mode": "0644", "source": str(unit), "destination": "/etc/systemd/system/nativedev-dns.service"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "file.remove", "paths": ["/etc/systemd/system/nativedev-dns.service", "/etc/nativedev/dnsmasq.d/wildcard.conf"]}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.service", "verb": "enable", "now": True, "service": "nativedev-dns.service"}))
         self.assertTrue(self.operation_ok({"protocol": protocol, "action": "systemd.daemon_reload"}))
+
+    def test_rejects_tampered_dns_files_at_privilege_boundary(self):
+        protocol = 24
+        with tempfile.TemporaryDirectory(prefix="nativedev-dns-tamper-", dir="/tmp") as td:
+            root = Path(td)
+            wildcard = root / "wildcard.conf"
+            unit = root / "nativedev-dns.service"
+            wildcard.write_text(
+                "# Managed by NativeDev Local Development\n"
+                "address=/.test\nserver=/evil/127.0.0.1/127.0.0.1\n",
+                encoding="utf-8",
+            )
+            unit.write_text(
+                "# Managed by NativeDev Local Development. Do not edit by hand.\n"
+                "[Unit]\nDescription=NativeDev wildcard DNS for *.test\n"
+                "[Service]\nExecStartPre=/bin/true\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(self.operation_ok({
+                "protocol": protocol,
+                "action": "file.install",
+                "mode": "0644",
+                "source": str(wildcard),
+                "destination": "/etc/nativedev/dnsmasq.d/wildcard.conf",
+            }))
+            self.assertFalse(self.operation_ok({
+                "protocol": protocol,
+                "action": "file.install",
+                "mode": "0644",
+                "source": str(unit),
+                "destination": "/etc/systemd/system/nativedev-dns.service",
+            }))
+
+    def test_dns_install_executes_only_root_staged_validated_bytes(self):
+        import subprocess
+        from unittest.mock import patch
+        from nativedev.privileged_helper import execute_operation
+
+        content = "# Managed by NativeDev Local Development\naddress=/.test/127.0.0.1\n"
+        with tempfile.TemporaryDirectory(prefix="nativedev-dns-stage-", dir="/tmp") as td:
+            source = Path(td) / "wildcard.conf"
+            source.write_text(content, encoding="utf-8")
+            observed = {}
+
+            def fake_run(argv, **_kwargs):
+                observed["argv"] = list(argv)
+                observed["payload"] = Path(argv[-2]).read_text(encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            request = {
+                "protocol": 24,
+                "action": "file.install",
+                "mode": "0644",
+                "source": str(source),
+                "destination": "/etc/nativedev/dnsmasq.d/wildcard.conf",
+            }
+            with patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
+                 patch("nativedev.privileged_helper.subprocess.run", side_effect=fake_run):
+                result = execute_operation(request, uid=1000, timeout=30)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(observed["payload"], content)
+        self.assertNotEqual(observed["argv"][-2], str(source))
+        self.assertFalse(Path(observed["argv"][-2]).exists())
 
     def test_rejects_raw_commands_and_outside_packages(self):
         protocol = 24
@@ -870,6 +1001,59 @@ class ServiceCleanupTests(unittest.TestCase):
             "action": "mailpit.uninstall",
             "path": "/tmp/mailpit",
         })[0])
+
+    def test_mailpit_release_requires_github_sha256_digest(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import _mailpit_latest_asset
+
+        asset_name = "mailpit-linux-amd64.tar.gz"
+        asset_url = f"https://github.com/axllent/mailpit/releases/download/v1.2.3/{asset_name}"
+        digest = "a" * 64
+        payload = json.dumps({
+            "assets": [{
+                "name": asset_name,
+                "browser_download_url": asset_url,
+                "digest": f"sha256:{digest}",
+            }]
+        }).encode("utf-8")
+
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *_args): self.close()
+
+        with patch("nativedev.privileged_helper._mailpit_release_architecture", return_value="amd64"), \
+             patch("nativedev.privileged_helper.urllib.request.urlopen", return_value=Response(payload)):
+            self.assertEqual(_mailpit_latest_asset(30), (asset_url, digest))
+
+        missing = json.dumps({
+            "assets": [{"name": asset_name, "browser_download_url": asset_url}]
+        }).encode("utf-8")
+        with patch("nativedev.privileged_helper._mailpit_release_architecture", return_value="amd64"), \
+             patch("nativedev.privileged_helper.urllib.request.urlopen", return_value=Response(missing)):
+            with self.assertRaisesRegex(RuntimeError, "SHA-256 digest"):
+                _mailpit_latest_asset(30)
+
+    def test_mailpit_download_is_verified_before_use(self):
+        from unittest.mock import patch
+        from nativedev.privileged_helper import _download_mailpit_asset
+
+        payload = b"verified-mailpit-release-archive"
+        digest = hashlib.sha256(payload).hexdigest()
+
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *_args): self.close()
+
+        with tempfile.TemporaryDirectory() as td:
+            archive = Path(td) / "mailpit.tar.gz"
+            with patch("nativedev.privileged_helper.urllib.request.urlopen", return_value=Response(payload)):
+                _download_mailpit_asset("https://github.com/example", archive, digest, 30)
+            self.assertEqual(archive.read_bytes(), payload)
+
+            with patch("nativedev.privileged_helper.urllib.request.urlopen", return_value=Response(payload)):
+                with self.assertRaisesRegex(RuntimeError, "SHA-256 verification failed"):
+                    _download_mailpit_asset("https://github.com/example", archive, "0" * 64, 30)
+            self.assertFalse(archive.exists())
 
     def test_mailpit_service_is_localhost_only_and_non_root(self):
         from nativedev.privileged_helper import MAILPIT_SERVICE_CONTENT

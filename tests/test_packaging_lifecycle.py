@@ -10,6 +10,18 @@ POSTRM = ROOT / "packaging" / "debian" / "postrm"
 
 
 class PackagingLifecycleTests(unittest.TestCase):
+    def test_debian_maintainer_scripts_use_lf_line_endings(self):
+        for name in ("postinst", "prerm", "postrm"):
+            path = ROOT / "packaging" / "debian" / name
+            with self.subTest(script=name):
+                self.assertNotIn(b"\r", path.read_bytes())
+
+    def test_privileged_helper_uses_lf_line_endings(self):
+        path = ROOT / "src" / "nativedev" / "privileged_helper.py"
+        data = path.read_bytes()
+        self.assertTrue(data.startswith(b"#!/usr/bin/python3\n"))
+        self.assertNotIn(b"\r", data)
+
     def test_prerm_removes_only_generated_python_cache_from_package_tree(self):
         text = PRERM.read_text(encoding="utf-8")
         self.assertIn("/usr/lib/nativedev/app", text)

@@ -22,6 +22,31 @@ done
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
 command -v dpkg-deb >/dev/null 2>&1 || { echo "dpkg-deb is required to build the Debian package" >&2; exit 1; }
 
+# Debian maintainer scripts are executed directly by dpkg.  A CRLF shebang
+# becomes e.g. /bin/sh\r on Linux and makes package removal/upgrade fail with
+# a misleading "No such file or directory" error.  Refuse to build such a
+# package even if an editor or checkout policy reintroduces CRLF later.
+for maintainer_script in postinst prerm postrm; do
+  maintainer_path="$ROOT/packaging/debian/$maintainer_script"
+  [ -f "$maintainer_path" ] || { echo "Missing Debian maintainer script: $maintainer_path" >&2; exit 1; }
+  if LC_ALL=C grep -q $'\r' "$maintainer_path"; then
+    echo "Debian maintainer script contains CRLF line endings: $maintainer_path" >&2
+    echo "Convert it to LF before building the package." >&2
+    exit 1
+  fi
+done
+
+# The installed privileged helper is also executed directly by pkexec.  Its
+# Python shebang therefore has the same LF-only requirement as Debian
+# maintainer scripts; CRLF would turn /usr/bin/python3 into /usr/bin/python3\r.
+PRIVILEGED_HELPER="$ROOT/src/nativedev/privileged_helper.py"
+[ -f "$PRIVILEGED_HELPER" ] || { echo "Missing privileged helper: $PRIVILEGED_HELPER" >&2; exit 1; }
+if LC_ALL=C grep -q $'\r' "$PRIVILEGED_HELPER"; then
+  echo "Privileged helper contains CRLF line endings: $PRIVILEGED_HELPER" >&2
+  echo "Convert it to LF before building the package." >&2
+  exit 1
+fi
+
 VERSION="$(PYTHONPATH="$ROOT/src" python3 -c 'from nativedev import __version__; print(__version__)')"
 PYPROJECT_VERSION="$(python3 - "$ROOT/pyproject.toml" <<'PY'
 import re

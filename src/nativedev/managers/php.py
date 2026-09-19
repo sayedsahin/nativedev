@@ -12,6 +12,10 @@ from ..system import AptManager, CommandRunner, DistroInfo, SystemdManager
 
 
 SURY_SOURCE_FILE = Path("/etc/apt/sources.list.d/nativedev-sury-php.sources")
+# Detection-only: NativeDev never configures the Launchpad PPA anymore (see
+# expected_multi_php_backend below), but an existing manual/previous-NativeDev
+# setup may still have it, and multi_php_backend() needs to recognize that as
+# "a different backend is already active" rather than silently ignoring it.
 LEGACY_ONDREJ_PPA_URIS = (
     "https://ppa.launchpadcontent.net/ondrej/php/ubuntu",
     "http://ppa.launchpadcontent.net/ondrej/php/ubuntu",
@@ -155,8 +159,10 @@ class PhpManager:
 
     @property
     def expected_multi_php_backend(self) -> str:
-        if self.distro.is_ubuntu_family:
-            return "sury"
+        # Both families now use packages.sury.org (Ondřej Surý migrated
+        # Ubuntu's packages there too; the old Launchpad PPA only still
+        # publishes for jammy/noble and stops there). One backend, one
+        # keyring, for any Debian- or Ubuntu-family distro.
         if self.distro.is_debian_family:
             return "sury"
         return ""
@@ -164,10 +170,13 @@ class PhpManager:
     def multi_php_backend(self) -> str:
         """Return the active multi-PHP repository backend, if any.
 
-        Debian-family systems use packages.sury.org while Ubuntu and Ubuntu
-        derivatives use ppa:ondrej/php. Detection follows active APT source
-        semantics rather than filenames, so existing user-managed PPA/source
-        files are recognized as well.
+        Both Debian- and Ubuntu-family systems now use packages.sury.org
+        ("sury"). "ondrej" (the old ppa:ondrej/php Launchpad PPA) is still
+        recognized here for detection purposes only -- an existing manual
+        or previous-NativeDev setup may still have it -- but NativeDev never
+        configures it anew. Detection follows active APT source semantics
+        rather than filenames, so existing user-managed PPA/source files are
+        recognized as well.
         """
         found: set[str] = set()
         for path in self._source_files():

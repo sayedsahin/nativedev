@@ -247,7 +247,16 @@ def _read_os_release(path: Path = Path("/etc/os-release")) -> dict[str, str]:
 
 
 def _php_multi_repo_target() -> tuple[str, str]:
-    """Resolve the fixed multi-PHP backend from the actual root-side distro."""
+    """Resolve the fixed multi-PHP backend from the actual root-side distro.
+
+    Both Debian- and Ubuntu-family systems now use packages.sury.org: Ondřej
+    Surý has been migrating Ubuntu's packages there too (the old
+    ppa:ondrej/php Launchpad PPA only still publishes for jammy and noble,
+    and stops there -- e.g. Ubuntu 26.04 "resolute" has no packages on it at
+    all, which is a hard `E: ... does not have a Release file`, not a
+    signing problem). One backend, one keyring, parameterized only by the
+    codename actually on this host.
+    """
     data = _read_os_release()
     distro_id = data.get("ID", "").lower()
     id_like = set(data.get("ID_LIKE", "").lower().split())
@@ -2112,154 +2121,64 @@ def execute_operation(request: dict, uid: int, timeout: int | None) -> subproces
         backend, codename = _validate_php_multi_repo_request(request)
         command_for_operation(request, uid)
 
-        if backend == "sury":
-            if action == "php.multi_repo.remove":
-                try:
-                    SURY_SOURCE_FILE.unlink(missing_ok=True)
-                    return subprocess.CompletedProcess([], 0, "", "")
-                except OSError as exc:
-                    return subprocess.CompletedProcess([], 1, "", str(exc))
+        # Both Debian- and Ubuntu-family systems land here now (see
+        # _php_multi_repo_target). Best-effort clean up the separate
+        # Ondřej-PPA-specific source/keyring an earlier NativeDev version
+        # may have written here, before this unification -- nothing should
+        # be left pointing at a repo we no longer configure.
+        ONDREJ_SOURCE_FILE.unlink(missing_ok=True)
+        ONDREJ_KEYRING.unlink(missing_ok=True)
 
-            previous = SURY_SOURCE_FILE.read_bytes() if SURY_SOURCE_FILE.exists() else None
-            try:
-                with tempfile.TemporaryDirectory(prefix="nativedev-root-sury-", dir="/tmp") as temp_dir:
-                    temp = Path(temp_dir)
-                    package = temp / "debsuryorg-archive-keyring.deb"
-                    urllib.request.urlretrieve(SURY_KEYRING_URL, package)
-                    proc = subprocess.run(
-                        [_binary("apt-get"), "install", "-y", str(package)],
-                        text=True,
-                        capture_output=True,
-                        timeout=timeout,
-                    )
-                    if proc.returncode != 0:
-                        return proc
-
-                    source = (
-                        "Types: deb\n"
-                        "URIs: https://packages.sury.org/php/\n"
-                        f"Suites: {codename}\n"
-                        "Components: main\n"
-                        "Signed-By: /usr/share/keyrings/debsuryorg-archive-keyring.gpg\n"
-                    )
-                    source_tmp = temp / "nativedev-sury-php.sources"
-                    source_tmp.write_text(source, encoding="utf-8")
-                    install_proc = subprocess.run(
-                        [_binary("install"), "-m", "0644", str(source_tmp), str(SURY_SOURCE_FILE)],
-                        text=True,
-                        capture_output=True,
-                        timeout=timeout,
-                    )
-                    if install_proc.returncode != 0:
-                        if previous is None:
-                            SURY_SOURCE_FILE.unlink(missing_ok=True)
-                        else:
-                            SURY_SOURCE_FILE.write_bytes(previous)
-                            os.chmod(SURY_SOURCE_FILE, 0o644)
-                    return install_proc
-            except Exception:
-                if previous is None:
-                    SURY_SOURCE_FILE.unlink(missing_ok=True)
-                else:
-                    SURY_SOURCE_FILE.write_bytes(previous)
-                    os.chmod(SURY_SOURCE_FILE, 0o644)
-                raise
-
-        # Ubuntu/Ubuntu-derivative path. This used to shell out to
-        # add-apt-repository, but that tool's PPA signing-key fetch only
-        # triggers for the `ppa:owner/name` shorthand -- it is silently
-        # skipped when given an explicit `--sourceslist "deb ..."` line
-        # (which is required here to control the exact upstream Ubuntu
-        # suite on derivatives whose own codename isn't a Launchpad series).
-        # That produced a repo with no key at all: apt added it, then
-        # rejected it as unsigned (NO_PUBKEY) on the next update, and
-        # multi-PHP silently fell back to whatever system PHP was already
-        # there. Fetching the key explicitly and writing a Signed-By source,
-        # the same way the Sury path above already does, fixes that and
-        # drops the software-properties-common dependency entirely.
         if action == "php.multi_repo.remove":
             try:
-                ONDREJ_SOURCE_FILE.unlink(missing_ok=True)
+                SURY_SOURCE_FILE.unlink(missing_ok=True)
                 return subprocess.CompletedProcess([], 0, "", "")
             except OSError as exc:
                 return subprocess.CompletedProcess([], 1, "", str(exc))
 
-        previous = ONDREJ_SOURCE_FILE.read_bytes() if ONDREJ_SOURCE_FILE.exists() else None
+        previous = SURY_SOURCE_FILE.read_bytes() if SURY_SOURCE_FILE.exists() else None
         try:
-            with tempfile.TemporaryDirectory(prefix="nativedev-root-ondrej-", dir="/tmp") as temp_dir:
+            with tempfile.TemporaryDirectory(prefix="nativedev-root-sury-", dir="/tmp") as temp_dir:
                 temp = Path(temp_dir)
-                try:
-                    with urllib.request.urlopen(ONDREJ_KEY_URL, timeout=timeout) as response:
-                        key_text = response.read()
-                except OSError as exc:
-                    return subprocess.CompletedProcess([], 1, "", f"Could not fetch Ondřej PPA signing key: {exc}")
-
-                gpg_bin = shutil.which("gpg", path=SAFE_PATH)
-                if not gpg_bin:
-                    install_gnupg = subprocess.run(
-                        [_binary("apt-get"), "install", "-y", "gnupg"],
-                        text=True,
-                        capture_output=True,
-                        timeout=timeout,
-                    )
-                    if install_gnupg.returncode != 0:
-                        return install_gnupg
-                    gpg_bin = shutil.which("gpg", path=SAFE_PATH)
-                if not gpg_bin:
-                    return subprocess.CompletedProcess([], 127, "", "gpg is unavailable")
-
-                dearmor = subprocess.run(
-                    [gpg_bin, "--dearmor"],
-                    input=key_text,
-                    capture_output=True,
-                    timeout=timeout,
-                )
-                if dearmor.returncode != 0:
-                    return subprocess.CompletedProcess(
-                        [],
-                        dearmor.returncode,
-                        dearmor.stdout.decode("utf-8", "replace"),
-                        dearmor.stderr.decode("utf-8", "replace"),
-                    )
-                keyring_tmp = temp / "nativedev-ondrej-php-archive-keyring.gpg"
-                keyring_tmp.write_bytes(dearmor.stdout)
-                install_key_proc = subprocess.run(
-                    [_binary("install"), "-m", "0644", str(keyring_tmp), str(ONDREJ_KEYRING)],
+                package = temp / "debsuryorg-archive-keyring.deb"
+                urllib.request.urlretrieve(SURY_KEYRING_URL, package)
+                proc = subprocess.run(
+                    [_binary("apt-get"), "install", "-y", str(package)],
                     text=True,
                     capture_output=True,
                     timeout=timeout,
                 )
-                if install_key_proc.returncode != 0:
-                    return install_key_proc
+                if proc.returncode != 0:
+                    return proc
 
                 source = (
                     "Types: deb\n"
-                    f"URIs: {ONDREJ_PPA_URI}\n"
+                    "URIs: https://packages.sury.org/php/\n"
                     f"Suites: {codename}\n"
                     "Components: main\n"
-                    f"Signed-By: {ONDREJ_KEYRING}\n"
+                    "Signed-By: /usr/share/keyrings/debsuryorg-archive-keyring.gpg\n"
                 )
-                source_tmp = temp / "nativedev-ondrej-php.sources"
+                source_tmp = temp / "nativedev-sury-php.sources"
                 source_tmp.write_text(source, encoding="utf-8")
                 install_proc = subprocess.run(
-                    [_binary("install"), "-m", "0644", str(source_tmp), str(ONDREJ_SOURCE_FILE)],
+                    [_binary("install"), "-m", "0644", str(source_tmp), str(SURY_SOURCE_FILE)],
                     text=True,
                     capture_output=True,
                     timeout=timeout,
                 )
                 if install_proc.returncode != 0:
                     if previous is None:
-                        ONDREJ_SOURCE_FILE.unlink(missing_ok=True)
+                        SURY_SOURCE_FILE.unlink(missing_ok=True)
                     else:
-                        ONDREJ_SOURCE_FILE.write_bytes(previous)
-                        os.chmod(ONDREJ_SOURCE_FILE, 0o644)
+                        SURY_SOURCE_FILE.write_bytes(previous)
+                        os.chmod(SURY_SOURCE_FILE, 0o644)
                 return install_proc
         except Exception:
             if previous is None:
-                ONDREJ_SOURCE_FILE.unlink(missing_ok=True)
+                SURY_SOURCE_FILE.unlink(missing_ok=True)
             else:
-                ONDREJ_SOURCE_FILE.write_bytes(previous)
-                os.chmod(ONDREJ_SOURCE_FILE, 0o644)
+                SURY_SOURCE_FILE.write_bytes(previous)
+                os.chmod(SURY_SOURCE_FILE, 0o644)
             raise
 
     argv = command_for_operation(request, uid)

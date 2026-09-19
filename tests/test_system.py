@@ -431,60 +431,65 @@ class PrivilegedHelperTests(unittest.TestCase):
             "UBUNTU_CODENAME": "noble",
         }
         with patch("nativedev.privileged_helper._read_os_release", return_value=release):
-            self.assertEqual(_php_multi_repo_target(), ("ondrej", "noble"))
+            self.assertEqual(_php_multi_repo_target(), ("sury", "noble"))
 
-    def test_php_multi_repo_ubuntu_configure_fetches_key_and_writes_signed_deb822_source(self):
-        # Regression test for the bug where add-apt-repository's own
-        # PPA key-fetch never triggers when given --sourceslist, silently
-        # producing an unsigned/unusable repo (NO_PUBKEY on the next
-        # `apt update`). The fix fetches the signing key explicitly and
-        # writes a Signed-By deb822 source, the same way Sury's path
-        # already does -- no add-apt-repository/software-properties-common
-        # involved at all anymore.
+    def test_php_multi_repo_configure_uses_unified_sury_backend_for_ubuntu_codename(self):
+        # Regression test for the actual upstream boundary: the old
+        # ppa:ondrej/php Launchpad PPA only ever published for jammy/noble
+        # and stops there (Ubuntu 26.04 "resolute" gets a hard
+        # "does not have a Release file", not a signing problem). Ondřej
+        # Surý has migrated Ubuntu's packages to packages.sury.org instead
+        # (same domain/keyring already used for Debian), so both families
+        # now go through the one sury code path, parameterized only by the
+        # codename actually on this host.
         from unittest.mock import patch, MagicMock
         from pathlib import Path as _Path
-        from nativedev.privileged_helper import execute_operation
         import subprocess
+        from nativedev.privileged_helper import execute_operation
 
         request = {
             "protocol": 24,
             "action": "php.multi_repo.configure",
-            "backend": "ondrej",
-            "codename": "noble",
+            "backend": "sury",
+            "codename": "resolute",
         }
-
-        fake_response = MagicMock()
-        fake_response.__enter__.return_value.read.return_value = b"FAKE-ARMORED-KEY"
-        fake_response.__exit__.return_value = False
 
         installed: dict[str, bytes] = {}
 
+        def fake_urlretrieve(url, filename):
+            _Path(filename).write_bytes(b"FAKE-KEYRING-DEB")
+
         def fake_run(argv, **kwargs):
-            if argv[:2] == ["/usr/bin/gpg", "--dearmor"]:
-                self.assertEqual(kwargs.get("input"), b"FAKE-ARMORED-KEY")
-                return subprocess.CompletedProcess(argv, 0, stdout=b"FAKE-BINARY-KEYRING", stderr=b"")
+            if argv[0] == "/usr/bin/apt-get":
+                return subprocess.CompletedProcess(argv, 0, "", "")
             if argv[0] == "/usr/bin/install":
                 src, dest = argv[-2], argv[-1]
-                content = _Path(src).read_bytes()
-                installed[dest] = content
+                installed[dest] = _Path(src).read_bytes()
                 return subprocess.CompletedProcess(argv, 0, "", "")
             raise AssertionError(f"unexpected subprocess.run call: {argv}")
 
-        with patch("nativedev.privileged_helper._validate_php_multi_repo_request", return_value=("ondrej", "noble")), \
-             patch("nativedev.privileged_helper.shutil.which", return_value="/usr/bin/gpg"), \
+        legacy_source_mock = MagicMock()
+        legacy_keyring_mock = MagicMock()
+
+        with patch("nativedev.privileged_helper._validate_php_multi_repo_request", return_value=("sury", "resolute")), \
              patch("nativedev.privileged_helper._binary", side_effect=lambda name: f"/usr/bin/{name}"), \
-             patch("nativedev.privileged_helper.urllib.request.urlopen", return_value=fake_response), \
-             patch("nativedev.privileged_helper.subprocess.run", side_effect=fake_run):
+             patch("nativedev.privileged_helper.urllib.request.urlretrieve", side_effect=fake_urlretrieve), \
+             patch("nativedev.privileged_helper.subprocess.run", side_effect=fake_run), \
+             patch("nativedev.privileged_helper.ONDREJ_SOURCE_FILE", legacy_source_mock), \
+             patch("nativedev.privileged_helper.ONDREJ_KEYRING", legacy_keyring_mock):
             result = execute_operation(request, uid=1000, timeout=120)
 
         self.assertEqual(result.returncode, 0)
-        source_dest = "/etc/apt/sources.list.d/nativedev-ondrej-php.sources"
-        keyring_dest = "/usr/share/keyrings/nativedev-ondrej-php-archive-keyring.gpg"
-        self.assertEqual(installed[keyring_dest], b"FAKE-BINARY-KEYRING")
+        source_dest = "/etc/apt/sources.list.d/nativedev-sury-php.sources"
+        self.assertIn(source_dest, installed)
         source_text = installed[source_dest].decode("utf-8")
-        self.assertIn("URIs: https://ppa.launchpadcontent.net/ondrej/php/ubuntu", source_text)
-        self.assertIn("Suites: noble", source_text)
-        self.assertIn(f"Signed-By: {keyring_dest}", source_text)
+        self.assertIn("URIs: https://packages.sury.org/php/", source_text)
+        self.assertIn("Suites: resolute", source_text)
+        # Any leftover source/keyring from the retired Ondřej-specific path
+        # (an earlier NativeDev version) is cleaned up as a side effect:
+        # both ONDREJ_SOURCE_FILE and ONDREJ_KEYRING get an unlink attempt.
+        legacy_source_mock.unlink.assert_called_once_with(missing_ok=True)
+        legacy_keyring_mock.unlink.assert_called_once_with(missing_ok=True)
 
     def test_apt_remove_fails_immediately_when_dpkg_is_busy(self):
         from unittest.mock import patch
@@ -1868,7 +1873,7 @@ class ProviderMigrationTests(unittest.TestCase):
         manager.installed_versions = lambda: ["8.4"]
         self.assertEqual(manager.provider(), "system")
 
-    def test_php_multi_repo_backend_is_sury_on_debian_and_ondrej_on_ubuntu_derivative(self):
+    def test_php_multi_repo_backend_is_sury_on_debian_and_ubuntu_derivative(self):
         from nativedev.system import DistroInfo
 
         debian = PhpManager(None, object(), None, DistroInfo("debian", "Debian", "13", "trixie", (), "Debian 13"))
@@ -1879,8 +1884,8 @@ class ProviderMigrationTests(unittest.TestCase):
         self.assertEqual(debian.expected_multi_php_backend, "sury")
         self.assertEqual(debian.multi_php_repository_name, "Sury")
         self.assertTrue(debian.multi_php_supported)
-        self.assertEqual(ubuntu_derivative.expected_multi_php_backend, "ondrej")
-        self.assertIn(ubuntu_derivative.multi_php_repository_name, ("Ondřej PHP PPA", "Sury"))
+        self.assertEqual(ubuntu_derivative.expected_multi_php_backend, "sury")
+        self.assertEqual(ubuntu_derivative.multi_php_repository_name, "Sury")
         self.assertTrue(ubuntu_derivative.multi_php_supported)
 
     def test_multi_php_supported_does_not_hardcode_specific_codenames(self):
